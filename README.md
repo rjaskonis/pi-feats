@@ -4,6 +4,35 @@
 
 `pi-feats` turns Pi into an operational workspace without replacing Pi's native configuration model. It adds persistent profiles, a policy-controlled sandbox, HTTP and browser interfaces, application runtimes, scheduled work, Git-backed Skill discovery, and command-line administration.
 
+## Contents
+
+- [Glossary](#glossary)
+- [Features](#features)
+- [Command cookbook](#command-cookbook)
+- [Included extensions](#included-extensions)
+- [Installation](#installation)
+- [Development](#development)
+- [Security](#security)
+- [Package layout](#package-layout)
+
+## Glossary
+
+| Term | Meaning |
+| --- | --- |
+| **Profile** | An isolated Pi workspace with its own settings, credentials, model state, sessions, `SOUL.md`, and optional local Skills. |
+| **Sandbox** | A Nono policy that constrains a named profile's process, filesystem, network, and credentials. |
+| **Application** | An integration runtime that accepts external payloads, routes them into Pi sessions, and can return an integration-specific response. |
+| **Handler** | TypeScript code owned by one Application. Inbound handlers normalize payloads; outbound handlers shape responses; transforms enrich or modify data. |
+| **Identity Key mapping** | A rule that maps an external identity to an Application profile and session strategy. A single `*` mapping can be an explicit fallback. |
+| **Handoff** | Private context retained when an Application rolls a conversation into a replacement session. |
+| **Guardrail** | An ordered policy instruction executed at an input, tool, or output lifecycle stage. |
+| **Shared Skill** | A Skill stored in the main Pi agent directory and selectively exposed to profiles. |
+| **Profile Skill** | A Skill stored in one profile directory and unavailable to other profiles unless explicitly copied or imported. |
+| **Skill Source** | A Git-backed staging catalog. Synchronizing it discovers Skills but does not activate them. |
+| **Pulse** | A persistent scheduled prompt, reminder, cron job, one-time job, or heartbeat bound to a profile and session. |
+| **Remote Host** | A registered SSH target that runs its own Pi command, profiles, packages, and resources. |
+| **Pi Console WebUI** | The authenticated browser operations cockpit for the API Server, profiles, Applications, Skills, Pulses, logs, and terminal. |
+
 ## Features
 
 ### Profiles and sandboxing
