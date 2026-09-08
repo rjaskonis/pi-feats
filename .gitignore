@@ -1,0 +1,4 @@
+node_modules/
+extensions/pi-console-webui/.next/
+extensions/api-server/adapters/*/logs/
+extensions/api-server/adapters/*/handoffs/

@@ -1,0 +1,5 @@
+import { NextResponse } from "next/server";
+import { authenticated } from "@/lib/auth";
+import { isAdminTarget, readAdminConfig, writeAdminConfig } from "@/lib/admin-config";
+export async function GET(_: Request, { params }: { params: Promise<{ target: string }> }) { if (!(await authenticated())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 }); const { target } = await params; if (!isAdminTarget(target)) return NextResponse.json({ error: "Not found" }, { status: 404 }); return NextResponse.json({ config: await readAdminConfig(target) }); }
+export async function PUT(request: Request, { params }: { params: Promise<{ target: string }> }) { if (!(await authenticated())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 }); const { target } = await params; if (!isAdminTarget(target)) return NextResponse.json({ error: "Not found" }, { status: 404 }); try { return NextResponse.json({ config: await writeAdminConfig(target, await request.json()) }); } catch (error) { return NextResponse.json({ error: error instanceof Error ? error.message : "Invalid configuration" }, { status: 400 }); } }

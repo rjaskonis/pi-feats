@@ -1,0 +1,13 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { Card, CardTitle } from "@/components/ui/card";
+import { Switch } from "@/components/ui/switch";
+
+type Package = { name: string; version?: string; description?: string; enabled: boolean; installed: boolean };
+export function PackageResources({ profile, initial }: { profile: string; initial?: { packages: Package[] } }) {
+  const [items, setItems] = useState<Package[]>(initial?.packages ?? []), [notice, setNotice] = useState("");
+  const load = async () => { try { const response = await fetch(`/api/pi/profiles/${encodeURIComponent(profile)}/packages`); if (!response.ok) throw new Error("Unable to load packages."); setItems((await response.json() as { packages: Package[] }).packages); } catch (error) { setNotice((error as Error).message); } };
+  useEffect(() => { if (initial) { setItems(initial.packages); return; } void load(); }, [profile, initial]);
+  return <Card><div><CardTitle>Packages</CardTitle><p className="text-sm text-zinc-500">Globally installed npm packages. Enable them independently for this profile.</p></div>{notice && <p className="mt-3 text-sm text-amber-700">{notice}</p>}<div className="mt-5 overflow-x-auto"><table className="w-full text-left text-sm"><thead className="border-b border-zinc-200 text-zinc-500"><tr><th className="p-3">Name</th><th className="p-3">Version</th><th className="p-3">Description</th><th className="p-3">Status</th></tr></thead><tbody>{items.map((item) => <tr key={item.name} className="border-b border-zinc-100"><td className="p-3 font-medium">{item.name}</td><td className="p-3 text-zinc-500">{item.version ?? "—"}</td><td className="max-w-md truncate p-3 text-zinc-500">{item.description ?? "—"}</td><td className="p-3">{item.installed ? <label className="flex items-center gap-2"><Switch checked={item.enabled} onCheckedChange={async (enabled) => { try { const response = await fetch(`/api/pi/profiles/${encodeURIComponent(profile)}/packages/${encodeURIComponent(item.name)}`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ enabled }) }); if (!response.ok) throw new Error("Unable to update package."); await load(); } catch (error) { setNotice((error as Error).message); } }}/><span className={item.enabled ? "text-emerald-700/70" : "text-rose-700/70"}>{item.enabled ? "Enabled" : "Disabled"}</span></label> : <span className="text-rose-700/70">Not installed</span>}</td></tr>)}{items.length === 0 && <tr><td colSpan={4} className="p-5 text-zinc-500">No globally installed packages.</td></tr>}</tbody></table></div></Card>;
+}
