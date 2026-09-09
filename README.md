@@ -396,10 +396,10 @@ The `remote:<name>` form forwards the rest of the command to the selected remote
 
 ## Installation
 
-Install a pinned Git release or commit:
+Install the current default branch:
 
 ```bash
-pi install git:github.com/rjaskonis/pi-feats@<tag-or-commit>
+pi install git:github.com/rjaskonis/pi-feats
 pi list
 ```
 
@@ -414,11 +414,17 @@ Package operations follow normal Pi commands:
 ```bash
 pi list
 pi config
-pi update git:github.com/rjaskonis/pi-feats@<new-tag-or-commit>
+pi update --extensions
 pi remove git:github.com/rjaskonis/pi-feats
 ```
 
-Pi records installed packages in `~/.pi/agent/settings.json`. Pin production installations to a release tag or commit; Pi will not advance a pinned Git ref during a generic package update.
+Pi records installed packages in `~/.pi/agent/settings.json`. To pin a production installation after a release tag or commit is available, install that exact ref:
+
+```bash
+pi install git:github.com/rjaskonis/pi-feats@<tag-or-commit>
+```
+
+Pi does not advance a pinned Git ref during a generic package update.
 
 ## Development
 
