@@ -65,8 +65,8 @@ pi remote:production profile support
 
 # Forward ordinary Pi commands to the remote runtime
 pi remote:production profile support skills list
-pi remote:production --profile support skills enable incident-response
-pi remote:production --profile support sessions list
+pi remote:production profile support skills enable incident-response
+pi remote:production profile support sessions list
 pi remote:production packages list
 
 # Open a shell in the selected remote host or container runtime
@@ -212,8 +212,8 @@ Guardrails apply model-driven policy at defined points in the Pi lifecycle. They
 ```bash
 pi guardrails list
 pi guardrails validate
-pi --profile support guardrails disable sensitive-output
-pi --profile support guardrails enable sensitive-output
+pi profile support guardrails disable sensitive-output
+pi profile support guardrails enable sensitive-output
 ```
 
 ### Shared Skills, profile Skills, and Skill Sources
@@ -233,11 +233,11 @@ Skills remain explicit resources rather than hidden package behavior. A profile 
 ```bash
 # Inspect the default or a selected profile
 pi skills list
-pi --profile support skills list
+pi profile support skills list
 
 # Control a profile-local or shared Skill according to profile policy
-pi --profile support skills enable incident-response
-pi --profile support skills disable experimental-tooling
+pi profile support skills enable incident-response
+pi profile support skills disable experimental-tooling
 ```
 
 **Skill Sources** are Git-backed catalogs, intentionally separated from active Skills. Synchronizing a source only downloads and indexes its available `SKILL.md` documents; it does not give new instructions to any profile. An administrator must preview a Skill and explicitly import it into the selected profile through the Console or API. This staging model prevents a repository update from silently changing agent behavior.
@@ -265,7 +265,7 @@ POST /api/profiles/:profile/skills/from-source/:identifier/:name
 
 - Inspect tools, Skills, extensions, sessions, packages, and profile resources from the terminal.
 - Enable and disable resources without editing JSON by hand.
-- Manage named profiles with `pi profile ...` and select them with `--profile`.
+- Manage named profiles consistently with `pi profile <name> [pi arguments]`.
 - Preserve profile session isolation while supporting session listing, opening, renaming, and resume workflows.
 
 ### Sequential Workflow
@@ -288,24 +288,19 @@ pi profile delete support --force
 
 # Start a profile interactively
 pi profile support
-pi --profile support
 
 # Run a normal Pi command inside a profile
 pi profile support tools list
 pi profile support skills list
+pi profile support skills enable incident-response
+pi profile support tools disable bash
 pi profile support extensions list
 pi profile support sessions list
 pi profile support packages list
 
-# Equivalent --profile form
-pi --profile support tools list
-pi --profile support skills enable incident-response
-pi --profile support tools disable bash
-
 # Resume or open a profile session
 pi profile resume support
 pi profile open support <session-id>
-pi --profile support --session <session-id>
 ```
 
 ### Resources, packages, and sessions
@@ -375,8 +370,8 @@ pi remote list
 pi remote:production profile support
 pi remote:production profile support tools list
 pi remote:production profile support skills list
-pi remote:production --profile support skills enable incident-response
-pi remote:production --profile support sessions list
+pi remote:production profile support skills enable incident-response
+pi remote:production profile support sessions list
 pi remote:production packages list
 pi remote:production bash
 
