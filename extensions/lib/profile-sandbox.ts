@@ -14,6 +14,10 @@ function runtimeModulesPath(runtimeEntry: string) {
 
 function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { shared: boolean; profile: boolean }) {
   const agentDir = dirname(dirname(profileDir));
+  // This module is distributed inside <package>/extensions/lib. Allow the
+  // package root, not only ~/.pi/agent/extensions, so Git and npm packages
+  // remain readable inside a profile sandbox.
+  const packageRoot = dirname(dirname(__dirname));
   const pulseFiles = [join(agentDir, "pulse.db"), join(agentDir, "pulse.db-wal"), join(agentDir, "pulse.db-shm")];
   return {
     extends: "node-dev",
@@ -22,6 +26,8 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
     network: { network_profile: null },
     filesystem: {
       read: [
+        packageRoot,
+        // Locally managed extensions can coexist with this package.
         "$HOME/.pi/agent/extensions",
         // Globally installed Pi npm packages are shared but never writable by profiles.
         "$HOME/.pi/agent/npm",

@@ -3,7 +3,7 @@ import { Box, render, Text } from "ink";
 import React from "react";
 import { existsSync } from "node:fs";
 import { readFile, readdir, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join, relative } from "node:path";
+import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
 type ListKind = "tools" | "skills" | "extensions";
@@ -240,34 +240,55 @@ async function extensionRows(paths: string[], exclusions: string[]): Promise<Row
   return rows.sort((a, b) => a[0].localeCompare(b[0]));
 }
 
-function packageFromPath(path: string, resourceRoot: string): string | undefined {
-  const prefix = join(resourceRoot, "npm", "node_modules") + "/";
-  if (!path.startsWith(prefix)) return undefined;
-  const parts = path.slice(prefix.length).split("/"); return parts[0]?.startsWith("@") ? `${parts[0]}/${parts[1] ?? ""}` : parts[0];
+type ConfiguredPackage = { source: string; base: string; name: string; manifest?: { version?: string; description?: string; pi?: { extensions?: unknown } } };
+
+function packageBase(source: string, resourceRoot: string): string | undefined {
+  if (source.startsWith("npm:")) return join(resourceRoot, "npm", "node_modules", source.slice(4));
+  if (source.startsWith(".") || source.startsWith("/")) return resolve(resourceRoot, source);
+  if (!source.startsWith("git:") && !/^(?:https?|ssh):\/\//.test(source)) return undefined;
+  let remote = source.replace(/^git:/, "");
+  const ref = remote.lastIndexOf("@");
+  if (ref > remote.lastIndexOf("/")) remote = remote.slice(0, ref);
+  remote = remote.replace(/^https?:\/\//, "").replace(/^ssh:\/\/git@/, "").replace(/^git@/, "").replace(/^([^/:]+):/, "$1/").replace(/\.git$/, "");
+  return join(resourceRoot, "git", remote);
 }
-async function configuredPackageExtensions(resourceRoot: string, settings: Record<string, unknown>): Promise<string[]> {
-  const packages = Array.isArray(settings.packages) ? settings.packages.filter((value): value is string => typeof value === "string").map((value) => value.replace(/^npm:/, "")) : [];
-  const paths: string[] = [];
-  for (const name of packages) try { const base = join(resourceRoot, "npm", "node_modules", name), manifest = JSON.parse(await readFile(join(base, "package.json"), "utf8")) as { pi?: { extensions?: unknown } }; for (const extension of Array.isArray(manifest.pi?.extensions) ? manifest.pi.extensions : []) if (typeof extension === "string") paths.push(join(base, extension)); } catch {}
+
+async function configuredPackages(resourceRoot: string, settings: Record<string, unknown>): Promise<ConfiguredPackage[]> {
+  const sources = Array.isArray(settings.packages) ? settings.packages.filter((value): value is string => typeof value === "string") : [];
+  const packages: ConfiguredPackage[] = [];
+  for (const source of sources) {
+    const base = packageBase(source, resourceRoot);
+    if (!base) continue;
+    try {
+      const manifest = JSON.parse(await readFile(join(base, "package.json"), "utf8")) as ConfiguredPackage["manifest"] & { name?: string };
+      packages.push({ source, base, name: manifest?.name ?? source, manifest });
+    } catch {
+      packages.push({ source, base, name: source.replace(/^npm:/, "") });
+    }
+  }
+  return packages;
+}
+
+async function configuredPackageExtensions(resourceRoot: string, settings: Record<string, unknown>): Promise<Array<{ path: string; packageName: string }>> {
+  const paths: Array<{ path: string; packageName: string }> = [];
+  for (const pkg of await configuredPackages(resourceRoot, settings)) {
+    for (const extension of Array.isArray(pkg.manifest?.pi?.extensions) ? pkg.manifest.pi.extensions : []) {
+      if (typeof extension === "string") paths.push({ path: join(pkg.base, extension), packageName: pkg.name });
+    }
+  }
   return paths;
 }
+
 async function packageToolSources(resourceRoot: string, settings: Record<string, unknown>, names: string[]): Promise<Map<string, string>> {
   const sources = new Map<string, string>();
-  for (const path of await configuredPackageExtensions(resourceRoot, settings)) try { const source = await readFile(path, "utf8"), packageName = packageFromPath(path, resourceRoot); if (packageName) for (const name of names) if (source.includes(`"${name}"`) || source.includes(`'${name}'`) || source.includes(`\`${name}\``)) sources.set(name, packageName); } catch {}
+  for (const { path, packageName } of await configuredPackageExtensions(resourceRoot, settings)) try { const source = await readFile(path, "utf8"); for (const name of names) if (source.includes(`"${name}"`) || source.includes(`'${name}'`) || source.includes(`\`${name}\``)) sources.set(name, packageName); } catch {}
   return sources;
 }
 
 async function packageRows(resourceRoot: string, settings: Record<string, unknown>): Promise<Row[]> {
-  const configured = Array.isArray(settings.packages) ? settings.packages.filter((entry): entry is string => typeof entry === "string") : [];
-  const packagesDir = join(resourceRoot, "npm", "node_modules");
-  const names = new Set(configured.map((entry) => entry.replace(/^npm:/, "")));
-  // npm/package.json lists packages installed explicitly by Pi. node_modules
-  // also contains transitive dependencies, which are not manageable packages.
-  try { const manifest = JSON.parse(await readFile(join(resourceRoot, "npm", "package.json"), "utf8")) as { dependencies?: Record<string, string> }; for (const name of Object.keys(manifest.dependencies ?? {})) names.add(name); } catch {}
-  return Promise.all([...names].sort().map(async (name) => {
-    try { const manifest = JSON.parse(await readFile(join(packagesDir, name, "package.json"), "utf8")) as { version?: string; description?: string }; return [name, configured.includes(`npm:${name}`) || configured.includes(name) ? "enabled" : "disabled", `${manifest.version ?? "unknown version"}${manifest.description ? ` · ${manifest.description}` : ""}`] as Row; }
-    catch { return [name, "disabled", "package metadata unavailable"] as Row; }
-  }));
+  return (await configuredPackages(resourceRoot, settings))
+    .map((pkg) => [pkg.name, existsSync(join(pkg.base, "package.json")) ? "enabled" : "disabled", pkg.manifest ? `${pkg.manifest.version ?? "unknown version"}${pkg.manifest.description ? ` · ${pkg.manifest.description}` : ""}` : "package metadata unavailable"] as Row)
+    .sort((left, right) => left[0].localeCompare(right[0]));
 }
 
 async function applyPackageAction(action: PackageAction) {
@@ -513,12 +534,14 @@ export default async function (pi: ExtensionAPI) {
       const configuredPaths = rawEntries.filter((value) => !/^[!+\-]/.test(value));
       const exclusions = rawEntries.filter((value) => value.startsWith("!"));
       const catalogRoot = join(resourceRoot, kind);
+      const packageExtensions = await configuredPackageExtensions(resourceRoot, settings);
+      const packagePaths = new Map(packageExtensions.map(({ path, packageName }) => [path, packageName]));
       const paths = kind === "skills"
         ? [...new Set([catalogRoot, ...configuredPaths])]
-        : [...new Set([...(configuredPaths.length > 0 ? configuredPaths : [catalogRoot]), ...await configuredPackageExtensions(resourceRoot, settings)])];
+        : [...new Set([...(configuredPaths.length > 0 ? configuredPaths : [catalogRoot]), ...packageExtensions.map(({ path }) => path)])];
       const rows: SourceRow[] = (kind === "skills" ? await skillRows(paths, catalogRoot, settings, exclusions) : await extensionRows(paths, exclusions)).map((row) => {
-        const packageName = packageFromPath(row[2], resourceRoot);
-        const source = packageName ? `npm: ${packageName}` : (row[2].startsWith(join(resourceRoot, "skills")) ? "Shared" : row[2].includes("/profiles/") ? "Profile" : "Local");
+        const packageName = packagePaths.get(row[2]);
+        const source = packageName ? `Package: ${packageName}` : (row[2].startsWith(join(resourceRoot, "skills")) ? "Shared" : row[2].includes("/profiles/") ? "Profile" : "Local");
         return [row[0], row[1], source, row[2]];
       });
       await renderAndClose(React.createElement(SourceTable, { title: kind.toUpperCase(), detailHeader: "PATH", rows }));

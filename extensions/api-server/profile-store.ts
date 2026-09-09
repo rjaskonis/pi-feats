@@ -110,16 +110,30 @@ export class ProfileStore {
     return !values || values.includes("*") || values.includes(name);
   }
 
+  private packageBase(source: string): string | undefined {
+    if (source.startsWith("npm:")) return join(this.agentDir, "npm", "node_modules", source.slice(4));
+    if (source.startsWith(".") || source.startsWith("/")) return resolve(this.agentDir, source);
+    if (!source.startsWith("git:") && !/^(?:https?|ssh):\/\//.test(source)) return undefined;
+    let remote = source.replace(/^git:/, ""), ref = remote.lastIndexOf("@");
+    if (ref > remote.lastIndexOf("/")) remote = remote.slice(0, ref);
+    remote = remote.replace(/^https?:\/\//, "").replace(/^ssh:\/\/git@/, "").replace(/^git@/, "").replace(/^([^/:]+):/, "$1/").replace(/\.git$/, "");
+    return join(this.agentDir, "git", remote);
+  }
+
+  private async configuredPackages(settings: ProfileSettings): Promise<Array<{ source: string; base: string; name: string; manifest?: { version?: string; description?: string; pi?: { extensions?: unknown } } }>> {
+    const sources = Array.isArray(settings.packages) ? settings.packages.filter((value): value is string => typeof value === "string") : [];
+    const packages: Array<{ source: string; base: string; name: string; manifest?: { version?: string; description?: string; pi?: { extensions?: unknown } } }> = [];
+    for (const source of sources) {
+      const base = this.packageBase(source); if (!base) continue;
+      try { const manifest = JSON.parse(await readFile(join(base, "package.json"), "utf8")) as { name?: string; version?: string; description?: string; pi?: { extensions?: unknown } }; packages.push({ source, base, name: manifest.name ?? source, manifest }); }
+      catch { packages.push({ source, base, name: source.replace(/^npm:/, "") }); }
+    }
+    return packages;
+  }
+
   async packages(profile: string): Promise<Package[]> {
     const settings = await this.readSettings(profile);
-    const enabled = new Set(Array.isArray(settings.packages) ? settings.packages.filter((value): value is string => typeof value === "string").map((value) => value.replace(/^npm:/, "")) : []);
-    let dependencies: Record<string, string> = {};
-    try { dependencies = (JSON.parse(await readFile(join(this.agentDir, "npm", "package.json"), "utf8")) as { dependencies?: Record<string, string> }).dependencies ?? {}; } catch {}
-    const names = new Set([...Object.keys(dependencies), ...enabled]);
-    return Promise.all([...names].sort().map(async (name) => {
-      try { const manifest = JSON.parse(await readFile(join(this.agentDir, "npm", "node_modules", name, "package.json"), "utf8")) as { version?: string; description?: string }; return { name, version: manifest.version, description: manifest.description, enabled: enabled.has(name), installed: true }; }
-      catch { return { name, enabled: enabled.has(name), installed: false }; }
-    }));
+    return (await this.configuredPackages(settings)).map((pkg) => ({ name: pkg.name, version: pkg.manifest?.version, description: pkg.manifest?.description, enabled: existsSync(join(pkg.base, "package.json")), installed: existsSync(join(pkg.base, "package.json")) })).sort((left, right) => left.name.localeCompare(right.name));
   }
 
   async setPackage(profile: string, name: string, enabled: boolean): Promise<Package> {
@@ -134,12 +148,10 @@ export class ProfileStore {
   }
 
   private async packageExtensions(settings: ProfileSettings): Promise<Array<{ name: string; path: string; package: string }>> {
-    const packages = Array.isArray(settings.packages) ? settings.packages.filter((value): value is string => typeof value === "string").map((value) => value.replace(/^npm:/, "")) : [];
     const entries: Array<{ name: string; path: string; package: string }> = [];
-    for (const packageName of packages) try {
-      const base = join(this.agentDir, "npm", "node_modules", packageName), manifest = JSON.parse(await readFile(join(base, "package.json"), "utf8")) as { pi?: { extensions?: unknown } };
-      for (const extension of Array.isArray(manifest.pi?.extensions) ? manifest.pi.extensions : []) if (typeof extension === "string") entries.push({ name: extension.split("/").pop()?.replace(/\.(?:ts|js)$/, "") ?? packageName, path: join(base, extension), package: packageName });
-    } catch {}
+    for (const pkg of await this.configuredPackages(settings)) {
+      for (const extension of Array.isArray(pkg.manifest?.pi?.extensions) ? pkg.manifest.pi.extensions : []) if (typeof extension === "string") entries.push({ name: extension.split("/").pop()?.replace(/\.(?:ts|js)$/, "") ?? pkg.name, path: join(pkg.base, extension), package: pkg.name });
+    }
     return entries;
   }
 

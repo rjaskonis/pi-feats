@@ -99,19 +99,9 @@ async function readJson(path: string): Promise<ProfileSettings> {
 }
 
 function sharedResources(root: string, policy: ProfilePolicy = {}, localSkillsDir?: string) {
-  const extensionsDir = join(root, "extensions");
-  const extensions = existsSync(extensionsDir)
-    ? readdirSync(extensionsDir, { withFileTypes: true }).flatMap((entry) => {
-      const name = entry.name.replace(/\.(?:ts|js)$/, "");
-      const loadable = (entry.isFile() && /\.(?:ts|js)$/.test(entry.name))
-        || (entry.isDirectory() && (existsSync(join(extensionsDir, entry.name, "index.ts")) || existsSync(join(extensionsDir, entry.name, "index.js"))));
-      const required = name === "profiles" || name === "api-server";
-      const enabled = !policy.enabledExtensions || policy.enabledExtensions.includes("*") || policy.enabledExtensions.includes(name);
-      return loadable && (required || enabled) ? [join(extensionsDir, entry.name)] : [];
-    })
-    : [];
+  // Extensions are loaded through Pi package settings. Do not materialize paths
+  // from the native extensions directory: a Git package lives outside it.
   return {
-    extensions,
     skills: [
       ...(policy.skillSources?.profile === true && localSkillsDir ? (!policy.enabledProfileSkills || policy.enabledProfileSkills.includes("*") ? [localSkillsDir] : policy.enabledProfileSkills.map((name) => join(localSkillsDir, name)).filter(existsSync)) : []),
       ...(policy.skillSources?.shared !== false ? (!policy.enabledSkills || policy.enabledSkills.includes("*") ? [join(root, "skills")] : policy.enabledSkills.map((name) => join(root, "skills", name)).filter(existsSync)) : []),
@@ -121,9 +111,19 @@ function sharedResources(root: string, policy: ProfilePolicy = {}, localSkillsDi
   };
 }
 
+function profilePackageSources(root: string, value: unknown): unknown {
+  if (!Array.isArray(value)) return value;
+  // Pi resolves a relative local package against the settings file that owns
+  // it. Profiles have a different settings directory, so preserve the root
+  // package target as an absolute path when they inherit it.
+  return value.map((source) => typeof source === "string" && source.startsWith(".") && existsSync(resolve(root, source)) ? resolve(root, source) : source);
+}
+
 function profileSettings(root: string, base: ProfileSettings, localSkillsDir: string): ProfileSettings {
+  const packages = profilePackageSources(root, base.packages);
   return {
     ...base,
+    ...(packages === undefined ? {} : { packages }),
     ...sharedResources(root, { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], enabledExtensions: ["*"], skillSources: { shared: true, profile: false } }, localSkillsDir),
     defaultTools: ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"],
     profile: {
@@ -271,6 +271,8 @@ async function syncProfileResources(name: string) {
   const settingsPath = join(profileDir(name), "settings.json");
   const root = rootAgentDir();
   const settings = await readJson(settingsPath);
+  const packages = profilePackageSources(root, settings.packages);
+  if (packages !== undefined) settings.packages = packages;
   Object.assign(settings, sharedResources(root, settings.profile, join(profileDir(name), "skills")));
   await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
   await removeLegacyBootstrapExtensions(profileDir(name));
@@ -284,12 +286,10 @@ async function reexecWithProfile(name: string, args: string[]) {
   const target = name === "default" ? root : profileDir(name);
   if (name !== "default") await migrateLegacySandboxRuntime(target);
   await syncProfileResources(name);
-  const extensionArgs = ["-e", join(root, "extensions", "profiles.ts")];
-  const wantsSessionCommand = args.some((arg) => arg === "--list-sessions" || arg === "--list-sessions=true")
-    || args.some((arg, index) => arg === "sessions" && (args[index + 1] === "list" || args[index + 1] === "rename"));
-  if (wantsSessionCommand) extensionArgs.push("-e", join(root, "extensions", "cli-resources.ts"));
+  // The profile inherits the package source recorded in its settings. Loading
+  // it normally keeps Git, npm, and local package installations portable.
   const sessionArgs = name === "default" ? [] : ["--session-dir", join(target, "sessions")];
-  const piArgs = [resolve(process.argv[1]), ...extensionArgs, ...sessionArgs, ...args];
+  const piArgs = [resolve(process.argv[1]), ...sessionArgs, ...args];
   // The default profile is intentionally never sandboxed. Named profiles run
   // directly in their own persistent directory; nono enforces their policy.
   const sandbox = await isSandboxEnabled(target, name === "default");
