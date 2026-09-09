@@ -6,7 +6,7 @@ import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promi
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { ensureProfileSandbox, isSandboxEnabled, migrateLegacySandboxRuntime, sandboxedCommand } from "./lib/profile-sandbox.ts";
+import { ensureNonoAvailable, ensureProfileSandbox, isSandboxEnabled, migrateLegacySandboxRuntime, sandboxedCommand } from "./lib/profile-sandbox.ts";
 import { profileEnvironment } from "./lib/profile-env.ts";
 import { handleRemoteCli, REMOTE_COMMAND_NAMES } from "./lib/remote-hosts.ts";
 
@@ -194,6 +194,7 @@ async function createProfile(name: string) {
   if (!validProfileName(name)) fail("invalid name; use letters, numbers, hyphens, or underscores (max. 64 characters).");
   if (name === "default") fail("default is the primary profile and cannot be created.");
   if (reservedProfileNames.has(name.toLowerCase())) fail(`'${name}' is reserved as a Pi command and cannot be used as a profile name.`);
+  await ensureNonoAvailable();
   const root = rootAgentDir();
   const destination = profileDir(name);
   if (existsSync(destination)) fail(`profile '${name}' already exists.`);

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
-import { access, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 
@@ -53,9 +54,9 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
   };
 }
 
-async function run(command: string, args: string[]): Promise<void> {
+async function run(command: string, args: string[], stdio: "ignore" | "inherit" = "ignore"): Promise<void> {
   await new Promise<void>((resolveRun, reject) => {
-    const child = spawn(command, args, { stdio: "ignore" });
+    const child = spawn(command, args, { stdio });
     child.once("error", reject);
     child.once("exit", (code) => {
       if (code === 0) resolveRun();
@@ -64,7 +65,51 @@ async function run(command: string, args: string[]): Promise<void> {
   });
 }
 
+function nonoExecutable(): string {
+  const local = join(homedir(), ".local", "bin", "nono");
+  return existsSync(local) ? local : "nono";
+}
+
+async function hasNono(): Promise<boolean> {
+  try { await run(nonoExecutable(), ["--version"]); return true; }
+  catch { return false; }
+}
+
+async function confirmNonoInstall(): Promise<boolean> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("Nono is required for sandboxed Profiles. Install it with: curl -fsSL https://nono.sh/install.sh | sh");
+  }
+  const { createInterface } = await import("node:readline/promises");
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await prompt.question("Nono is required for sandboxed Profiles. Install it now? [y/N] ");
+    return /^(?:y|yes)$/i.test(answer.trim());
+  } finally {
+    prompt.close();
+  }
+}
+
+async function installNono(): Promise<void> {
+  const directory = await mkdtemp(join(tmpdir(), "pi-feats-nono-"));
+  const installer = join(directory, "install.sh");
+  try {
+    await run("curl", ["--fail", "--show-error", "--silent", "--location", "--proto", "=https", "--tlsv1.2", "https://nono.sh/install.sh", "--output", installer], "inherit");
+    await run("sh", [installer], "inherit");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+/** Ensures the Nono binary required by sandboxed Profiles is available. */
+export async function ensureNonoAvailable(): Promise<void> {
+  if (await hasNono()) return;
+  if (!await confirmNonoInstall()) throw new Error("Nono is required for sandboxed Profiles. Profile operation cancelled.");
+  await installNono();
+  if (!await hasNono()) throw new Error("Nono installation completed but the executable is unavailable. Add ~/.local/bin to PATH and retry.");
+}
+
 export async function ensureProfileSandbox(profileDir: string, runtimeEntry: string): Promise<string> {
+  await ensureNonoAvailable();
   const path = nonoConfigPath(profileDir);
   let settings: ProfileSandboxSettings = {};
   try { settings = JSON.parse(await readFile(join(profileDir, "settings.json"), "utf8")) as ProfileSandboxSettings; } catch {}
@@ -85,7 +130,7 @@ export async function ensureProfileSandbox(profileDir: string, runtimeEntry: str
     if (current?.meta?.description === managedDescription) await writePolicy(policy);
   }
   await access(path);
-  await run("nono", ["profile", "validate", path]);
+  await run(nonoExecutable(), ["profile", "validate", path]);
   return path;
 }
 

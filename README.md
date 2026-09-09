@@ -432,7 +432,9 @@ Requirements:
 
 - Node.js 22 or later
 - A working Pi installation
-- Nono, when using sandboxed profiles
+- `curl` when Nono is not already installed
+
+The package `postinstall` script installs Nono automatically when it is missing. Nono is required only for sandboxed Profiles. If a Profile operation still finds Nono unavailable, it asks for confirmation before downloading the official installer; non-interactive runs instead show the manual installation command.
 
 Install dependencies and build the WebUI:
 

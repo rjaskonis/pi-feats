@@ -14,7 +14,8 @@
   },
   "scripts": {
     "build:web": "cd extensions/pi-console-webui && ../../node_modules/.bin/next build",
-    "postinstall": "npm run build:web",
+    "ensure:nono": "sh scripts/install-nono.sh",
+    "postinstall": "npm run ensure:nono && npm run build:web",
     "test": "npm run build:web"
   },
   "dependencies": {
