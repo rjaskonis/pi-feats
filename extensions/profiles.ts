@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, render, Text } from "ink";
 import React from "react";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -200,14 +200,10 @@ async function listProfiles() {
   app.unmount();
 }
 
-async function removeLegacyBootstrapExtensions(destination: string) {
-  const extensions = join(destination, "extensions");
-  if (!existsSync(extensions)) return;
-  const entries = await readdir(extensions, { withFileTypes: true });
-  const legacyNames = new Set(["profiles.ts", "list-sessions", "node_modules"]);
-  if (entries.every((entry) => legacyNames.has(entry.name) && entry.isSymbolicLink())) {
-    await rm(extensions, { recursive: true, force: true });
-  }
+async function removeProfileRuntimeArtifacts(destination: string) {
+  // These locations belonged to the former per-profile extension bootstrap.
+  // A profile is a workspace, never a package or extension installation root.
+  await Promise.all(["extensions", "git", "npm", "node_modules"].map((name) => rm(join(destination, name), { recursive: true, force: true })));
 }
 
 async function createProfile(name: string) {
@@ -300,7 +296,7 @@ async function syncProfileResources(name: string) {
   if (settings.profile) delete settings.profile.enabledExtensions;
   Object.assign(settings, sharedResources(root, settings.profile, join(profileDir(name), "skills")));
   await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
-  await removeLegacyBootstrapExtensions(profileDir(name));
+  await removeProfileRuntimeArtifacts(profileDir(name));
 }
 
 async function reexecWithProfile(name: string, args: string[]) {
