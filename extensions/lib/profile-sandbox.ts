@@ -13,7 +13,7 @@ function runtimeModulesPath(runtimeEntry: string) {
   return "$HOME/.local/share/pi-node/node-*";
 }
 
-function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { shared: boolean; profile: boolean }) {
+function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { shared: boolean; profile: boolean }, sharedRuntimeSources: string[]) {
   const agentDir = dirname(dirname(profileDir));
   // This module is distributed inside <package>/extensions/lib. Allow the
   // package root, not only ~/.pi/agent/extensions, so Git and npm packages
@@ -28,15 +28,17 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
     filesystem: {
       read: [
         packageRoot,
-        // Locally managed extensions can coexist with this package.
-        "$HOME/.pi/agent/extensions",
-        // Globally installed Pi npm packages are shared but never writable by profiles.
-        "$HOME/.pi/agent/npm",
-        "$HOME/.pi/agent/prompts",
-        "$HOME/.pi/agent/themes",
-        "$HOME/.pi/agent/guardrails",
-        "$HOME/.pi/agent/AGENTS.md",
-        ...(skillSources.shared ? ["$HOME/.pi/agent/skills"] : []),
+        // The default runtime owns extensions and packages. Profiles may read
+        // them to execute shared commands and tools, but never write to them.
+        join(agentDir, "extensions"),
+        join(agentDir, "git"),
+        join(agentDir, "npm"),
+        join(agentDir, "prompts"),
+        join(agentDir, "themes"),
+        join(agentDir, "guardrails"),
+        join(agentDir, "AGENTS.md"),
+        ...sharedRuntimeSources,
+        ...(skillSources.shared ? [join(agentDir, "skills")] : []),
         // SSH resolves the current UID through these public account maps.
         // This does not expose credentials or private keys.
         "/etc/passwd",
@@ -108,13 +110,13 @@ export async function ensureNonoAvailable(): Promise<void> {
   if (!await hasNono()) throw new Error("Nono installation completed but the executable is unavailable. Add ~/.local/bin to PATH and retry.");
 }
 
-export async function ensureProfileSandbox(profileDir: string, runtimeEntry: string): Promise<string> {
+export async function ensureProfileSandbox(profileDir: string, runtimeEntry: string, sharedRuntimeSources: string[] = []): Promise<string> {
   await ensureNonoAvailable();
   const path = nonoConfigPath(profileDir);
   let settings: ProfileSandboxSettings = {};
   try { settings = JSON.parse(await readFile(join(profileDir, "settings.json"), "utf8")) as ProfileSandboxSettings; } catch {}
   const skillSources = { shared: settings.profile?.skillSources?.shared !== false, profile: settings.profile?.skillSources?.profile === true };
-  const policy = nonoPolicy(profileDir, runtimeEntry, skillSources);
+  const policy = nonoPolicy(profileDir, runtimeEntry, skillSources, sharedRuntimeSources);
   const writePolicy = async (value: unknown) => {
     const temporary = path + "." + process.pid + ".tmp";
     await writeFile(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 384 });

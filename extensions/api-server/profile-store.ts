@@ -131,20 +131,20 @@ export class ProfileStore {
     return packages;
   }
 
-  async packages(profile: string): Promise<Package[]> {
-    const settings = await this.readSettings(profile);
+  async packages(_profile: string): Promise<Package[]> {
+    const settings = await this.readSettings("default");
     return (await this.configuredPackages(settings)).map((pkg) => ({ name: pkg.name, version: pkg.manifest?.version, description: pkg.manifest?.description, enabled: existsSync(join(pkg.base, "package.json")), installed: existsSync(join(pkg.base, "package.json")) })).sort((left, right) => left.name.localeCompare(right.name));
   }
 
-  async setPackage(profile: string, name: string, enabled: boolean): Promise<Package> {
+  async setPackage(_profile: string, name: string, enabled: boolean): Promise<Package> {
     if (!/^(?:@[-a-zA-Z0-9_.]+\/)?[-a-zA-Z0-9_.]+$/.test(name)) throw Object.assign(new Error("Invalid package name"), { status: 400 });
     if (!existsSync(join(this.agentDir, "npm", "node_modules", name, "package.json"))) throw Object.assign(new Error("Package is not installed globally"), { status: 404 });
-    const settings = await this.readSettings(profile), entry = `npm:${name}`;
+    const settings = await this.readSettings("default"), entry = `npm:${name}`;
     const packages = Array.isArray(settings.packages) ? settings.packages.filter((value): value is string => typeof value === "string" && value !== name && value !== entry) : [];
     if (enabled) packages.push(entry);
     if (packages.length) settings.packages = packages; else delete settings.packages;
-    await this.writeSettings(profile, settings);
-    return (await this.packages(profile)).find((item) => item.name === name)!;
+    await this.writeSettings("default", settings);
+    return (await this.packages("default")).find((item) => item.name === name)!;
   }
 
   private async packageExtensions(settings: ProfileSettings): Promise<Array<{ name: string; path: string; package: string }>> {
@@ -167,13 +167,14 @@ export class ProfileStore {
 
   async resources(profile: string, kind: ResourceKind): Promise<Resource[]> {
     const settings = await this.readSettings(profile);
+    const runtimeSettings = profile === "default" ? settings : await this.readSettings("default");
     if (kind === "skills") return this.skillResources(profile, settings);
     if (kind === "tools") {
-      const sources = await this.packageToolSources(settings, this.extensionTools);
+      const sources = await this.packageToolSources(runtimeSettings, this.extensionTools);
       const names = new Set([...this.extensionTools, ...sources.keys()]);
       return [...BUILTIN_TOOLS.map((name) => ({ name, kind, source: "builtin" as const, enabled: this.enabled(settings, kind, name) })), ...[...names].sort().map((name) => sources.has(name) ? ({ name, kind, source: "package" as const, package: sources.get(name), enabled: this.enabled(settings, kind, name) }) : ({ name, kind, source: "extension" as const, enabled: this.enabled(settings, kind, name) }))];
     }
-    return [...(await this.names("extensions")).map(({ name, path }) => ({ name, kind, path, source: "shared" as const, enabled: protectedExtensions.has(name) ? true : this.enabled(settings, kind, name, path), protected: protectedExtensions.has(name) || undefined })), ...(await this.packageExtensions(settings)).map(({ name, path, package: packageName }) => ({ name, kind, path, source: "package" as const, package: packageName, enabled: true }))];
+    return [...(await this.names("extensions")).map(({ name, path }) => ({ name, kind, path, source: "shared" as const, enabled: protectedExtensions.has(name) ? true : this.enabled(runtimeSettings, kind, name, path), protected: protectedExtensions.has(name) || undefined })), ...(await this.packageExtensions(runtimeSettings)).map(({ name, path, package: packageName }) => ({ name, kind, path, source: "package" as const, package: packageName, enabled: true }))];
   }
 
   async resource(profile: string, kind: ResourceKind, name: string, source?: "shared" | "profile"): Promise<Resource> {
@@ -182,27 +183,25 @@ export class ProfileStore {
     return resource;
   }
 
-  private async extensionPaths(policy: ProfilePolicy): Promise<string[]> {
-    const entries = await this.names("extensions");
-    return entries
-      .filter(({ name }) => protectedExtensions.has(name) || !policy.enabledExtensions || policy.enabledExtensions.includes("*") || policy.enabledExtensions.includes(name))
-      .map(({ path }) => path);
-  }
-
   private async skillPaths(name: string, settings: ProfileSettings): Promise<string[]> {
     return (await this.skillResources(name, settings)).filter((skill) => skill.enabled).map((skill) => skill.path!).filter(Boolean);
   }
 
   private async materializeResources(name: string, settings: ProfileSettings): Promise<ProfileSettings> {
-    const profile = settings.profile ?? {};
-    return {
+    const profile = { ...(settings.profile ?? {}) };
+    if (name !== "default") delete profile.enabledExtensions;
+    const normalized: ProfileSettings = {
       ...settings,
-      extensions: await this.extensionPaths(profile),
       skills: await this.skillPaths(name, settings),
       prompts: [join(this.agentDir, "prompts")],
       themes: [join(this.agentDir, "themes")],
       profile,
     };
+    if (name !== "default") {
+      delete normalized.extensions;
+      delete normalized.packages;
+    }
+    return normalized;
   }
 
   async writeSettings(name: string, settings: ProfileSettings): Promise<ProfileSettings> {
@@ -251,14 +250,17 @@ export class ProfileStore {
   async setResource(profile: string, kind: ResourceKind, name: string, enabled: boolean, source?: "shared" | "profile"): Promise<Resource> {
     const current = await this.resource(profile, kind, name, source);
     if (current.protected && !enabled) throw Object.assign(new Error("This extension is required and cannot be disabled."), { status: 422 });
-    const settings = await this.readSettings(profile);
+    // Extensions are shared runtime resources, so toggling one always updates
+    // the default runtime rather than materializing it in a profile workspace.
+    const settingsProfile = kind === "extensions" ? "default" : profile;
+    const settings = await this.readSettings(settingsProfile);
     const key: PolicyKey = kind === "skills" ? (current.source === "profile" ? "enabledProfileSkills" : "enabledSkills") : policyKey[kind];
     const allNames = (await this.resources(profile, kind)).filter((item) => kind !== "skills" || item.source === current.source).map((item) => item.name);
     const selected = new Set(settings.profile?.[key]?.includes("*") || !settings.profile?.[key] ? allNames : settings.profile![key]);
     if (enabled) selected.add(name);
     else selected.delete(name);
     settings.profile = { ...(settings.profile ?? {}), [key]: [...selected].sort() };
-    await this.writeSettings(profile, settings);
+    await this.writeSettings(settingsProfile, settings);
     return this.resource(profile, kind, name, source);
   }
 
@@ -277,11 +279,12 @@ export class ProfileStore {
     await mkdir(join(destination, "sessions"), { recursive: true });
     let base: ProfileSettings = {};
     try { base = await this.readSettings("default"); } catch {}
+    const { packages: _packages, extensions: _extensions, ...profileBase } = base;
     const settings: ProfileSettings = {
-      ...base,
+      ...profileBase,
       defaultTools: BUILTIN_TOOLS,
       sandbox: true,
-      profile: { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], enabledExtensions: ["*"], skillSources: { shared: true, profile: false } },
+      profile: { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], skillSources: { shared: true, profile: false } },
     };
     await this.writeSettings(name, settings);
     await ensureProfileSandbox(destination, resolve(process.argv[1]));

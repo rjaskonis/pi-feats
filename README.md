@@ -19,7 +19,7 @@
 
 | Term | Meaning |
 | --- | --- |
-| **Profile** | An isolated Pi workspace with its own settings, credentials, model state, sessions, `SOUL.md`, and optional local Skills. |
+| **Profile** | An isolated Pi workspace with its own settings, credentials, model state, sessions, `SOUL.md`, and optional local Skills. Extensions and packages remain in the shared default runtime. |
 | **Sandbox** | A Nono policy that constrains a named profile's process, filesystem, network, and credentials. |
 | **Application** | An integration runtime that accepts external payloads, routes them into Pi sessions, and can return an integration-specific response. |
 | **Handler** | TypeScript code owned by one Application. Inbound handlers normalize payloads; outbound handlers shape responses; transforms enrich or modify data. |
@@ -41,7 +41,8 @@
 - Keep profile-scoped settings, credentials, model catalogs, sessions, `SOUL.md`, Skills, and environment variables under `~/.pi/agent/profiles/<profile>/`.
 - Run named profiles through a [Nono](https://github.com/Anthropic/nono) policy while the default profile remains unsandboxed.
 - Preserve native Pi state directly in the profile directory; profiles do not use a disposable credential runtime.
-- Limit profile tools, shared Skills, profile Skills, and extensions through profile policy.
+- Limit profile tools, shared Skills, and profile Skills through profile policy.
+- Keep extensions and packages in the default runtime; named profiles load those shared resources read-only and never clone or install them.
 - Load a profile-specific `SOUL.md` into every agent turn.
 
 ### Remote Hosts
@@ -150,7 +151,8 @@ curl \
 What the API exposes:
 
 - Persistent chat and streaming chat sessions, including profile-specific sessions.
-- Profile lifecycle, settings, `SOUL.md`, environment variables, Guardrails, tools, Skills, extensions, and packages.
+- Profile lifecycle, settings, `SOUL.md`, environment variables, Guardrails, tools, Skills, and sessions.
+- Runtime-wide extension and package inventory and configuration.
 - Pulse schedules and execution history.
 - Git-backed Skill Sources, document preview, synchronization, and explicit profile imports.
 - Applications, handler source files, transform tests, identity-key mappings, active sessions, rollover, handoff, and live logs.
@@ -175,7 +177,7 @@ pi console stop
 
 The console provides dedicated workspaces for:
 
-- **Profiles:** settings, environment, `SOUL.md`, Guardrails, tools, Skills, extensions, packages, and sessions.
+- **Profiles:** settings, environment, `SOUL.md`, Guardrails, tools, Skills, and sessions. Extensions and packages are shown and managed as shared runtime resources.
 - **Applications:** configuration, identity mappings, active sessions, handler editor, transform testing, rollover, handoff, and live logs.
 - **Skill Sources:** source registration, Git synchronization, Skill preview, and deliberate import into a profile.
 - **Pulse:** schedules, enablement, run history, and profile/session association.

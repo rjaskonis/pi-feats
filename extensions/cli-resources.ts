@@ -169,8 +169,12 @@ async function readSettings() {
   // Sandboxed profiles execute directly in their own persistent directory.
   const agentDir = configuredAgentDir;
   const path = join(agentDir, "settings.json");
-  if (!existsSync(path)) return { agentDir, resourceRoot: rootAgentDir, settings: {} as Record<string, unknown> };
-  return { agentDir, resourceRoot: rootAgentDir, settings: JSON.parse(await readFile(path, "utf8")) as Record<string, unknown> };
+  const runtimePath = join(rootAgentDir, "settings.json");
+  const settings = existsSync(path) ? JSON.parse(await readFile(path, "utf8")) as Record<string, unknown> : {} as Record<string, unknown>;
+  // Extensions and packages are controlled by the default runtime, even when
+  // a command is operating on a named profile workspace.
+  const runtimeSettings = runtimePath === path ? settings : existsSync(runtimePath) ? JSON.parse(await readFile(runtimePath, "utf8")) as Record<string, unknown> : {} as Record<string, unknown>;
+  return { agentDir, resourceRoot: rootAgentDir, settings, runtimeSettings };
 }
 
 const isExcluded = (resourcePath: string, exclusions: string[]): boolean =>
@@ -292,7 +296,8 @@ async function packageRows(resourceRoot: string, settings: Record<string, unknow
 }
 
 async function applyPackageAction(action: PackageAction) {
-  const { agentDir, resourceRoot, settings } = await readSettings();
+  const { resourceRoot, runtimeSettings } = await readSettings();
+  const agentDir = resourceRoot, settings = runtimeSettings;
   const name = action.target.replace(/^npm:/, "");
   if (!existsSync(join(resourceRoot, "npm", "node_modules", name, "package.json"))) throw new Error(`Package "${name}" is not installed in ${join(resourceRoot, "npm")}.`);
   const entry = `npm:${name}`, configured = Array.isArray(settings.packages) ? settings.packages.filter((value): value is string => typeof value === "string") : [];
@@ -393,7 +398,11 @@ async function applyProfileSkillAction(action: ParsedAction, resourcePath: strin
 }
 
 async function applyAction(action: ParsedAction) {
-  const { agentDir, resourceRoot, settings } = await readSettings();
+  const loaded = await readSettings();
+  const resourceRoot = loaded.resourceRoot;
+  // An extension is runtime-wide. Tools and Skills remain profile-scoped.
+  const agentDir = action.kind === "extensions" ? resourceRoot : loaded.agentDir;
+  const settings = action.kind === "extensions" ? loaded.runtimeSettings : loaded.settings;
   const settingsPath = join(agentDir, "settings.json");
   const enable = action.action === "enable";
 
@@ -518,23 +527,26 @@ export default async function (pi: ExtensionAPI) {
       const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
       await renderAndClose(React.createElement(SessionTable, { sessions }));
     } else if (packageRequested) {
-      const { resourceRoot, settings } = await readSettings();
-      await renderAndClose(React.createElement(ResourceTable, { title: "PACKAGES", headers: ["NAME", "STATUS", "VERSION / DESCRIPTION"], rows: await packageRows(resourceRoot, settings), highlightStatus: true }));
+      const { resourceRoot, runtimeSettings } = await readSettings();
+      await renderAndClose(React.createElement(ResourceTable, { title: "PACKAGES", headers: ["NAME", "STATUS", "VERSION / DESCRIPTION"], rows: await packageRows(resourceRoot, runtimeSettings), highlightStatus: true }));
     } else if (kind === "tools") {
       const active = new Set(pi.getActiveTools());
-      const { resourceRoot, settings } = await readSettings();
-      const sources = await packageToolSources(resourceRoot, settings, pi.getAllTools().map((tool) => tool.name));
+      const { resourceRoot, runtimeSettings } = await readSettings();
+      const sources = await packageToolSources(resourceRoot, runtimeSettings, pi.getAllTools().map((tool) => tool.name));
       const rows: SourceRow[] = pi.getAllTools()
         .map((tool) => [tool.name, active.has(tool.name) ? "enabled" : "disabled", sources.has(tool.name) ? `npm: ${sources.get(tool.name)}` : (BUILTIN_TOOLS as readonly string[]).includes(tool.name) ? "Built-in" : "Extension", tool.description] as SourceRow)
         .sort((a, b) => a[0].localeCompare(b[0]));
       await renderAndClose(React.createElement(SourceTable, { title: "TOOLS", detailHeader: "DESCRIPTION", rows }));
     } else {
-      const { agentDir, resourceRoot, settings } = await readSettings();
+      const loaded = await readSettings();
+      const resourceRoot = loaded.resourceRoot;
+      const agentDir = kind === "extensions" ? resourceRoot : loaded.agentDir;
+      const settings = kind === "extensions" ? loaded.runtimeSettings : loaded.settings;
       const rawEntries = Array.isArray(settings[kind]) ? settings[kind].filter((value): value is string => typeof value === "string") : [];
       const configuredPaths = rawEntries.filter((value) => !/^[!+\-]/.test(value));
       const exclusions = rawEntries.filter((value) => value.startsWith("!"));
       const catalogRoot = join(resourceRoot, kind);
-      const packageExtensions = await configuredPackageExtensions(resourceRoot, settings);
+      const packageExtensions = await configuredPackageExtensions(resourceRoot, kind === "extensions" ? loaded.runtimeSettings : settings);
       const packagePaths = new Map(packageExtensions.map(({ path, packageName }) => [path, packageName]));
       const paths = kind === "skills"
         ? [...new Set([catalogRoot, ...configuredPaths])]

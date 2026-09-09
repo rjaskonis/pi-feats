@@ -111,25 +111,45 @@ function sharedResources(root: string, policy: ProfilePolicy = {}, localSkillsDi
   };
 }
 
-function profilePackageSources(root: string, value: unknown): unknown {
-  if (!Array.isArray(value)) return value;
-  // Pi resolves a relative local package against the settings file that owns
-  // it. Profiles have a different settings directory, so preserve the root
-  // package target as an absolute path when they inherit it.
-  return value.map((source) => typeof source === "string" && source.startsWith(".") && existsSync(resolve(root, source)) ? resolve(root, source) : source);
+function packageInstallPath(root: string, source: string): string | undefined {
+  if (source.startsWith("npm:")) {
+    const spec = source.slice(4);
+    const versionAt = spec.lastIndexOf("@");
+    const packageName = versionAt > (spec.startsWith("@") ? spec.indexOf("/") : -1) ? spec.slice(0, versionAt) : spec;
+    const path = join(root, "npm", "node_modules", packageName);
+    return existsSync(join(path, "package.json")) ? path : undefined;
+  }
+  if (!source.startsWith("git:") && !/^(?:https?|ssh|git):\/\//.test(source)) return undefined;
+  let remote = source.replace(/^git:/, "");
+  const refAt = remote.lastIndexOf("@");
+  if (refAt > remote.lastIndexOf("/")) remote = remote.slice(0, refAt);
+  remote = remote.replace(/^(?:https?|git):\/\//, "").replace(/^ssh:\/\/git@/, "").replace(/^git@/, "").replace(/^([^/:]+):/, "$1/").replace(/\.git$/, "");
+  const path = join(root, "git", remote);
+  return existsSync(join(path, "package.json")) ? path : undefined;
+}
+
+function rootRuntimeSources(root: string, base: ProfileSettings): string[] {
+  const sources = new Set<string>();
+  const add = (source: unknown) => {
+    if (typeof source !== "string") return;
+    const packagePath = packageInstallPath(root, source);
+    const path = packagePath ?? (source.startsWith(".") ? resolve(root, source) : source);
+    if (existsSync(path)) sources.add(path);
+  };
+  if (Array.isArray(base.packages)) for (const entry of base.packages) add(typeof entry === "object" && entry !== null ? (entry as { source?: unknown }).source : entry);
+  if (Array.isArray(base.extensions)) for (const entry of base.extensions) add(entry);
+  return [...sources];
 }
 
 function profileSettings(root: string, base: ProfileSettings, localSkillsDir: string): ProfileSettings {
-  const packages = profilePackageSources(root, base.packages);
+  const { packages: _packages, extensions: _extensions, ...profileBase } = base;
   return {
-    ...base,
-    ...(packages === undefined ? {} : { packages }),
-    ...sharedResources(root, { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], enabledExtensions: ["*"], skillSources: { shared: true, profile: false } }, localSkillsDir),
+    ...profileBase,
+    ...sharedResources(root, { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], skillSources: { shared: true, profile: false } }, localSkillsDir),
     defaultTools: ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"],
     profile: {
       enabledTools: ["*"],
       enabledSkills: ["*"],
-      enabledExtensions: ["*"],
       enabledProfileSkills: ["*"],
       skillSources: { shared: true, profile: false },
     },
@@ -272,8 +292,12 @@ async function syncProfileResources(name: string) {
   const settingsPath = join(profileDir(name), "settings.json");
   const root = rootAgentDir();
   const settings = await readJson(settingsPath);
-  const packages = profilePackageSources(root, settings.packages);
-  if (packages !== undefined) settings.packages = packages;
+  // Packages and extensions belong to the default runtime. Profiles only own
+  // workspace state and resource policy; rootRuntimeSources() injects the
+  // shared runtime when this profile is launched.
+  delete settings.packages;
+  delete settings.extensions;
+  if (settings.profile) delete settings.profile.enabledExtensions;
   Object.assign(settings, sharedResources(root, settings.profile, join(profileDir(name), "skills")));
   await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
   await removeLegacyBootstrapExtensions(profileDir(name));
@@ -287,10 +311,15 @@ async function reexecWithProfile(name: string, args: string[]) {
   const target = name === "default" ? root : profileDir(name);
   if (name !== "default") await migrateLegacySandboxRuntime(target);
   await syncProfileResources(name);
-  // The profile inherits the package source recorded in its settings. Loading
-  // it normally keeps Git, npm, and local package installations portable.
+  const baseSettingsPath = join(root, "settings.json");
+  const rootSettings = existsSync(baseSettingsPath) ? await readJson(baseSettingsPath) : {};
+  // The default runtime owns extensions and packages. Named profiles receive
+  // their already installed local paths, never npm:/git: specs. The default
+  // profile already loads these resources from its own settings.
+  const runtimeSources = name === "default" ? [] : rootRuntimeSources(root, rootSettings);
+  const extensionArgs = runtimeSources.flatMap((source) => ["--extension", source]);
   const sessionArgs = name === "default" ? [] : ["--session-dir", join(target, "sessions")];
-  const piArgs = [resolve(process.argv[1]), ...sessionArgs, ...args];
+  const piArgs = [resolve(process.argv[1]), ...extensionArgs, ...sessionArgs, ...args];
   // The default profile is intentionally never sandboxed. Named profiles run
   // directly in their own persistent directory; nono enforces their policy.
   const sandbox = await isSandboxEnabled(target, name === "default");
@@ -304,7 +333,7 @@ async function reexecWithProfile(name: string, args: string[]) {
   if (name === "default") delete childEnv.PI_CODING_AGENT_SESSION_DIR;
   else childEnv.PI_CODING_AGENT_SESSION_DIR = join(target, "sessions");
   const launch = sandbox
-    ? sandboxedCommand(await ensureProfileSandbox(target, resolve(process.argv[1])), target, process.execPath, piArgs)
+    ? sandboxedCommand(await ensureProfileSandbox(target, resolve(process.argv[1]), runtimeSources), target, process.execPath, piArgs)
     : { command: process.execPath, args: piArgs };
   const child = spawn(launch.command, launch.args, {
     cwd: sandbox ? target : process.cwd(),
