@@ -68,7 +68,7 @@ Sessions are created in the same persistent location used by the CLI. For exampl
 
 ```bash
 pi --session abc
-pi --profile n1 --session abc
+pi profile n1 --session abc
 ```
 
 Profiles follow the `profiles.ts` convention: `default` uses `~/.pi/agent`, while `n1` uses `~/.pi/agent/profiles/n1`.

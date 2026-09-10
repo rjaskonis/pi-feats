@@ -208,6 +208,15 @@ function runtimeCommand(remote: RemoteHost, args: string[]) {
   return `docker exec -it ${shellQuote(remote.container)} sh -lc ${shellQuote(piCommand)}`;
 }
 
+function profileRuntimeCommand(remote: RemoteHost, profile: string, args: string[]) {
+  const root = piAgentDirectoryExpression(remote.piAgentDirectory);
+  const directory = `${root}/profiles/${shellQuote(profile)}`;
+  const piCommand = `env PI_CODING_AGENT_DIR=${directory} PI_PROFILE_ROOT=${root} PI_ACTIVE_PROFILE=${shellQuote(profile)} pi --extension ${root}/extensions/cli-resources.ts${args.length ? ` ${args.map(shellQuote).join(" ")}` : ""}`;
+  if (remote.runtime === "host") return piCommand;
+  if (!remote.container) fail("docker remote is missing its container name.");
+  return `docker exec -it ${shellQuote(remote.container)} sh -lc ${shellQuote(piCommand)}`;
+}
+
 function runtimeBashCommand(remote: RemoteHost, args: string[]) {
   const bashArgs = args.map(shellQuote).join(" ");
   const shell = `cd ${piAgentDirectoryExpression(remote.piAgentDirectory)} && exec bash${bashArgs ? ` ${bashArgs}` : ""}`;
@@ -330,6 +339,7 @@ async function deleteRemote(root: string, name: string, force: boolean) {
 }
 
 const profileManagementActions = new Set(["add", "create", "delete", "list", "open", "remove", "resume"]);
+const profileResourceCommands = new Set(["extensions", "packages", "sessions", "skills", "tools"]);
 
 function requestedProfile(args: string[]): string | undefined {
   if (args[0] !== "profile" || !args[1] || profileManagementActions.has(args[1].toLowerCase())) return undefined;
@@ -354,9 +364,12 @@ async function connectRemote(root: string, name: string, args: string[]) {
   if (profile) {
     const exists = await runSsh(root, remote, password, profileExistsCommand(remote, profile));
     if (exists.code !== 0) fail(`profile '${profile}' does not exist on remote '${name}'.`);
-    args = ["--profile", profile, ...args.slice(2)];
   }
-  const command = args[0] === "bash" ? runtimeBashCommand(remote, args.slice(1)) : runtimeCommand(remote, args);
+  const command = args[0] === "bash"
+    ? runtimeBashCommand(remote, args.slice(1))
+    : profile && profileResourceCommands.has(args[2] ?? "")
+      ? profileRuntimeCommand(remote, profile, args.slice(2))
+      : runtimeCommand(remote, args);
   const result = await runSsh(root, remote, password, command, { interactive: true });
   process.exit(result.code);
 }

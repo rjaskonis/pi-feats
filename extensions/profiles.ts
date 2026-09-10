@@ -128,7 +128,7 @@ function packageInstallPath(root: string, source: string): string | undefined {
   return existsSync(join(path, "package.json")) ? path : undefined;
 }
 
-function rootRuntimeSources(root: string, base: ProfileSettings): string[] {
+async function rootRuntimeSources(root: string, base: ProfileSettings): Promise<string[]> {
   const sources = new Set<string>();
   const add = (source: unknown) => {
     if (typeof source !== "string") return;
@@ -138,6 +138,16 @@ function rootRuntimeSources(root: string, base: ProfileSettings): string[] {
   };
   if (Array.isArray(base.packages)) for (const entry of base.packages) add(typeof entry === "object" && entry !== null ? (entry as { source?: unknown }).source : entry);
   if (Array.isArray(base.extensions)) for (const entry of base.extensions) add(entry);
+  // Pi auto-discovers these for the default profile. Add them explicitly when
+  // re-executing a named profile, where that profile's extensions directory is
+  // intentionally empty.
+  try {
+    for (const entry of await readdir(join(root, "extensions"), { withFileTypes: true })) {
+      const path = join(root, "extensions", entry.name);
+      if (entry.isFile() && [".ts", ".js"].some((extension) => entry.name.endsWith(extension))) add(path);
+      else if (entry.isDirectory() && (existsSync(join(path, "index.ts")) || existsSync(join(path, "index.js")))) add(path);
+    }
+  } catch {}
   return [...sources];
 }
 
@@ -312,7 +322,7 @@ async function reexecWithProfile(name: string, args: string[]) {
   // The default runtime owns extensions and packages. Named profiles receive
   // their already installed local paths, never npm:/git: specs. The default
   // profile already loads these resources from its own settings.
-  const runtimeSources = name === "default" ? [] : rootRuntimeSources(root, rootSettings);
+  const runtimeSources = name === "default" ? [] : await rootRuntimeSources(root, rootSettings);
   const extensionArgs = runtimeSources.flatMap((source) => ["--extension", source]);
   const sessionArgs = name === "default" ? [] : ["--session-dir", join(target, "sessions")];
   const piArgs = [resolve(process.argv[1]), ...extensionArgs, ...sessionArgs, ...args];
