@@ -43,6 +43,9 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
         join(agentDir, "themes"),
         join(agentDir, "guardrails"),
         join(agentDir, "AGENTS.md"),
+        // Resource commands need the default runtime's package and extension
+        // configuration while operating on the named profile.
+        join(agentDir, "settings.json"),
         ...sharedRuntimeSources,
         ...(skillSources.shared ? [join(agentDir, "skills")] : []),
         // SSH resolves the current UID through these public account maps.
