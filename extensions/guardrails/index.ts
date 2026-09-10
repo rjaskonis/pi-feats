@@ -94,6 +94,11 @@ async function runTransforms(ctx: any, stage: Stage, content: string, subject: s
 }
 
 export default function (pi: ExtensionAPI) {
+  // `pi guardrails …` is implemented by profiles.ts before Pi opens a model
+  // session. Do not register a slash command for that positional CLI form:
+  // Pi would dispatch it as an interactive command and require credentials.
+  if (process.argv.slice(2)[0] === "guardrails") return;
+
   let reflectionCount = 0;
 
   pi.registerMessageRenderer("guardrail-response", (message, options, theme) =>

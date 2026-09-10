@@ -272,6 +272,20 @@ async function handleProfileCommand(args: string[]) {
   fail("usage: pi profile <name> [pi arguments] | pi profile list | pi profile create <name> | pi profile delete <name> --force | pi profile resume <name> | pi profile open <name> <session-id>");
 }
 
+// Pi exposes its complete argv to extensions. Re-executed profiles prepend
+// runtime-only flags, so command dispatch must ignore those pairs instead of
+// assuming the subcommand is always argv[0].
+function commandArgs(raw: string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const value = raw[index];
+    if (value === "--extension" || value === "--session-dir") { index += 1; continue; }
+    if (value.startsWith("--extension=") || value.startsWith("--session-dir=")) continue;
+    result.push(value);
+  }
+  return result;
+}
+
 function extractResumeCommand(args: string[]) {
   if (args[0] === "resume" && args.length === 2) {
     return { profile: "default", sessionId: args[1] };
@@ -369,7 +383,7 @@ export default async function (pi: ExtensionAPI) {
     type: "string",
   });
 
-  const args = process.argv.slice(2);
+  const args = commandArgs(process.argv.slice(2));
   if (await handleRemoteCli(args, rootAgentDir())) process.exit(0);
   const resume = extractResumeCommand(args);
   if (resume) {
@@ -383,13 +397,16 @@ export default async function (pi: ExtensionAPI) {
 
   const requestedProfile = extractProfile(args);
   const guardrailArgs = requestedProfile?.args ?? args;
+  // A profile re-exec has already consumed the `profile <name>` prefix. Keep
+  // its active profile for commands dispatched in that child process.
+  const selectedProfile = requestedProfile?.name ?? process.env.PI_ACTIVE_PROFILE ?? "default";
   if (guardrailArgs[0] === "guardrails") {
-    await handleGuardrailsCli(requestedProfile?.name ?? "default", guardrailArgs);
+    await handleGuardrailsCli(selectedProfile, guardrailArgs);
     process.exit(0);
   }
   if (guardrailArgs[0] === "pulse") {
     const { handlePulseCli } = await import("./pulse/index.ts");
-    await handlePulseCli(guardrailArgs, requestedProfile?.name);
+    await handlePulseCli(guardrailArgs, selectedProfile);
     process.exit(0);
   }
   if (process.env.PI_PROFILE_REEXEC !== "1") {
