@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { json as jsonLanguage } from "@codemirror/lang-json";
 import Link from "next/link";
-import { ArrowLeft, Filter, Trash2 } from "lucide-react";
+import { ArrowLeft, Check, Copy, Filter, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
 type Stage = { id: string; label: string; type: string; payload?: unknown; input?: unknown; output?: unknown; stdout: string[]; stderr: string[]; error?: string };
@@ -13,7 +13,17 @@ const json = (value: unknown) => JSON.stringify(value, null, 2) ?? "No data reco
 const localDateTime = (date: Date) => { const offset = date.getTimezoneOffset() * 60_000; return new Date(date.getTime() - offset).toISOString().slice(0, 16); };
 const stageFilters = [{ value: "request", label: "Request", className: "border-sky-400 bg-sky-50 text-sky-700" }, { value: "transform", label: "Transform", className: "border-amber-400 bg-amber-50 text-amber-800" }, { value: "inbound-handler", label: "Inbound handler", className: "border-emerald-400 bg-emerald-50 text-emerald-800" }, { value: "pi-agent", label: "Pi agent", className: "border-indigo-400 bg-indigo-50 text-indigo-800" }, { value: "outbound-handler", label: "Outbound handler", className: "border-fuchsia-400 bg-fuchsia-50 text-fuchsia-800" }, { value: "final-response", label: "Final response", className: "border-teal-400 bg-teal-50 text-teal-800" }];
 const stageColor = (type: string) => stageFilters.find((stage) => stage.value === type)?.className ?? "border-zinc-300 bg-zinc-50 text-zinc-700";
-function JsonView({ value }: { value: unknown }) { return <div className="json-view overflow-hidden rounded-lg border border-zinc-200"><CodeMirror value={json(value)} extensions={[jsonLanguage()]} editable={false} basicSetup={{ lineNumbers: false, foldGutter: false }} /></div>; }
+function JsonView({ value }: { value: unknown }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(json(value));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2_000);
+    } catch { /* Keep the copy action available for a retry. */ }
+  };
+  return <div className="json-view relative overflow-hidden rounded-lg border border-zinc-200"><button type="button" className="absolute right-2 top-2 z-10 rounded-md bg-white/90 p-1.5 text-zinc-500 shadow-sm ring-1 ring-zinc-200 hover:bg-zinc-100 hover:text-zinc-900" title="Copy JSON" aria-label="Copy JSON" onClick={() => void copy()}>{copied ? <Check size={15}/> : <Copy size={15}/>}</button><CodeMirror value={json(value)} extensions={[jsonLanguage()]} editable={false} basicSetup={{ lineNumbers: false, foldGutter: false }} /></div>;
+}
 function FlowArrow({ output, nextInput }: { output: unknown; nextInput: unknown }) { const [position, setPosition] = useState<{ x: number; y: number }>(); return <div className="py-3 text-center text-4xl leading-none text-zinc-500"><span className="cursor-help" onMouseEnter={(event) => setPosition({ x: event.clientX, y: event.clientY })} onMouseMove={(event) => setPosition({ x: event.clientX, y: event.clientY })} onMouseLeave={() => setPosition(undefined)}>↓</span>{position && <div className="pointer-events-none fixed z-50 w-96 rounded-lg border border-[#b9e6e8] bg-[#f6fdff]/90 p-3 text-left text-xs text-zinc-900 shadow-xl backdrop-blur-sm" style={{ left: Math.min(position.x + 16, window.innerWidth - 400), top: Math.min(position.y + 16, window.innerHeight - 280) }}><p className="mb-1 font-semibold text-blue-950">Previous output → next input</p><pre className="log-json log-hover-json max-h-56 overflow-auto">{json({ output, nextInput })}</pre></div>}</div>; }
 
 export function ApplicationLogs({ name, embedded = false }: { name: string; embedded?: boolean }) {
