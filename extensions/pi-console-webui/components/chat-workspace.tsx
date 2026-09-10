@@ -17,7 +17,9 @@ const text = (entry: Entry) => entry.content?.filter((block) => block.type === "
 
 export function ChatWorkspace({ profile }: { profile: string }) {
   const searchParams = useSearchParams(); const router = useRouter();
-  const requestedSession = searchParams.get("session");
+  // Profile selection updates the route asynchronously. Never resolve a
+  // session from the previous URL against the newly selected profile.
+  const requestedSession = (searchParams.get("profile") ?? "default") === profile ? searchParams.get("session") : null;
   const [sessions, setSessions] = useState<Session[]>([]), [selected, setSelected] = useState<string>(), [entries, setEntries] = useState<Entry[]>([]), [hasMore, setHasMore] = useState(false), [nextBefore, setNextBefore] = useState<string | null>(null), [loadingOlder, setLoadingOlder] = useState(false), [copiedSessionId, setCopiedSessionId] = useState(false), [editingName, setEditingName] = useState(false), [sessionName, setSessionName] = useState(""), [query, setQuery] = useState(""), [debouncedQuery, setDebouncedQuery] = useState(""), [message, setMessage] = useState(""), [streaming, setStreaming] = useState(""), [busy, setBusy] = useState(false), [error, setError] = useState(""), [sidebar, setSidebar] = useState(true);
   const abortRef = useRef<AbortController | undefined>(undefined); const bottom = useRef<HTMLDivElement>(null); const conversation = useRef<HTMLDivElement>(null); const loadingSession = useRef<string | undefined>(undefined);
   const loadSessions = async () => { const data = await (await call(`profiles/${profile}/sessions`)).json() as { sessions: Session[] }; setSessions(data.sessions); return data.sessions; };
