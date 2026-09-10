@@ -25,7 +25,10 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
   // package root, not only ~/.pi/agent/extensions, so Git and npm packages
   // remain readable inside a profile sandbox.
   const packageRoot = dirname(dirname(__dirname));
-  const pulseFiles = [join(agentDir, "pulse.db"), join(agentDir, "pulse.db-wal"), join(agentDir, "pulse.db-shm")];
+  // Pulse scheduling is shared runtime state. A profile can create a schedule,
+  // which starts the detached tick process and therefore must create its state
+  // and log files as well as update the SQLite database.
+  const pulseFiles = [join(agentDir, "pulse.db"), join(agentDir, "pulse.db-wal"), join(agentDir, "pulse.db-shm"), join(agentDir, "pulse-tick.state.json"), join(agentDir, "pulse-tick.log")];
   // Pi takes this short-lived lock while reading package settings. Profiles
   // may never alter the settings file itself, but must create its lock file.
   const runtimeSettingsLock = join(agentDir, "settings.json.lock");
