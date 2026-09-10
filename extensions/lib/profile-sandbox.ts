@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -8,9 +8,15 @@ export type ProfileSandboxSettings = { sandbox?: boolean; profile?: { skillSourc
 const managedDescription = "Pi profile runtime sandbox";
 export const nonoConfigPath = (profileDir: string) => join(profileDir, "nono.json");
 
-function runtimeModulesPath(runtimeEntry: string) {
-  // Covers every installed pi-node version and its trusted Node dependencies.
-  return "$HOME/.local/share/pi-node/node-*";
+function runtimePaths(runtimeEntry: string) {
+  // Pi may be installed by pi-node, a system package manager, or a managed
+  // Node distribution (for example, Hermes). Grant only the active runtime
+  // and its package root instead of assuming the pi-node installation path.
+  const paths = new Set<string>(["$HOME/.local/share/pi-node/node-*", dirname(process.execPath)]);
+  const entry = (() => { try { return realpathSync(runtimeEntry); } catch { return runtimeEntry; } })();
+  const nodeModules = entry.indexOf("/lib/node_modules/");
+  if (nodeModules > 0) paths.add(entry.slice(0, nodeModules));
+  return [...paths];
 }
 
 function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { shared: boolean; profile: boolean }, sharedRuntimeSources: string[]) {
@@ -43,7 +49,7 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
         // This does not expose credentials or private keys.
         "/etc/passwd",
         "/etc/group",
-        runtimeModulesPath(runtimeEntry),
+        ...runtimePaths(runtimeEntry),
         ...pulseFiles,
       ],
       // The profile directory is the sandbox workdir, so Pi can persist its

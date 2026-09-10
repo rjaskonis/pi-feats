@@ -197,8 +197,12 @@ async function runSsh(root: string, remote: Pick<RemoteHost, "host" | "port" | "
   }
 }
 
+function remotePiExecutable() {
+  return `PI_REMOTE_PI="$(command -v pi 2>/dev/null || for candidate in "$HOME/.local/bin/pi" "$HOME/.hermes/node/bin/pi"; do [ -x "$candidate" ] && { printf '%s\\n' "$candidate"; break; }; done)"; [ -n "$PI_REMOTE_PI" ] || { echo "Pi executable was not found on the remote host." >&2; exit 127; }; PATH="$(dirname "$PI_REMOTE_PI"):$PATH"; export PATH`;
+}
+
 function hostPiCommand(remote: RemoteHost, args: string[]) {
-  return `env PI_CODING_AGENT_DIR=${piAgentDirectoryExpression(remote.piAgentDirectory)} pi${args.length ? ` ${args.map(shellQuote).join(" ")}` : ""}`;
+  return `${remotePiExecutable()}; env PI_CODING_AGENT_DIR=${piAgentDirectoryExpression(remote.piAgentDirectory)} "$PI_REMOTE_PI"${args.length ? ` ${args.map(shellQuote).join(" ")}` : ""}`;
 }
 
 function runtimeCommand(remote: RemoteHost, args: string[]) {
@@ -211,7 +215,7 @@ function runtimeCommand(remote: RemoteHost, args: string[]) {
 function profileRuntimeCommand(remote: RemoteHost, profile: string, args: string[]) {
   const root = piAgentDirectoryExpression(remote.piAgentDirectory);
   const directory = `${root}/profiles/${shellQuote(profile)}`;
-  const piCommand = `env PI_CODING_AGENT_DIR=${directory} PI_PROFILE_ROOT=${root} PI_ACTIVE_PROFILE=${shellQuote(profile)} pi --extension ${root}/extensions/cli-resources.ts${args.length ? ` ${args.map(shellQuote).join(" ")}` : ""}`;
+  const piCommand = `${remotePiExecutable()}; env PI_CODING_AGENT_DIR=${directory} PI_PROFILE_ROOT=${root} PI_ACTIVE_PROFILE=${shellQuote(profile)} "$PI_REMOTE_PI" --extension ${root}/extensions/cli-resources.ts${args.length ? ` ${args.map(shellQuote).join(" ")}` : ""}`;
   if (remote.runtime === "host") return piCommand;
   if (!remote.container) fail("docker remote is missing its container name.");
   return `docker exec -it ${shellQuote(remote.container)} sh -lc ${shellQuote(piCommand)}`;
