@@ -411,8 +411,14 @@ class ApiServer {
       reply.hijack();
       reply.raw.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
       reply.raw.write(`event: session\ndata: ${JSON.stringify({ profile, sessionId: id })}\n\n`);
-      const response = await this.runSandboxedPrompt(profile, id, message, (text) => reply.raw.write(`event: token\ndata: ${JSON.stringify({ text })}\n\n`));
-      reply.raw.write(`event: done\ndata: ${JSON.stringify({ response, sessionId: id, profile })}\n\n`); reply.raw.end(); return;
+      try {
+        const response = await this.runSandboxedPrompt(profile, id, message, (text) => reply.raw.write(`event: token\ndata: ${JSON.stringify({ text })}\n\n`));
+        reply.raw.write(`event: done\ndata: ${JSON.stringify({ response, sessionId: id, profile })}\n\n`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: message })}\n\n`);
+      }
+      reply.raw.end(); return;
     }
     const handle = await this.getSession(profile, id);
     if (handle.busy || !handle.session.isIdle) {
