@@ -244,11 +244,14 @@ pi profile support skills disable experimental-tooling
 
 **Skill Sources** are Git-backed catalogs, intentionally separated from active Skills. Synchronizing a source only downloads and indexes its available `SKILL.md` documents; it does not give new instructions to any profile. An administrator must preview a Skill and explicitly import it into the selected profile through the Console or API. This staging model prevents a repository update from silently changing agent behavior.
 
-A Skill Source records its repository URL, branch, optional base path, and optional credentials. The Console provides the complete workflow: register source, synchronize it, browse and preview documents, then import a selected Skill. The API exposes the same operations under `/api/skill-sources` and imports through:
+A Skill Source records its repository URL, branch, optional base path, and optional credentials. The Console provides the complete workflow: register source, synchronize it, browse and preview documents, import a selected Skill, or publish a local Skill to a writable source. Publishing copies the complete Skill directory, commits and pushes it, then synchronizes the catalog. Imported Skills retain their source-relative path; a same-name Skill at a different path is rejected rather than overwritten.
 
 ```text
 POST /api/profiles/:profile/skills/from-source/:identifier/:name
+POST /api/profiles/:profile/skills/:name/publish?source=shared|profile
 ```
+
+Publishing requires an enabled Skill Source with a write credential. Shared Skills can only be published through the default profile; profile-local Skills can only be published through their owning profile.
 
 ### Pulse scheduling
 
