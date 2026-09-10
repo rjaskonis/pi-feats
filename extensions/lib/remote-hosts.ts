@@ -213,12 +213,10 @@ function runtimeCommand(remote: RemoteHost, args: string[]) {
 }
 
 function profileRuntimeCommand(remote: RemoteHost, profile: string, args: string[]) {
-  const root = piAgentDirectoryExpression(remote.piAgentDirectory);
-  const directory = `${root}/profiles/${shellQuote(profile)}`;
-  const piCommand = `${remotePiExecutable()}; env PI_CODING_AGENT_DIR=${directory} PI_PROFILE_ROOT=${root} PI_ACTIVE_PROFILE=${shellQuote(profile)} "$PI_REMOTE_PI" --extension ${root}/extensions/cli-resources.ts${args.length ? ` ${args.map(shellQuote).join(" ")}` : ""}`;
-  if (remote.runtime === "host") return piCommand;
-  if (!remote.container) fail("docker remote is missing its container name.");
-  return `docker exec -it ${shellQuote(remote.container)} sh -lc ${shellQuote(piCommand)}`;
+  // Let the remote pi-feats package launch the profile. Manually setting the
+  // profile environment bypasses its sandbox/session setup and assumes a
+  // legacy root/extensions checkout that package installations do not have.
+  return runtimeCommand(remote, ["profile", profile, ...args]);
 }
 
 function runtimeBashCommand(remote: RemoteHost, args: string[]) {

@@ -262,7 +262,13 @@ async function handleProfileCommand(args: string[]) {
   }
   if (action === "resume" && args.length === 3) return reexecWithProfile(args[2], ["--resume"]);
   if (action === "open" && args.length === 4) return reexecWithProfile(args[2], ["--session", args[3]]);
-  if (action && !reservedProfileNames.has(action.toLowerCase())) return reexecWithProfile(action, args.slice(2));
+  // Accept the natural profile-first forms too. This is particularly useful
+  // for remote operation, where a session ID is copied from `sessions list`.
+  if (action && !reservedProfileNames.has(action.toLowerCase())) {
+    if (args[2] === "resume" && args.length === 3) return reexecWithProfile(action, ["--resume"]);
+    if ((args[2] === "resume" || args[2] === "open") && args.length === 4) return reexecWithProfile(action, ["--session", args[3]]);
+    return reexecWithProfile(action, args.slice(2));
+  }
   fail("usage: pi profile <name> [pi arguments] | pi profile list | pi profile create <name> | pi profile delete <name> --force | pi profile resume <name> | pi profile open <name> <session-id>");
 }
 

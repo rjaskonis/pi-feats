@@ -300,9 +300,12 @@ pi profile support extensions list
 pi profile support sessions list
 pi profile support packages list
 
-# Resume or open a profile session
+# Resume the latest session or open a specific one
 pi profile resume support
 pi profile open support <session-id>
+# Equivalent profile-first forms, convenient after `sessions list`
+pi profile support resume
+pi profile support resume <session-id>
 ```
 
 ### Resources, packages, and sessions
