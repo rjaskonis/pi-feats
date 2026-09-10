@@ -369,7 +369,7 @@ class ApiServer {
       // runtimes, not additional HTTP servers.
       delete workerEnv.PI_API_WORKER;
       const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolveRun, reject) => {
-        const child = spawn(process.execPath, [process.argv[1], "--profile", profile, "--session", id, "--print", message], {
+        const child = spawn(process.execPath, [process.argv[1], "--profile", profile, "--session-dir", this.sessionDirectory(profile)!, "--session", id, "--print", message], {
           // The sandboxed agent sees its profile directory as CWD, never the
           // HTTP server's CWD or the caller's project directory.
           cwd: this.profileDirectory(profile),
