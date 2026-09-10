@@ -217,7 +217,9 @@ class ApiServer {
     if (body.id !== undefined && (typeof body.id !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(body.id))) throw Object.assign(new Error("The 'id' field is invalid."), { status: 400 });
     const id = typeof body.id === "string" ? body.id : randomUUID();
     if ((await this.listProfileSessions(profile)).some((item) => item.id === id)) throw Object.assign(new Error("Session already exists."), { status: 409 });
-    const session = SessionManager.create(this.options.cwd, this.sessionDirectory(profile), { id });
+    // A profile session must use its profile directory as CWD. Pi resolves an
+    // ID relative to CWD, while API workers themselves run from `/` in Docker.
+    const session = SessionManager.create(this.profileDirectory(profile), this.sessionDirectory(profile), { id });
     if (typeof body.name === "string" && body.name.trim()) session.appendSessionInfo(body.name.trim());
     const file = session.getSessionFile();
     const header = session.getHeader();
@@ -364,12 +366,16 @@ class ApiServer {
     if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
     this.sandboxBusy.add(key);
     try {
+      const session = (await this.listProfileSessions(profile)).find((item) => item.id === id);
+      if (!session) throw Object.assign(new Error(`No session found matching '${id}'`), { status: 404 });
       const workerEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}) }; 
       // The HTTP gateway is an API worker itself. Its children are agent
       // runtimes, not additional HTTP servers.
       delete workerEnv.PI_API_WORKER;
       const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolveRun, reject) => {
-        const child = spawn(process.execPath, [process.argv[1], "profile", profile, "--session", id, "--print", message], {
+        // Supply the native file path, not only its ID. The session manager
+        // otherwise scopes an ID lookup to the API worker CWD (`/` in Docker).
+        const child = spawn(process.execPath, [process.argv[1], "profile", profile, "--session", session.path, "--print", message], {
           // The sandboxed agent sees its profile directory as CWD, never the
           // HTTP server's CWD or the caller's project directory.
           cwd: this.profileDirectory(profile),

@@ -26,6 +26,9 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
   // remain readable inside a profile sandbox.
   const packageRoot = dirname(dirname(__dirname));
   const pulseFiles = [join(agentDir, "pulse.db"), join(agentDir, "pulse.db-wal"), join(agentDir, "pulse.db-shm")];
+  // Pi takes this short-lived lock while reading package settings. Profiles
+  // may never alter the settings file itself, but must create its lock file.
+  const runtimeSettingsLock = join(agentDir, "settings.json.lock");
   return {
     extends: "node-dev",
     meta: { name: `pi-${profileDir.split("/").pop() || "profile"}`, description: managedDescription },
@@ -60,7 +63,7 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
       allow: ["$WORKDIR", join(profileDir, "sessions"), ...(skillSources.profile ? [join(profileDir, "skills")] : []), "$TMPDIR", "/dev/pts"],
       // Allows password-driven SSH helpers (e.g. pexpect) without exposing
       // the host user's SSH keys or agent.
-      allow_file: ["/dev/ptmx", ...pulseFiles],
+      allow_file: ["/dev/ptmx", runtimeSettingsLock, ...pulseFiles],
     },
   };
 }
