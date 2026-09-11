@@ -251,7 +251,13 @@ POST /api/profiles/:profile/skills/from-source/:identifier/:name
 POST /api/profiles/:profile/skills/:name/publish?source=shared|profile
 ```
 
-Publishing requires an enabled Skill Source with a write credential. Shared Skills can only be published through the default profile; profile-local Skills can only be published through their owning profile.
+Publishing requires an enabled Skill Source with a write credential. Shared Skills can only be published through the default profile; profile-local Skills can only be published through their owning profile. An installed Skill can also be refreshed from its recorded source through:
+
+```text
+POST /api/profiles/:profile/skills/:name/sync?source=shared|profile
+```
+
+Refreshing synchronizes the source and atomically replaces the complete installed Skill directory; local changes to that Skill are discarded.
 
 ### Pulse scheduling
 

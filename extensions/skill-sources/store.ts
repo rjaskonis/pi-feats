@@ -38,7 +38,7 @@ export class SkillSourceStore {
   }
 
   private installation(profile: string, skillName: string) {
-    return this.db.prepare("SELECT source_identifier,source_relative_path FROM skill_source_installations WHERE profile=? AND skill_name=?").get(profile, skillName) as Row | undefined;
+    return this.db.prepare("SELECT source_identifier,source_relative_path,target_path FROM skill_source_installations WHERE profile=? AND skill_name=?").get(profile, skillName) as Row | undefined;
   }
 
   async publish(identifier: string, profile: string, skillName: string, skillPath: string) {
@@ -84,6 +84,33 @@ export class SkillSourceStore {
       if (published) this.db.prepare("INSERT INTO skill_source_installations VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(profile,skill_name) DO UPDATE SET source_identifier=excluded.source_identifier,source_relative_path=excluded.source_relative_path,source_commit_hash=excluded.source_commit_hash,source_content_hash=excluded.source_content_hash,target_path=excluded.target_path,installed_at=excluded.installed_at").run(profile,skillName,identifier,targetRelative,published.commitHash,published.contentHash,local,now());
       return { action: installation ? "updated" as const : "created" as const, source: identifier, relativePath: targetRelative, commitHash: synced.commitHash };
     } finally { release(); if (this.publishing.get(identifier) === chain) this.publishing.delete(identifier); }
+  }
+
+  async syncInstallation(profile: string, skillName: string, expectedPath: string) {
+    const installation = this.installation(profile, skillName);
+    if (!installation) throw Object.assign(new Error("This Skill was not installed from a Skill Source."), { status: 404 });
+    const identifier = String(installation.source_identifier), relativePath = String(installation.source_relative_path), target = resolve(String(installation.target_path));
+    if (target !== resolve(expectedPath)) throw Object.assign(new Error("The installed Skill path no longer matches its source record."), { status: 409 });
+    const result = await this.sync(identifier);
+    if (result.status !== "succeeded") throw Object.assign(new Error(result.error ?? "Unable to synchronize the Skill Source."), { status: 502 });
+    const skill = this.skills(identifier).find((item) => item.relativePath === relativePath && item.status === "synced");
+    if (!skill) throw Object.assign(new Error("This Skill no longer exists in its Skill Source."), { status: 404 });
+    const sourceRoot = resolve(this.root, identifier), source = resolve(sourceRoot, relativePath);
+    if (!source.startsWith(`${sourceRoot}/`) || !existsSync(join(source, "SKILL.md"))) throw Object.assign(new Error("The synchronized Skill files are unavailable."), { status: 404 });
+    const temporary = `${target}.sync-${randomUUID()}`, backup = `${target}.backup-${randomUUID()}`;
+    try {
+      await rm(temporary, { recursive: true, force: true });
+      await cp(source, temporary, { recursive: true, filter: (path) => !path.split("/").includes(".git") && !path.split("/").includes("node_modules") });
+      if (existsSync(target)) await rename(target, backup);
+      await rename(temporary, target);
+      await rm(backup, { recursive: true, force: true });
+    } catch (error) {
+      await rm(temporary, { recursive: true, force: true });
+      if (!existsSync(target) && existsSync(backup)) await rename(backup, target);
+      throw error;
+    }
+    this.db.prepare("UPDATE skill_source_installations SET source_commit_hash=?,source_content_hash=?,target_path=?,installed_at=? WHERE profile=? AND skill_name=?").run(skill.commitHash, skill.contentHash, target, now(), profile, skillName);
+    return { source: identifier, relativePath, commitHash: skill.commitHash };
   }
 
   forgetInstallation(profile: string, skillName: string) { this.db.prepare("DELETE FROM skill_source_installations WHERE profile=? AND skill_name=?").run(profile, skillName); }
