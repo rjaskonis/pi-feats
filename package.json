@@ -1,8 +1,9 @@
 {
   "name": "pi-feats",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A modular Pi package for profiles, sandboxing, remote access, applications, guardrails, skills, session management, observability, and web-based operations.",
   "keywords": [
+    "pi-package",
     "pi-coding-agent",
     "pi-agent",
     "pi-extension",
@@ -27,7 +28,8 @@
     "extensions",
     "scripts",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "assets"
   ],
   "license": "MIT",
   "engines": {
@@ -84,6 +86,7 @@
       "./extensions/pulse",
       "./extensions/sequential-workflow.ts",
       "./extensions/skill-sources"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/rjaskonis/pi-feats/v0.1.3/assets/pi-feats-preview.png"
   }
 }

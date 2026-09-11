@@ -4,6 +4,8 @@
 
 `pi-feats` turns the lightweight, extensible Pi Coding Agent into an operational workspace without replacing Pi's native configuration model. It adds persistent profiles, a policy-controlled sandbox, HTTP and browser interfaces, application runtimes, scheduled work, Git-backed Skill discovery, and command-line administration.
 
+![Pi Feats: production features for Pi Coding Agent](assets/pi-feats-preview.png)
+
 ## Contents
 
 - [Glossary](#glossary)
