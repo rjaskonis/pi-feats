@@ -5,6 +5,12 @@
 `pi-feats` is the distributable Pi package. Its canonical installation is:
 
 ```bash
+pi install npm:pi-feats
+```
+
+Git installation remains supported for unreleased development revisions:
+
+```bash
 pi install git:github.com/rjaskonis/pi-feats
 ```
 

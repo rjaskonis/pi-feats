@@ -420,7 +420,14 @@ The `remote:<name>` form forwards the rest of the command to the selected remote
 
 ## Installation
 
-Install the current default branch:
+Install the latest published package:
+
+```bash
+pi install npm:pi-feats
+pi list
+```
+
+Git installation remains available when you need the current default branch or an unreleased commit:
 
 ```bash
 pi install git:github.com/rjaskonis/pi-feats
@@ -439,16 +446,17 @@ Package operations follow normal Pi commands:
 pi list
 pi config
 pi update --extensions
-pi remove git:github.com/rjaskonis/pi-feats
+pi remove npm:pi-feats
 ```
 
-Pi records installed packages in `~/.pi/agent/settings.json`. To pin a production installation after a release tag or commit is available, install that exact ref:
+Pi records installed packages in `~/.pi/agent/settings.json`. To pin a production installation, select an exact npm version or a Git ref:
 
 ```bash
+pi install npm:pi-feats@<version>
 pi install git:github.com/rjaskonis/pi-feats@<tag-or-commit>
 ```
 
-Pi does not advance a pinned Git ref during a generic package update.
+Pi does not advance a pinned version or Git ref during a generic package update.
 
 ## Development
 
