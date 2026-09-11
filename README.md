@@ -1,8 +1,8 @@
-# pi-feats
+# Pi Feats
 
-> A modular Pi package for profiles, sandboxing, remote access, applications, guardrails, skills, session management, observability, and web-based operations.
+> Production-oriented extensions for [Mario Zechner's Pi Coding Agent](https://github.com/badlogic/pi-mono): profiles, Nono sandboxing, guardrails, HTTP/API access, scheduling, Skills, remote runtimes, and a WebUI.
 
-`pi-feats` turns Pi into an operational workspace without replacing Pi's native configuration model. It adds persistent profiles, a policy-controlled sandbox, HTTP and browser interfaces, application runtimes, scheduled work, Git-backed Skill discovery, and command-line administration.
+`pi-feats` turns the lightweight, extensible Pi Coding Agent into an operational workspace without replacing Pi's native configuration model. It adds persistent profiles, a policy-controlled sandbox, HTTP and browser interfaces, application runtimes, scheduled work, Git-backed Skill discovery, and command-line administration.
 
 ## Contents
 
@@ -32,6 +32,16 @@
 | **Pulse** | A persistent scheduled prompt, reminder, cron job, one-time job, or heartbeat bound to a profile and session. |
 | **Remote Host** | A registered SSH target that runs its own Pi command, profiles, packages, and resources. |
 | **Pi Console WebUI** | The authenticated browser operations cockpit for the API Server, profiles, Applications, Skills, Pulses, logs, and terminal. |
+
+## Why Pi Feats?
+
+Pi Coding Agent intentionally keeps its core lightweight and extensible. Pi Feats is a distributable extension package for operational and server-side deployments that need capabilities such as:
+
+- isolated Pi Agent profiles and policy-controlled Nono sandboxing;
+- guardrails across input, tool, and output stages;
+- an HTTP API and authenticated operations WebUI;
+- scheduled agents, Git-backed Skill distribution, and remote Pi runtimes;
+- application routing for multi-user and integration workloads.
 
 ## Features
 

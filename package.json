@@ -3,10 +3,31 @@
   "version": "0.1.0",
   "description": "A modular Pi package for profiles, sandboxing, remote access, applications, guardrails, skills, session management, observability, and web-based operations.",
   "keywords": [
-    "pi-package",
-    "pi",
-    "extensions",
+    "pi-coding-agent",
+    "pi-agent",
+    "pi-extension",
+    "ai-agent",
+    "agent-framework",
+    "agentic-ai",
+    "sandbox",
+    "nono",
+    "guardrails",
+    "webui",
     "agent-operations"
+  ],
+  "homepage": "https://github.com/rjaskonis/pi-feats#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rjaskonis/pi-feats.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rjaskonis/pi-feats/issues"
+  },
+  "files": [
+    "extensions",
+    "scripts",
+    "README.md",
+    "LICENSE"
   ],
   "license": "MIT",
   "engines": {
