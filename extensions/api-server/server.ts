@@ -232,6 +232,21 @@ class ApiServer {
     return { id: session.getSessionId(), name: session.getSessionName() ?? null, createdAt: header.timestamp, updatedAt: header.timestamp, messageCount: 0, preview: "" };
   }
 
+  async createApplicationConsoleSession(profile: string, input: unknown): Promise<Record<string, unknown>> {
+    const body = objectBody(input), application = body.application, identityKey = body.identityKey;
+    if (typeof application !== "string" || !application) throw Object.assign(new Error("Application is required."), { status: 400 });
+    if (typeof identityKey !== "string" || !identityKey.trim()) throw Object.assign(new Error("Identity key is required."), { status: 400 });
+    const record = this.applications.get(application);
+    if (!record?.enabled) throw Object.assign(new Error("Application was not found or is disabled."), { status: 404 });
+    const mapping = this.applications.identityMapping(application, identityKey.trim());
+    if (!mapping) throw Object.assign(new Error("No Identity Key mapping was found for this Application."), { status: 422 });
+    if (mapping.profile !== profile) throw Object.assign(new Error("This identity routes to a different profile."), { status: 422 });
+    const id = this.applications.nextConsoleSessionId(application, identityKey.trim());
+    const session = await this.createSession(profile, { id, name: `Application: ${record.name}` });
+    this.applications.createConsoleSession(id, application, profile, identityKey.trim());
+    return { ...session, application, manualApplicationSession: true };
+  }
+
   async renameSession(profile: string, id: string, name: string): Promise<Record<string, unknown>> {
     if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id)) throw Object.assign(new Error("Invalid sessionId"), { status: 400 });
     const trimmed = name.trim();
@@ -258,6 +273,7 @@ class ApiServer {
     active?.session.dispose();
     this.sessions.delete(key);
     await rm(existing.path);
+    this.applications.deleteConsoleSession(profile, id);
   }
 
   async getSessionConversation(profile: string, id: string, before?: string, requestedLimit = 16): Promise<Record<string, unknown>> {
@@ -410,13 +426,15 @@ class ApiServer {
   }
 
   private async chat(profile: string, id: string, message: string, reply: FastifyReply, stream: boolean): Promise<void> {
+    const manual = this.applications.consoleSession(profile, id);
+    const applicationContext = manual ? { application: manual.application, identityKey: manual.identityKey } : undefined;
     if (await this.sandboxed(profile)) {
-      if (!stream) { reply.send({ profile, sessionId: id, response: await this.runSandboxedPrompt(profile, id, message) }); return; }
+      if (!stream) { reply.send({ profile, sessionId: id, response: await this.runSandboxedPrompt(profile, id, message, undefined, undefined, applicationContext) }); return; }
       reply.hijack();
       reply.raw.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
       reply.raw.write(`event: session\ndata: ${JSON.stringify({ profile, sessionId: id })}\n\n`);
       try {
-        const response = await this.runSandboxedPrompt(profile, id, message, (text) => reply.raw.write(`event: token\ndata: ${JSON.stringify({ text })}\n\n`));
+        const response = await this.runSandboxedPrompt(profile, id, message, (text) => reply.raw.write(`event: token\ndata: ${JSON.stringify({ text })}\n\n`), undefined, applicationContext);
         reply.raw.write(`event: done\ndata: ${JSON.stringify({ response, sessionId: id, profile })}\n\n`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -450,7 +468,9 @@ class ApiServer {
         });
         response.once("close", () => { closed = true; void handle.session.abort(); });
       }
-      await this.withProfileEnvironment(this.profileDirectory(profile), () => handle.session.prompt(message, { source: "rpc" }));
+      const promptSession = () => this.withProfileEnvironment(this.profileDirectory(profile), () => handle.session.prompt(message, { source: "rpc" }));
+      if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id }, promptSession);
+      else await promptSession();
       const assistant = [...handle.session.messages].reverse().find((item) => item.role === "assistant");
       const response = textFromMessage(assistant);
       if (stream) {
@@ -690,6 +710,10 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.post<{ Params: { profile: string } }>("/api/profiles/:profile/sessions", async (request, reply) => {
       if (!guard(request, reply)) return;
       return reply.code(201).send(await api.createSession(profileName(request), request.body));
+    });
+    server.post<{ Params: { profile: string } }>("/api/profiles/:profile/application-sessions", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      return reply.code(201).send(await api.createApplicationConsoleSession(profileName(request), request.body));
     });
     server.get<{ Params: { profile: string; sessionId: string }; Querystring: { before?: string; limit?: string } }>("/api/profiles/:profile/sessions/:sessionId", async (request, reply) => {
       if (!guard(request, reply)) return;
