@@ -37,3 +37,18 @@ test("updates are isolated to the current identity", async () => {
     assert.equal(other.personal, "");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test("enforces character limits before writing Context Memory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-context-memory-"));
+  try {
+    const profile = join(root, "profiles", "support");
+    await mkdir(profile, { recursive: true });
+    await writeFile(join(profile, "settings.json"), JSON.stringify({ profile: { contextMemory: { mode: "file", target: "profile" } } }));
+    const context = { profile: "support" };
+    const exact = await updateContextMemory(root, profile, context, "replace", "profile", "a".repeat(1375));
+    assert.equal(exact.used, 1375);
+    await assert.rejects(() => updateContextMemory(root, profile, context, "insert", "profile", "b"), /1375-character limit/);
+    const read = await updateContextMemory(root, profile, context, "read", "profile");
+    assert.equal(read.used, 1375);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

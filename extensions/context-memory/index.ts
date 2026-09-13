@@ -42,8 +42,8 @@ export default function registerContextMemory(pi: ExtensionAPI): void {
     }),
     async execute(_id, params) {
       const result = await updateContextMemory(agentRoot(), profileDirectory(), executionContext(), params.action as ContextMemoryAction, params.target as ContextMemoryTarget, params.content, params.match, params.confirmed);
-      const text = result.action === "read" ? result.content || "No Context Memory has been stored for this target." : result.changed ? `Context Memory ${result.action} completed for ${result.target}. It will be included in new sessions.` : "Context Memory already matched the requested state.";
-      return { content: [{ type: "text" as const, text }], details: { target: result.target, action: result.action, changed: result.changed } };
+      const text = result.action === "read" ? result.content || "No Context Memory has been stored for this target." : result.changed ? `Context Memory ${result.action} completed for ${result.target}. ${result.remaining} of ${result.limit} characters remain. It will be included in new sessions.` : `Context Memory already matched the requested state. ${result.remaining} of ${result.limit} characters remain.`;
+      return { content: [{ type: "text" as const, text }], details: { target: result.target, action: result.action, changed: result.changed, used: result.used, limit: result.limit, remaining: result.remaining } };
     },
   });
 }

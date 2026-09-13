@@ -19,7 +19,7 @@ import { ApplicationRuntime, type Settings as ApplicationSettings } from "./appl
 import { ApplicationStore, type ApplicationRecord } from "./application-store.ts";
 import { applicationHandlerTemplate } from "../lib/application-handler-templates.ts";
 import { applicationExecutionContext } from "../lib/application-context.ts";
-import { contextMemoryConfig, memoryPath, readMemory } from "../lib/context-memory.ts";
+import { contextMemoryCharacters, contextMemoryConfig, contextMemoryLimit, memoryPath, readMemory } from "../lib/context-memory.ts";
 import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
 import { PulseStore } from "../pulse/store.ts";
@@ -617,7 +617,8 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
         if (!guard(request, reply)) return;
         const content = objectBody(request.body).content;
         if (typeof content !== "string") throw Object.assign(new Error("Content must be a string."), { status: 400 });
-        if (Buffer.byteLength(content, "utf8") > 64 * 1024) throw Object.assign(new Error("Context Memory exceeds its size limit."), { status: 413 });
+        const limit = contextMemoryLimit(target);
+        if (contextMemoryCharacters(content.trim()) > limit) throw Object.assign(new Error(`${target === "operational" ? "OPERATIONAL.md" : "PROFILE.md"} exceeds its ${limit}-character limit.`), { status: 413 });
         const profile = profileName(request), directory = api.profiles.directory(profile), path = memoryPath(options.agentDir, directory, target);
         await mkdir(dirname(path), { recursive: true }); await writeFile(path, `${content.trim()}${content.trim() ? "\n" : ""}`, { mode: 0o600 });
         return { content: content.trim() };
