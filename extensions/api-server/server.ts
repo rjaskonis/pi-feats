@@ -19,6 +19,7 @@ import { ApplicationRuntime, type Settings as ApplicationSettings } from "./appl
 import { ApplicationStore, type ApplicationRecord } from "./application-store.ts";
 import { applicationHandlerTemplate } from "../lib/application-handler-templates.ts";
 import { applicationExecutionContext } from "../lib/application-context.ts";
+import { contextMemoryConfig, memoryPath, readMemory } from "../lib/context-memory.ts";
 import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
 import { PulseStore } from "../pulse/store.ts";
@@ -588,6 +589,40 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     };
     documentRoute("soul", "SOUL.md");
     documentRoute("refine", "REFINE.md");
+
+    server.get<{ Params: { profile: string } }>("/api/profiles/:profile/context-memory", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      const profile = profileName(request);
+      const settings = await api.profiles.readSettings(profile);
+      return { config: contextMemoryConfig((settings.profile as { contextMemory?: unknown } | undefined)?.contextMemory) };
+    });
+    server.put<{ Params: { profile: string } }>("/api/profiles/:profile/context-memory", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      const profile = profileName(request), body = objectBody(request.body);
+      const config = body.config === null ? undefined : contextMemoryConfig(body.config);
+      if (body.config !== null && !config) throw Object.assign(new Error("Invalid Context Memory configuration."), { status: 400 });
+      const settings = await api.profiles.readSettings(profile);
+      const policy = { ...((settings.profile as Record<string, unknown> | undefined) ?? {}) };
+      if (config) policy.contextMemory = config; else delete policy.contextMemory;
+      await api.profiles.writeSettings(profile, { ...settings, profile: policy });
+      return { config: config ?? null };
+    });
+    for (const target of ["operational", "profile"] as const) {
+      server.get<{ Params: { profile: string } }>(`/api/profiles/:profile/context-memory/${target}`, async (request, reply) => {
+        if (!guard(request, reply)) return;
+        const profile = profileName(request), directory = api.profiles.directory(profile);
+        return { content: await readMemory(memoryPath(options.agentDir, directory, target)) };
+      });
+      server.put<{ Params: { profile: string } }>(`/api/profiles/:profile/context-memory/${target}`, async (request, reply) => {
+        if (!guard(request, reply)) return;
+        const content = objectBody(request.body).content;
+        if (typeof content !== "string") throw Object.assign(new Error("Content must be a string."), { status: 400 });
+        if (Buffer.byteLength(content, "utf8") > 64 * 1024) throw Object.assign(new Error("Context Memory exceeds its size limit."), { status: 413 });
+        const profile = profileName(request), directory = api.profiles.directory(profile), path = memoryPath(options.agentDir, directory, target);
+        await mkdir(dirname(path), { recursive: true }); await writeFile(path, `${content.trim()}${content.trim() ? "\n" : ""}`, { mode: 0o600 });
+        return { content: content.trim() };
+      });
+    }
 
     server.get<{ Params: { profile: string } }>("/api/profiles/:profile/env", async (request, reply) => {
       if (!guard(request, reply)) return;
