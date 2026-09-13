@@ -8,7 +8,7 @@ type ComposioConfig = { apiKey: string; userId: string };
 type ConnectedAccount = { id: string; alias?: string | null; wordId?: string | null; status?: string | null; toolkit?: { slug?: string | null } | null };
 type ComposioClient = {
   sessions: { create(userId: string, options?: RecordValue): Promise<ComposioSession> };
-  tools: { execute(slug: string, input: { arguments: RecordValue; userId: string; connectedAccountId?: string }): Promise<unknown> };
+  tools: { execute(slug: string, input: { arguments: RecordValue; userId: string; connectedAccountId?: string; dangerouslySkipVersionCheck?: boolean }): Promise<unknown> };
   connectedAccounts: { list(input: { userIds: string[]; toolkitSlugs?: string[] }): Promise<{ items?: ConnectedAccount[] }> };
 };
 type ComposioSession = {
@@ -76,6 +76,26 @@ async function accountFor(client: ComposioClient, userId: string, toolkit: strin
 }
 
 function inferToolkit(slug: string): string { return slug.split("_", 1)[0]?.toLowerCase() ?? ""; }
+function publicAccount(account: ConnectedAccount) {
+  return { id: account.id, alias: account.alias ?? undefined, wordId: account.wordId ?? undefined, status: account.status ?? undefined, toolkit: account.toolkit?.slug ?? undefined };
+}
+function searchSummary(value: unknown) {
+  const response = asRecord(value);
+  const schemas = asRecord(response.toolSchemas);
+  const results = Array.isArray(response.results) ? response.results.map((item) => {
+    const entry = asRecord(item);
+    const slugs = Array.isArray(entry.primaryToolSlugs) ? entry.primaryToolSlugs.filter((slug): slug is string => typeof slug === "string") : [];
+    return {
+      primaryToolSlugs: slugs,
+      relatedToolSlugs: Array.isArray(entry.relatedToolSlugs) ? entry.relatedToolSlugs.filter((slug): slug is string => typeof slug === "string") : [],
+      toolkits: Array.isArray(entry.toolkits) ? entry.toolkits.filter((toolkit): toolkit is string => typeof toolkit === "string") : [],
+      toolSchemas: Object.fromEntries(slugs.map((slug) => [slug, schemas[slug]]).filter(([, schema]) => schema !== undefined)),
+    };
+  }) : [];
+  return { results, connections: Array.isArray(response.toolkitConnectionStatuses) ? response.toolkitConnectionStatuses.map((item) => {
+    const entry = asRecord(item); return { toolkit: entry.toolkit, active: entry.hasActiveConnection === true, status: entry.statusMessage };
+  }) : [] };
+}
 function result(value: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }], details: value }; }
 
 export default function registerComposio(pi: ExtensionAPI): void {
@@ -86,7 +106,7 @@ export default function registerComposio(pi: ExtensionAPI): void {
     parameters: Type.Object({ query: Type.String({ minLength: 1 }), toolkits: Type.Optional(Type.Array(Type.String({ minLength: 1 }))) }),
     async execute(_id, params) {
       const current = await runtime();
-      return result(await current.session.search({ query: params.query, ...(params.toolkits?.length ? { toolkits: params.toolkits } : {}) }));
+      return result(searchSummary(await current.session.search({ query: params.query, ...(params.toolkits?.length ? { toolkits: params.toolkits } : {}) })));
     },
   });
 
@@ -98,7 +118,7 @@ export default function registerComposio(pi: ExtensionAPI): void {
     async execute(_id, params) {
       const current = await runtime();
       const accounts = await current.client.connectedAccounts.list({ userIds: [current.config.userId], ...(params.toolkit ? { toolkitSlugs: [params.toolkit] } : {}) });
-      return result({ accounts: accounts.items ?? [] });
+      return result({ accounts: (accounts.items ?? []).map(publicAccount) });
     },
   });
 
@@ -133,6 +153,9 @@ export default function registerComposio(pi: ExtensionAPI): void {
         arguments: asRecord(params.arguments),
         userId: current.config.userId,
         ...(connectedAccountId ? { connectedAccountId } : {}),
+        // The integration searches tools dynamically, so Composio cannot pin a
+        // release at package-build time. Execute the version returned by search.
+        dangerouslySkipVersionCheck: true,
       });
       return result(response);
     },
