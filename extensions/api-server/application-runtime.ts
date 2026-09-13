@@ -139,11 +139,17 @@ export class ApplicationRuntime {
         temporaryPath = join(dirname(path), `.pi-handler-test-${randomUUID()}.ts`);
         await writeFile(temporaryPath, content, "utf8");
       }
-      const loaded = this.jiti(temporaryPath ?? path) as { handle?: Handler };
-      if (typeof loaded.handle !== "function") throw new Error("Handler must export handle().");
-      const context = { application: this.application, settings: await this.api.agentSettings(), request: { id: randomUUID(), headers: {}, query: {} }, test: true, log: { info: (...values: unknown[]) => stdout.push(logValues(values)), error: (...values: unknown[]) => stderr.push(logValues(values)) } };
+      const loaded = this.jiti(temporaryPath ?? path) as { handle?: Handler; resolveContextMemory?: (context: { application: { slug: string }; identityKey?: string; profile: string; sessionId: string }, env: Record<string, string | undefined>) => Promise<unknown> | unknown };
       installConsoleCapture();
-      const output = await testConsoleLogs.run({ stdout, stderr }, async () => loaded.handle(payload, {}, {}, context, {}, await this.environmentFor(payload)));
+      let output: unknown;
+      if (typeof loaded.resolveContextMemory === "function") {
+        const profile = typeof payload.profile === "string" ? payload.profile : "default", identityKey = typeof payload.identityKey === "string" ? payload.identityKey : undefined, sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "test-session";
+        output = await testConsoleLogs.run({ stdout, stderr }, async () => loaded.resolveContextMemory!({ application: { slug: this.application.slug }, identityKey, profile, sessionId }, await this.api.handlerEnvironment(profile)));
+      } else {
+        if (typeof loaded.handle !== "function") throw new Error("Handler must export handle() or resolveContextMemory().");
+        const context = { application: this.application, settings: await this.api.agentSettings(), request: { id: randomUUID(), headers: {}, query: {} }, test: true, log: { info: (...values: unknown[]) => stdout.push(logValues(values)), error: (...values: unknown[]) => stderr.push(logValues(values)) } };
+        output = await testConsoleLogs.run({ stdout, stderr }, async () => loaded.handle!(payload, {}, {}, context, {}, await this.environmentFor(payload)));
+      }
       return { ok: true, output, logs: { stdout, stderr }, durationMs: Math.round(performance.now() - started) };
     } catch (error) {
       const message = error instanceof Error ? error.stack ?? error.message : String(error);
