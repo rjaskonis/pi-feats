@@ -18,6 +18,17 @@ test("new profiles default Context Memory to PROFILE.md without replacing an exi
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("personal target follows the configured profile memory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-context-memory-"));
+  try {
+    const profile = join(root, "profile"); await mkdir(profile, { recursive: true });
+    await writeFile(join(profile, "settings.json"), JSON.stringify({ profile: { contextMemory: { mode: "file", target: "profile" } } }));
+    const result = await updateContextMemory(root, profile, { profile: "profile" }, "replace", "personal", "Renne's daughter is Yasmin.");
+    assert.equal(result.target, "profile");
+    assert.equal((await resolveContextMemory(root, profile, { profile: "profile" })).personal, "Renne's daughter is Yasmin.");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("identity paths are deterministic and do not expose the raw identity", () => {
   const value = normalizeIdentity("5519996034196@s.whatsapp.net");
   assert.equal(value, normalizeIdentity("5519996034196@s.whatsapp.net"));

@@ -5,7 +5,7 @@ import { applicationExecutionContext } from "../lib/application-context.ts";
 import { ensureDefaultProfileContextMemory, resolveContextMemory, snapshotMessage, updateContextMemory, type ContextMemoryAction, type ContextMemoryTarget } from "../lib/context-memory.ts";
 
 const actions = ["read", "insert", "update", "remove", "replace"] as const;
-const targets = ["operational", "profile", "user"] as const;
+const targets = ["operational", "personal", "profile", "user"] as const;
 const agentRoot = () => process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
 const profileDirectory = () => process.env.PI_CODING_AGENT_DIR ?? agentRoot();
 function executionContext() {
@@ -33,7 +33,7 @@ export default function registerContextMemory(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "context_memory",
     label: "Context Memory",
-    description: "Read or safely update persistent operational, profile, or current-user context. Never use file paths.",
+    description: "Read or safely update persistent Context Memory. Use 'operational' for shared operational facts and 'personal' for a person's durable facts. 'personal' automatically writes to the configured PROFILE.md or identity USER.md; do not choose profile or user directly. Never use file paths.",
     parameters: Type.Object({
       action: Type.Union(actions.map((value) => Type.Literal(value))),
       target: Type.Union(targets.map((value) => Type.Literal(value))),
@@ -42,6 +42,7 @@ export default function registerContextMemory(pi: ExtensionAPI): void {
       confirmed: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params) {
+      await ensureDefaultProfileContextMemory(profileDirectory());
       const result = await updateContextMemory(agentRoot(), profileDirectory(), executionContext(), params.action as ContextMemoryAction, params.target as ContextMemoryTarget, params.content, params.match, params.confirmed);
       const text = result.action === "read" ? result.content || "No Context Memory has been stored for this target." : result.changed ? `Context Memory ${result.action} completed for ${result.target}. ${result.remaining} of ${result.limit} characters remain. It will be included in new sessions.` : `Context Memory already matched the requested state. ${result.remaining} of ${result.limit} characters remain.`;
       return { content: [{ type: "text" as const, text }], details: { target: result.target, action: result.action, changed: result.changed, used: result.used, limit: result.limit, remaining: result.remaining } };
