@@ -16,6 +16,7 @@ type ProfilePolicy = {
   enabledProfileSkills?: string[];
   enabledExtensions?: string[];
   skillSources?: { shared?: boolean; profile?: boolean };
+  contextMemory?: { mode: "file"; target: "profile" | "identity" } | { mode: "handler"; handler: string };
 };
 
 type ProfileSettings = Record<string, unknown> & { profile?: ProfilePolicy };

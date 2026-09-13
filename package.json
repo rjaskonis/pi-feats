@@ -41,7 +41,7 @@
     "ensure:nono": "sh scripts/install-nono.sh",
     "postinstall": "npm run ensure:nono && npm run build:web",
     "test": "npm run test:composio && npm run build:web",
-    "test:composio": "node --experimental-strip-types --test tests/composio.test.ts"
+    "test:composio": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "^6.2.5",
@@ -85,6 +85,7 @@
       "./extensions/api-server",
       "./extensions/cli-resources.ts",
       "./extensions/composio",
+      "./extensions/context-memory",
       "./extensions/guardrails",
       "./extensions/pi-console-webui",
       "./extensions/profiles.ts",

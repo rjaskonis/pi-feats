@@ -369,7 +369,7 @@ class ApiServer {
     try {
       const session = (await this.listProfileSessions(profile)).find((item) => item.id === id);
       if (!session) throw Object.assign(new Error(`No session found matching '${id}'`), { status: 404 });
-      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey } : {}) };
+      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application } : {}) };
       // The HTTP gateway is an API worker itself. Its children are agent
       // runtimes, not additional HTTP servers.
       delete workerEnv.PI_API_WORKER;
@@ -787,7 +787,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     const applicationsRoot = join(options.agentDir, "applications");
     const applicationBySlug = new Map<string, { record: ApplicationRecord; runtime: ApplicationRuntime }>();
     const applicationSettings = (record: ApplicationRecord): ApplicationSettings => ({ ...record.settings, responseMode: record.responseMode, defaultProfile: record.defaultProfile }) as ApplicationSettings;
-    const ensureApplicationFiles = async (slug: string) => { const handlers = join(applicationsRoot, slug, "handlers"); await mkdir(join(handlers, "transforms"), { recursive: true }); const inbound = join(handlers, "inbound.ts"); if (!existsSync(inbound)) await writeFile(inbound, applicationHandlerTemplate("inbound"), "utf8"); };
+    const ensureApplicationFiles = async (slug: string) => { const handlers = join(applicationsRoot, slug, "handlers"); await mkdir(join(handlers, "transforms"), { recursive: true }); await mkdir(join(handlers, "context-memory"), { recursive: true }); const inbound = join(handlers, "inbound.ts"); if (!existsSync(inbound)) await writeFile(inbound, applicationHandlerTemplate("inbound"), "utf8"); };
     const loadApplication = async (record: ApplicationRecord) => { const directory = join(applicationsRoot, record.slug); await ensureApplicationFiles(record.slug); const runtime = await ApplicationRuntime.load(directory, api, applicationSettings(record), async (settings) => { const saved = applicationStore.update(record.slug, { settings, responseMode: settings.responseMode, defaultProfile: settings.defaultProfile ?? null }); applicationBySlug.set(saved.slug, { record: saved, runtime }); }, record); applicationBySlug.set(record.slug, { record, runtime }); };
     for (const record of applicationStore.list()) await loadApplication(record);
     const registeredApplication = (slug: string) => { const application = applicationBySlug.get(slug); if (!application) throw Object.assign(new Error("Application not found."), { status: 404 }); return application; };

@@ -1,4 +1,4 @@
-export type ApplicationHandlerType = "inbound" | "outbound" | "transform";
+export type ApplicationHandlerType = "inbound" | "outbound" | "transform" | "context-memory";
 export function applicationHandlerTemplate(type: ApplicationHandlerType): string {
   if (type === "inbound") return `type Payload = Record<string, unknown>;
 type Context = Record<string, any>;
@@ -26,6 +26,18 @@ export async function handle(
 // Alternatively, omit identityKey and return a direct route instead:
 // return { profile: "default", sessionPrefix: "conversation", payload: { message: "..." } };
 // sessionPrefix is optional in that mode and defaults to "default".
+`;
+  if (type === "context-memory") return `type ContextMemoryContext = {
+  application: { id: string; name: string; slug: string };
+  identityKey?: string;
+  profile: string;
+  sessionId: string;
+};
+
+export async function resolveContextMemory(context: ContextMemoryContext): Promise<string> {
+  // Return Markdown facts useful for this person. Do not return secrets.
+  return "";
+}
 `;
   if (type === "outbound") return `type Payload = Record<string, any>;
 type Context = Record<string, any>;
