@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -44,6 +44,20 @@ export async function readMemory(path: string, maximumBytes = MAX_FILE_BYTES): P
   const content = await readFile(path, "utf8");
   if (Buffer.byteLength(content, "utf8") > maximumBytes) throw new Error("Context Memory exceeds its storage size limit.");
   return content.trim();
+}
+
+export async function ensureDefaultProfileContextMemory(profileDir: string): Promise<ContextMemoryConfig> {
+  const path = join(profileDir, "settings.json");
+  const settings = existsSync(path) ? JSON.parse(await readFile(path, "utf8")) as Record<string, unknown> : {};
+  if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error("settings.json must contain an object.");
+  const profile = settings.profile;
+  if (profile && typeof profile === "object" && !Array.isArray(profile) && Object.prototype.hasOwnProperty.call(profile, "contextMemory")) return contextMemoryConfig((profile as Record<string, unknown>).contextMemory) ?? { mode: "file", target: "profile" };
+  const next = { ...settings, profile: { ...(profile && typeof profile === "object" && !Array.isArray(profile) ? profile : {}), contextMemory: { mode: "file", target: "profile" } } };
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+  await rename(temporary, path);
+  return { mode: "file", target: "profile" };
 }
 
 export async function profileMemoryConfig(profileDir: string): Promise<ContextMemoryConfig | undefined> {

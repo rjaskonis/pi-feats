@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { join } from "node:path";
 import { applicationExecutionContext } from "../lib/application-context.ts";
-import { resolveContextMemory, snapshotMessage, updateContextMemory, type ContextMemoryAction, type ContextMemoryTarget } from "../lib/context-memory.ts";
+import { ensureDefaultProfileContextMemory, resolveContextMemory, snapshotMessage, updateContextMemory, type ContextMemoryAction, type ContextMemoryTarget } from "../lib/context-memory.ts";
 
 const actions = ["read", "insert", "update", "remove", "replace"] as const;
 const targets = ["operational", "profile", "user"] as const;
@@ -20,6 +20,7 @@ export default function registerContextMemory(pi: ExtensionAPI): void {
     // Never inject into an already established session when the extension is added later.
     if (entries.some((entry) => entry.type === "message")) return;
     try {
+      await ensureDefaultProfileContextMemory(profileDirectory());
       const memory = await resolveContextMemory(agentRoot(), profileDirectory(), executionContext());
       const content = snapshotMessage(memory);
       if (!content) return;

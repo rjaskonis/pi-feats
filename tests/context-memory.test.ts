@@ -1,9 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { normalizeIdentity, resolveContextMemory, updateContextMemory } from "../extensions/lib/context-memory.ts";
+import { ensureDefaultProfileContextMemory, normalizeIdentity, resolveContextMemory, updateContextMemory } from "../extensions/lib/context-memory.ts";
+
+test("new profiles default Context Memory to PROFILE.md without replacing an existing choice", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-context-memory-"));
+  try {
+    const profile = join(root, "profile"); await mkdir(profile, { recursive: true });
+    await writeFile(join(profile, "settings.json"), JSON.stringify({ profile: { model: "test" } }));
+    await ensureDefaultProfileContextMemory(profile);
+    assert.deepEqual(JSON.parse(await readFile(join(profile, "settings.json"), "utf8")).profile.contextMemory, { mode: "file", target: "profile" });
+    await writeFile(join(profile, "settings.json"), JSON.stringify({ profile: { contextMemory: { mode: "file", target: "identity" } } }));
+    await ensureDefaultProfileContextMemory(profile);
+    assert.deepEqual(JSON.parse(await readFile(join(profile, "settings.json"), "utf8")).profile.contextMemory, { mode: "file", target: "identity" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("identity paths are deterministic and do not expose the raw identity", () => {
   const value = normalizeIdentity("5519996034196@s.whatsapp.net");
