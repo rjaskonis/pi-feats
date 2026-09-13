@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { profileEnvironment } from "./profile-env.ts";
 
 export type ContextMemoryConfig =
   | { mode: "file"; target: "profile" | "identity" }
@@ -52,16 +53,16 @@ export async function profileMemoryConfig(profileDir: string): Promise<ContextMe
   return contextMemoryConfig(settings.profile?.contextMemory);
 }
 
-async function handlerMemory(agentDir: string, context: MemoryExecutionContext, handler: string): Promise<string> {
+async function handlerMemory(agentDir: string, profileDir: string, context: MemoryExecutionContext, handler: string): Promise<string> {
   if (!context.application) return "";
   const path = join(agentDir, "applications", context.application, "handlers", "context-memory", `${handler}.ts`);
   if (!existsSync(path)) throw new Error(`Context Memory handler "${handler}" was not found.`);
   const { createJiti } = await import("jiti");
   const jiti = createJiti(process.cwd(), { moduleCache: false, fsCache: false });
-  const loaded = jiti(path) as { resolveContextMemory?: (input: { application: { slug: string }; identityKey?: string; profile: string; sessionId: string }) => Promise<unknown> | unknown };
+  const loaded = jiti(path) as { resolveContextMemory?: (input: { application: { slug: string }; identityKey?: string; profile: string; sessionId: string }, env: Record<string, string | undefined>) => Promise<unknown> | unknown };
   if (typeof loaded.resolveContextMemory !== "function") throw new Error(`Context Memory handler "${handler}" must export resolveContextMemory().`);
   const output = await Promise.race([
-    Promise.resolve(loaded.resolveContextMemory({ application: { slug: context.application }, identityKey: context.identityKey, profile: context.profile, sessionId: context.sessionId ?? "" })),
+    Promise.resolve(loaded.resolveContextMemory({ application: { slug: context.application }, identityKey: context.identityKey, profile: context.profile, sessionId: context.sessionId ?? "" }, await profileEnvironment(profileDir))),
     new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("Context Memory handler timed out.")), 3_000)),
   ]);
   if (typeof output !== "string") throw new Error("Context Memory handler must return Markdown text.");
@@ -80,7 +81,7 @@ export async function resolveContextMemory(agentDir: string, profileDir: string,
     const personal = await readMemory(memoryPath(agentDir, profileDir, "user", context.application, context.identityKey)); if (contextMemoryCharacters(personal) > CONTEXT_MEMORY_LIMITS.user) throw new Error("USER.md exceeds 1375 characters."); return { operational, personal, source: "identity" };
   }
   if (!context.application || config.mode !== "handler") return { operational, personal: "" };
-  try { return { operational, personal: await handlerMemory(agentDir, context, config.handler), source: "handler" }; }
+  try { return { operational, personal: await handlerMemory(agentDir, profileDir, context, config.handler), source: "handler" }; }
   catch (error) { console.error(`Context Memory handler failed: ${error instanceof Error ? error.message : String(error)}`); return { operational, personal: "" }; }
 }
 

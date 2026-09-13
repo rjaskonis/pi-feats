@@ -34,8 +34,12 @@ export async function handle(
   sessionId: string;
 };
 
-export async function resolveContextMemory(context: ContextMemoryContext): Promise<string> {
-  // Return Markdown facts useful for this person. Do not return secrets.
+export async function resolveContextMemory(
+  context: ContextMemoryContext,
+  env: Record<string, string | undefined>,
+): Promise<string> {
+  // env contains the active profile's .env values. Do not return secrets.
+  // Example: const baseUrl = env.CRM_BASE_URL;
   return "";
 }
 `;
