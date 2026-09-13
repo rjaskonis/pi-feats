@@ -56,7 +56,7 @@ test("updates are isolated to the current identity", async () => {
     const profile = join(root, "profiles", "support");
     await mkdir(profile, { recursive: true });
     await writeFile(join(profile, "settings.json"), JSON.stringify({ profile: { contextMemory: { mode: "file", target: "identity" } } }));
-    await updateContextMemory(root, profile, { application: "assistant", identityKey: "a@example.com", profile: "support" }, "insert", "user", "Prefers Portuguese");
+    await updateContextMemory(root, profile, { application: "assistant", identityKey: "a@example.com", profile: "support" }, "insert", "personal", "Prefers Portuguese");
     const other = await resolveContextMemory(root, profile, { application: "assistant", identityKey: "b@example.com", profile: "support" });
     assert.equal(other.personal, "");
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -69,10 +69,10 @@ test("enforces character limits before writing Context Memory", async () => {
     await mkdir(profile, { recursive: true });
     await writeFile(join(profile, "settings.json"), JSON.stringify({ profile: { contextMemory: { mode: "file", target: "profile" } } }));
     const context = { profile: "support" };
-    const exact = await updateContextMemory(root, profile, context, "replace", "profile", "a".repeat(1375));
+    const exact = await updateContextMemory(root, profile, context, "replace", "personal", "a".repeat(1375));
     assert.equal(exact.used, 1375);
-    await assert.rejects(() => updateContextMemory(root, profile, context, "insert", "profile", "b"), /1375-character limit/);
-    const read = await updateContextMemory(root, profile, context, "read", "profile");
+    await assert.rejects(() => updateContextMemory(root, profile, context, "insert", "personal", "b"), /1375-character limit/);
+    const read = await updateContextMemory(root, profile, context, "read", "personal");
     assert.equal(read.used, 1375);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
