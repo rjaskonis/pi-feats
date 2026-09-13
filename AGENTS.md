@@ -54,13 +54,6 @@ pi profile test-profile packages list
 
 Use a temporary `PI_CODING_AGENT_DIR` for isolation. Confirm the profile settings contain no `packages` or `extensions` keys and that no `git/`, `npm/`, `extensions/`, or `node_modules/` directory is created below the profile. Also validate a clean Git package installation when modifying package bootstrap behavior.
 
-## Mirrored deployment source
+## Deployment source
 
-Shared extension changes must be mirrored to:
-
-```text
-/home/rj/Projects/AI/ai-agents-assets/pi/extensions/
-/home/rj/.pi/agent/extensions/
-```
-
-Keep the functional copies synchronized, while preserving repository-specific Docker/package metadata.
+`pi-feats` is the only source for shared extensions. Do not copy or mirror extension code into `ai-agents-assets` or `~/.pi/agent/extensions`; distribute changes through the package and `pi update`.

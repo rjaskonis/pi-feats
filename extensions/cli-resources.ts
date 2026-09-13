@@ -332,6 +332,12 @@ async function findResource(kind: "extensions" | "skills", target: string, setti
   const rawEntries = Array.isArray(settings[kind]) ? settings[kind].filter((entry): entry is string => typeof entry === "string") : [];
   const roots = [join(agentDir, kind), ...(kind === "skills" ? [join(resourceRoot, "skills")] : []), ...rawEntries.filter((entry) => !/^[!+\-]/.test(entry)), join(process.cwd(), ".pi", kind)];
   const name = target.replace(/^[!+\-]+/, "");
+  if (kind === "extensions") {
+    for (const entry of await configuredPackageExtensions(resourceRoot, settings)) {
+      const extensionName = basename(entry.path, extname(entry.path));
+      if (extensionName === name) return entry.path;
+    }
+  }
 
   for (const root of [...new Set(roots)]) {
     if (!existsSync(root)) continue;

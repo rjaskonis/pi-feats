@@ -18,6 +18,7 @@ import { ProfileStore, RESOURCE_KINDS, type ProfileSettings, type ResourceKind }
 import { ApplicationRuntime, type Settings as ApplicationSettings } from "./application-runtime.ts";
 import { ApplicationStore, type ApplicationRecord } from "./application-store.ts";
 import { applicationHandlerTemplate } from "../lib/application-handler-templates.ts";
+import { applicationExecutionContext } from "../lib/application-context.ts";
 import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
 import { PulseStore } from "../pulse/store.ts";
@@ -361,14 +362,14 @@ class ApiServer {
     return isSandboxEnabled(this.profileDirectory(profile), profile === "default");
   }
 
-  private async runSandboxedPrompt(profile: string, id: string, message: string, onData?: (text: string) => void, handoff?: string): Promise<string> {
+  private async runSandboxedPrompt(profile: string, id: string, message: string, onData?: (text: string) => void, handoff?: string, applicationContext?: { application: string; identityKey: string }): Promise<string> {
     const key = `${profile}:${id}`;
     if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
     this.sandboxBusy.add(key);
     try {
       const session = (await this.listProfileSessions(profile)).find((item) => item.id === id);
       if (!session) throw Object.assign(new Error(`No session found matching '${id}'`), { status: 404 });
-      const workerEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}) }; 
+      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey } : {}) };
       // The HTTP gateway is an API worker itself. Its children are agent
       // runtimes, not additional HTTP servers.
       delete workerEnv.PI_API_WORKER;
@@ -393,13 +394,15 @@ class ApiServer {
     } finally { this.sandboxBusy.delete(key); }
   }
 
-  async prompt(profile: string, id: string, message: string, handoff?: string): Promise<{ profile: string; sessionId: string; response: string }> {
-    if (await this.sandboxed(profile)) return { profile, sessionId: id, response: await this.runSandboxedPrompt(profile, id, message, undefined, handoff) };
+  async prompt(profile: string, id: string, message: string, handoff?: string, applicationContext?: { application: string; identityKey: string }): Promise<{ profile: string; sessionId: string; response: string }> {
+    if (await this.sandboxed(profile)) return { profile, sessionId: id, response: await this.runSandboxedPrompt(profile, id, message, undefined, handoff, applicationContext) };
     const handle = await this.getSession(profile, id);
     if (handle.busy || !handle.session.isIdle) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
     handle.busy = true;
     try {
-      await this.withProfileEnvironment(this.profileDirectory(profile), () => handle.session.prompt(message, { source: "rpc" }), handoff ? { PI_APPLICATION_HANDOFF: handoff } : {});
+      const promptSession = () => this.withProfileEnvironment(this.profileDirectory(profile), () => handle.session.prompt(message, { source: "rpc" }), handoff ? { PI_APPLICATION_HANDOFF: handoff } : {});
+      if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id }, promptSession);
+      else await promptSession();
       const assistant = [...handle.session.messages].reverse().find((item) => item.role === "assistant");
       return { profile, sessionId: id, response: textFromMessage(assistant) };
     } finally { handle.busy = false; }
