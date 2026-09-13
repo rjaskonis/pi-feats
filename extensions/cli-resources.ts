@@ -197,7 +197,8 @@ async function findSkillFiles(path: string): Promise<string[]> {
 
 function skillEnabled(resourcePath: string, skillRoot: string, settings: Record<string, unknown>, exclusions: string[]): boolean {
   const policy = (settings.profile as { enabledSkills?: unknown } | undefined)?.enabledSkills;
-  const name = relative(skillRoot, resourcePath).replaceAll("\\", "/");
+  const relativeName = relative(skillRoot, resourcePath).replaceAll("\\", "/");
+  const name = relativeName.startsWith("../") ? basename(resourcePath) : relativeName;
   if (Array.isArray(policy)) return policy.includes("*") || policy.includes(name);
   return !isExcluded(resourcePath, exclusions);
 }
@@ -244,7 +245,8 @@ async function extensionRows(paths: string[], exclusions: string[]): Promise<Row
   return rows.sort((a, b) => a[0].localeCompare(b[0]));
 }
 
-type ConfiguredPackage = { source: string; base: string; name: string; manifest?: { version?: string; description?: string; pi?: { extensions?: unknown } } };
+type PackageResourceKind = "extensions" | "skills";
+type ConfiguredPackage = { source: string; base: string; name: string; manifest?: { version?: string; description?: string; pi?: { extensions?: unknown; skills?: unknown } } };
 
 function packageBase(source: string, resourceRoot: string): string | undefined {
   if (source.startsWith("npm:")) return join(resourceRoot, "npm", "node_modules", source.slice(4));
@@ -273,14 +275,19 @@ async function configuredPackages(resourceRoot: string, settings: Record<string,
   return packages;
 }
 
-async function configuredPackageExtensions(resourceRoot: string, settings: Record<string, unknown>): Promise<Array<{ path: string; packageName: string }>> {
+async function configuredPackageResources(resourceRoot: string, settings: Record<string, unknown>, kind: PackageResourceKind): Promise<Array<{ path: string; packageName: string }>> {
   const paths: Array<{ path: string; packageName: string }> = [];
   for (const pkg of await configuredPackages(resourceRoot, settings)) {
-    for (const extension of Array.isArray(pkg.manifest?.pi?.extensions) ? pkg.manifest.pi.extensions : []) {
-      if (typeof extension === "string") paths.push({ path: join(pkg.base, extension), packageName: pkg.name });
+    const entries = pkg.manifest?.pi?.[kind];
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      if (typeof entry === "string") paths.push({ path: join(pkg.base, entry), packageName: pkg.name });
     }
   }
   return paths;
+}
+
+async function configuredPackageExtensions(resourceRoot: string, settings: Record<string, unknown>) {
+  return configuredPackageResources(resourceRoot, settings, "extensions");
 }
 
 async function packageToolSources(resourceRoot: string, settings: Record<string, unknown>, names: string[]): Promise<Map<string, string>> {
@@ -336,6 +343,12 @@ async function findResource(kind: "extensions" | "skills", target: string, setti
     for (const entry of await configuredPackageExtensions(resourceRoot, settings)) {
       const extensionName = basename(entry.path, extname(entry.path));
       if (extensionName === name) return entry.path;
+    }
+  } else {
+    for (const entry of await configuredPackageResources(resourceRoot, settings, "skills")) {
+      for (const skillFile of await findSkillFiles(entry.path)) {
+        if (basename(dirname(skillFile)) === name) return dirname(skillFile);
+      }
     }
   }
 
@@ -552,13 +565,12 @@ export default async function (pi: ExtensionAPI) {
       const configuredPaths = rawEntries.filter((value) => !/^[!+\-]/.test(value));
       const exclusions = rawEntries.filter((value) => value.startsWith("!"));
       const catalogRoot = join(resourceRoot, kind);
-      const packageExtensions = await configuredPackageExtensions(resourceRoot, kind === "extensions" ? loaded.runtimeSettings : settings);
-      const packagePaths = new Map(packageExtensions.map(({ path, packageName }) => [path, packageName]));
+      const packageResources = await configuredPackageResources(resourceRoot, loaded.runtimeSettings, kind === "extensions" ? "extensions" : "skills");
       const paths = kind === "skills"
-        ? [...new Set([catalogRoot, ...configuredPaths])]
-        : [...new Set([...(configuredPaths.length > 0 ? configuredPaths : [catalogRoot]), ...packageExtensions.map(({ path }) => path)])];
+        ? [...new Set([catalogRoot, ...configuredPaths, ...packageResources.map(({ path }) => path)])]
+        : [...new Set([...(configuredPaths.length > 0 ? configuredPaths : [catalogRoot]), ...packageResources.map(({ path }) => path)])];
       const rows: SourceRow[] = (kind === "skills" ? await skillRows(paths, catalogRoot, settings, exclusions) : await extensionRows(paths, exclusions)).map((row) => {
-        const packageName = packagePaths.get(row[2]);
+        const packageName = packageResources.find(({ path }) => row[2] === path || isWithin(row[2], path))?.packageName;
         const source = packageName ? `Package: ${packageName}` : (row[2].startsWith(join(resourceRoot, "skills")) ? "Shared" : row[2].includes("/profiles/") ? "Profile" : "Local");
         return [row[0], row[1], source, row[2]];
       });
