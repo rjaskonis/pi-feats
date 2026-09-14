@@ -1,0 +1,241 @@
+import { readFile } from "node:fs/promises";
+import { resolve, isAbsolute } from "node:path";
+import { isPathWithin } from "../util/paths";
+import { tmpdir } from "node:os";
+import { createRequire } from "node:module";
+import { Type } from "typebox";
+import { Markdown, Text } from "@earendil-works/pi-tui";
+import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
+import { type Result, err, ok } from "../util/result";
+import { formatBytes } from "../util/truncate";
+import { defineBrowserTool, type ToolErr, type ToolOk } from "../util/tool";
+import { evalJs } from "./cdp-call";
+import { applyTruncation } from "../util/truncate";
+import { asNumber, asRecord, asString, isRecord } from "../util/guards";
+
+const COMPACT_PREVIEW_BYTES = 120;
+
+// The AsyncFunction constructor is the documented way to compile user source; a plain `unknown` cast would lose the constructor signature, so this typed cast stays.
+const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor as
+  new (...args: ReadonlyArray<string>) => (...args: ReadonlyArray<unknown>) => Promise<unknown>;
+
+const requireFromHere = createRequire(import.meta.url);
+
+const ExecuteJsArgs = Type.Object({
+  expression: Type.String({ description: "JavaScript expression. `return X` is auto-wrapped in an IIFE." }),
+  targetId: Type.Optional(Type.String({ description: "Optional iframe targetId; default = current page." })),
+});
+
+export const executeJsTool = defineBrowserTool({
+  name: "browser_execute_js",
+  label: "Browser Execute JS",
+  description:
+    "Surgical reads from the DOM. The cheapest, most precise way to extract a specific element's text, attribute, value, or geometry. Prefer over browser_screenshot for ANY data extraction or coordinate lookup. `return X` is auto-wrapped in an IIFE. Always use safeJs / JSON.stringify when interpolating untrusted strings.",
+  promptSnippet: "Execute JS in the page — surgical DOM reads (preferred over screenshot)",
+  promptGuidelines: [
+    "DEFAULT for extracting a specific value: `document.querySelector('.price').innerText`, `input.value`, `el.getAttribute('aria-label')`, etc.",
+    "For click coordinates not already in browser_snapshot: `JSON.stringify(document.querySelector('SELECTOR').getBoundingClientRect())` — beats a screenshot every time.",
+    "For 'is this element visible / enabled / checked / focused', a one-liner here beats a screenshot every time.",
+    "DO NOT call browser_screenshot to read a value or check element state. Use this tool.",
+    "`return foo` is auto-wrapped in an IIFE — both `foo` and `(() => foo)()` work.",
+    "For iframes, first run `Object.values(document.querySelectorAll('iframe'))` to find the iframe, then pass its targetId.",
+    "Result must be JSON-serializable (Runtime.evaluate returnByValue=true).",
+  ],
+  parameters: ExecuteJsArgs,
+  concurrency: "parallel",
+  async handler(args, { client }): Promise<Result<ToolOk, ToolErr>> {
+    const r = await evalJs(client, args.expression, args.targetId);
+    if (!r.success) return r;
+    const valueStr = r.data === undefined ? "undefined" : JSON.stringify(r.data);
+    const truncated = await applyTruncation(valueStr, "js");
+    let pretty: string | undefined;
+    try {
+      const parsed: unknown = JSON.parse(valueStr);
+      pretty = JSON.stringify(parsed, null, 2);
+    } catch {
+      pretty = undefined;
+    }
+    return ok({
+      text: truncated.text,
+      details: {
+        valueLength: valueStr.length,
+        full: valueStr.length > 200_000 ? valueStr.slice(0, 200_000) : valueStr,
+        ...(pretty !== undefined ? { pretty: pretty.length > 200_000 ? pretty.slice(0, 200_000) : pretty } : {}),
+        ...(truncated.fullOutputPath !== undefined ? { fullOutputPath: truncated.fullOutputPath } : {}),
+      },
+    });
+  },
+
+  renderResult(result, expanded, theme) {
+    const raw = asRecord(result.details);
+    if (raw === undefined) return new Text(theme.fg("error", "execute_js: no details"), 0, 0);
+    const details = {
+      valueLength: asNumber(raw["valueLength"]),
+      full: asString(raw["full"]),
+      pretty: asString(raw["pretty"]),
+      fullOutputPath: asString(raw["fullOutputPath"]),
+    };
+
+    const len = details.valueLength ?? 0;
+    const full = details.full ?? "";
+    const isJson = details.pretty !== undefined;
+
+    if (!expanded) {
+      const preview = full.length > COMPACT_PREVIEW_BYTES ? full.slice(0, COMPACT_PREVIEW_BYTES) + "…" : full;
+      const md = [
+        `**${formatBytes(len)}** ${isJson ? "JSON" : "value"}`,
+        "```",
+        preview,
+        "```",
+        keyHint("app.tools.expand", "to expand"),
+      ].join("\n");
+      return new Markdown(md, 0, 0, getMarkdownTheme());
+    }
+
+    const body = details.pretty ?? full;
+    const fence = isJson ? "```json" : "```";
+    const tail = details.fullOutputPath
+      ? `\n\nFull value at \`${details.fullOutputPath}\` · ${keyHint("app.tools.expand", "to collapse")}`
+      : `\n\n${keyHint("app.tools.expand", "to collapse")}`;
+    const md = [`**${formatBytes(len)}** ${isJson ? "JSON" : "value"}`, fence, body, "```", tail].join("\n");
+    return new Markdown(md, 0, 0, getMarkdownTheme());
+  },
+});
+
+const RunScriptArgs = Type.Object({
+  path: Type.String({ description: "Absolute path to the script file (.js or .mjs)" }),
+  params: Type.Optional(
+    Type.Object({}, { additionalProperties: true, description: "Args passed to the script as `params`" }),
+  ),
+  timeoutMs: Type.Optional(
+    Type.Integer({
+      default: 60_000,
+      minimum: 100,
+      maximum: 600_000,
+      description: "Hard timeout in ms. Default 60s, max 600s.",
+    }),
+  ),
+});
+
+const allowedRoots = (): ReadonlyArray<string> => {
+  const env = process.env["BH_SCRIPT_DIR"];
+  return [tmpdir(), process.cwd(), ...(env !== undefined ? [env] : [])].map((d) => resolve(d));
+};
+
+const isPathAllowed = (p: string): boolean => allowedRoots().some((root) => isPathWithin(root, p));
+
+const MAX_SOURCE_BYTES = 1_000_000;
+
+type ContentItem = { readonly type: "text"; readonly text: string };
+
+const isContentItem = (v: unknown): v is ContentItem =>
+  isRecord(v) && v["type"] === "text" && typeof v["text"] === "string";
+
+export const runScriptTool = defineBrowserTool({
+  name: "browser_run_script",
+  label: "Browser Run Script",
+  description:
+    "Execute a temporary JavaScript script with full Node.js + browser-daemon access. Path must be inside tmpdir, cwd, or BH_SCRIPT_DIR. Mandatory timeout. The script is full RCE on the harness's process — only invoke scripts you wrote and reviewed.",
+  promptSnippet: "Run a temporary script with daemon + Node access (security-bounded)",
+  promptGuidelines: [
+    "Write the script with the write tool first; pass its absolute path.",
+    "Path must be inside tmpdir, cwd, or BH_SCRIPT_DIR — otherwise rejected.",
+    "Default timeout is 60s; pass timeoutMs to extend (max 600s).",
+    "Script bindings: params, daemon, require, signal, onUpdate, ctx, console, fetch, JSON, Buffer, setTimeout, clearTimeout.",
+    "Script MUST return { content: [{ type: 'text', text: '...' }], details?: {...} }. Throw on errors.",
+  ],
+  parameters: RunScriptArgs,
+  concurrency: "parallel",
+  async handler(args, { client, signal, onUpdate, extensionCtx }): Promise<Result<ToolOk, ToolErr>> {
+    if (!isAbsolute(args.path)) {
+      return err({ kind: "invalid_state", message: "Script path must be absolute" });
+    }
+    if (!isPathAllowed(args.path)) {
+      return err({
+        kind: "invalid_state",
+        message: `Script path outside allowed directories (allowed: ${allowedRoots().join(", ")})`,
+      });
+    }
+    let source: string;
+    try {
+      source = await readFile(args.path, "utf8");
+    } catch (e) {
+      return err({
+        kind: "io_error",
+        message: `Failed to read script: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+    if (source.length === 0) return err({ kind: "invalid_state", message: "Script is empty" });
+    if (source.length > MAX_SOURCE_BYTES) {
+      return err({ kind: "invalid_state", message: `Script exceeds ${MAX_SOURCE_BYTES}B size cap` });
+    }
+
+    let executeFn: (...a: ReadonlyArray<unknown>) => Promise<unknown>;
+    try {
+      executeFn = new AsyncFunction(
+        "params", "daemon", "require", "signal", "onUpdate", "ctx",
+        "console", "fetch", "JSON", "Buffer", "setTimeout", "clearTimeout",
+        `"use strict";\n${source}`,
+      );
+    } catch (e) {
+      return err({
+        kind: "invalid_state",
+        message: `Syntax error: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+
+    const timeoutMs = args.timeoutMs ?? 60_000;
+    const ac = new AbortController();
+    const onAbort = (): void => ac.abort();
+    if (signal !== undefined) signal.addEventListener("abort", onAbort, { once: true });
+    const timeoutTimer = setTimeout(() => ac.abort(), timeoutMs);
+
+    try {
+      const scriptPromise = executeFn(
+        args.params ?? {},
+        client,
+        requireFromHere,
+        ac.signal,
+        (u: unknown) => {
+          if (!isRecord(u)) return;
+          const content = u["content"];
+          if (!Array.isArray(content) || content.length === 0) return;
+          const first: unknown = content[0];
+          if (!isRecord(first)) return;
+          const txt = first["text"];
+          if (typeof txt !== "string") return;
+          try { onUpdate({ text: txt }); } catch {}
+        },
+        extensionCtx ?? { cwd: process.cwd() },
+        console, fetch, JSON, Buffer, setTimeout, clearTimeout,
+      );
+      const abortPromise = new Promise<never>((_, reject) => {
+        ac.signal.addEventListener("abort", () => reject(new Error("script aborted (timeout or cancellation)")), { once: true });
+      });
+      const result = await Promise.race([scriptPromise, abortPromise]);
+      clearTimeout(timeoutTimer);
+      if (signal !== undefined) signal.removeEventListener("abort", onAbort);
+
+      if (!isRecord(result)) {
+        return err({ kind: "invalid_state", message: `Script must return an object; got ${JSON.stringify(result)}` });
+      }
+      const content = result["content"];
+      if (!Array.isArray(content)) {
+        return err({ kind: "invalid_state", message: "Script return value must have a content array" });
+      }
+      if (!content.every(isContentItem)) {
+        return err({ kind: "invalid_state", message: "Script content array must contain { type: 'text', text: string } items" });
+      }
+      const textOut = content.map((c) => c.text).join("\n");
+      const details = result["details"];
+      return isRecord(details) ? ok({ text: textOut, details }) : ok({ text: textOut });
+    } catch (e) {
+      clearTimeout(timeoutTimer);
+      if (signal !== undefined) signal.removeEventListener("abort", onAbort);
+      return err({
+        kind: "internal",
+        message: `Script execution failed: ${e instanceof Error ? e.message : String(e)}`,
+      });
+    }
+  },
+});

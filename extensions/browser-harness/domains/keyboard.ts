@@ -1,0 +1,197 @@
+import { Type } from "typebox";
+import { safeJs } from "../util/js-template";
+import { type Result, err, ok } from "../util/result";
+import { defineBrowserTool, type ToolErr, type ToolOk } from "../util/tool";
+import { cdpCall, evalJs } from "./cdp-call";
+import { resolveRefToObjectId } from "./ref-resolve";
+
+const VIRTUAL_KEY_CODES: Readonly<Record<string, number>> = {
+  Enter: 13, Tab: 9, Backspace: 8, Escape: 27, Delete: 46, " ": 32,
+  ArrowLeft: 37, ArrowUp: 38, ArrowRight: 39, ArrowDown: 40,
+  Home: 36, End: 35, PageUp: 33, PageDown: 34,
+};
+
+const virtualKeyCode = (key: string): number =>
+  VIRTUAL_KEY_CODES[key] ?? (key.length === 1 ? key.charCodeAt(0) : 0);
+
+const TypeArgs = Type.Object({
+  text: Type.String({ description: "Text to type" }),
+});
+
+type FocusProbe = { readonly ok: boolean; readonly tag: string | null };
+
+const isFocusProbe = (v: unknown): v is FocusProbe =>
+  typeof v === "object" && v !== null
+  && "ok" in v && typeof v.ok === "boolean"
+  && "tag" in v && (typeof v.tag === "string" || v.tag === null);
+
+export const typeTool = defineBrowserTool({
+  name: "browser_type",
+  label: "Browser Type",
+  description: "Type text into the currently focused element. Use browser_click first to focus an input field.",
+  promptSnippet: "Type text into the focused element",
+  promptGuidelines: [
+    "Use browser_type to enter text. Click on an input field with browser_click first to focus it.",
+    "For special keys (Enter, Tab, Escape, arrows), use browser_press_key instead.",
+  ],
+  parameters: TypeArgs,
+  concurrency: "serialized",
+  async handler(args, { client }): Promise<Result<ToolOk, ToolErr>> {
+    const focused = await evalJs(client, safeJs`
+      (() => {
+        const el = document.activeElement;
+        const ok = !!el && el !== document.body &&
+          (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable);
+        return { ok, tag: el ? el.tagName : null };
+      })()
+    `);
+    if (focused.success) {
+      const f: FocusProbe = isFocusProbe(focused.data) ? focused.data : { ok: false, tag: null };
+      if (!f.ok) {
+        return err({
+          kind: "invalid_state",
+          message:
+            "No editable element is focused — typed text would be lost. Click the field with browser_click first, or use browser_fill with a selector.",
+          details: { activeElement: f.tag },
+        });
+      }
+    }
+    const r = await cdpCall(client, "Input.insertText", { text: args.text });
+    if (!r.success) return r;
+    return ok({ text: `Typed: "${args.text}"` });
+  },
+});
+
+const PressKeyArgs = Type.Object({
+  key: Type.String({
+    description:
+      'Key to press. Special keys: Enter, Tab, Backspace, Escape, Delete, ArrowLeft/Up/Right/Down, Home, End, PageUp, PageDown. Space as " "',
+  }),
+  modifiers: Type.Optional(
+    Type.Integer({
+      minimum: 0,
+      maximum: 15,
+      description: "Modifier bitfield: 1=Alt, 2=Ctrl, 4=Meta(Cmd), 8=Shift. Combine with OR.",
+    }),
+  ),
+});
+
+export const pressKeyTool = defineBrowserTool({
+  name: "browser_press_key",
+  label: "Browser Press Key",
+  description:
+    "Press a keyboard key. Supports special keys (Enter, Tab, Backspace, Escape, Delete, arrows, Home, End, PageUp, PageDown, Space as ' ') and regular characters. Optional modifier bitfield: 1=Alt, 2=Ctrl, 4=Meta/Cmd, 8=Shift.",
+  promptSnippet: "Press a key (Enter, Tab, Escape, arrows, or any character)",
+  promptGuidelines: [
+    "Use browser_press_key for keyboard shortcuts and navigation keys.",
+    "Special key names: Enter, Tab, Backspace, Escape, Delete, ArrowLeft, ArrowUp, ArrowRight, ArrowDown, Home, End, PageUp, PageDown.",
+    "Use Space as ' ' (a single space character).",
+    "Modifiers: 1=Alt, 2=Ctrl, 4=Meta(Cmd), 8=Shift. Combine with bitwise OR: Ctrl+Shift = 2|8 = 10.",
+  ],
+  parameters: PressKeyArgs,
+  concurrency: "serialized",
+  async handler(args, { client }): Promise<Result<ToolOk, ToolErr>> {
+    const k = args.key;
+    const code = virtualKeyCode(k);
+    const modifiers = args.modifiers ?? 0;
+    const isChar = k.length === 1;
+    const downParams: Record<string, unknown> = {
+      type: "keyDown",
+      key: k,
+      code: k,
+      modifiers,
+      ...(code ? { windowsVirtualKeyCode: code, nativeVirtualKeyCode: code } : {}),
+      ...(isChar ? { text: k, unmodifiedText: k } : {}),
+    };
+    const down = await cdpCall(client, "Input.dispatchKeyEvent", downParams);
+    if (!down.success) return down;
+    // A printable character needs a `char` event for the page to receive keypress/textInput and actually insert it; Shift (8) still counts as printable.
+    const hasCommandModifier = (modifiers & (1 | 2 | 4)) !== 0;
+    if (isChar && !hasCommandModifier) {
+      const charEv = await cdpCall(client, "Input.dispatchKeyEvent", { type: "char", text: k, key: k });
+      if (!charEv.success) return charEv;
+    }
+    const up = await cdpCall(client, "Input.dispatchKeyEvent", { type: "keyUp", key: k, code: k, modifiers });
+    if (!up.success) return up;
+    return ok({ text: `Pressed: ${k}${modifiers ? ` (modifiers=${modifiers})` : ""}` });
+  },
+});
+
+const DispatchKeyArgs = Type.Object({
+  ref: Type.Optional(
+    Type.String({ description: "Stable element ref from browser_snapshot (e.g. 'e7'). PREFERRED over selector." }),
+  ),
+  selector: Type.Optional(Type.String({ description: "CSS selector of the target element (fallback when no ref)" })),
+  key: Type.String({ description: "Key value (e.g., 'Enter', 'a')" }),
+  eventType: Type.Optional(
+    Type.Union(
+      [Type.Literal("keydown"), Type.Literal("keyup"), Type.Literal("keypress")],
+      { default: "keydown", description: "Event type to dispatch. Default: keydown" },
+    ),
+  ),
+});
+
+export const dispatchKeyTool = defineBrowserTool({
+  name: "browser_dispatch_key",
+  label: "Browser Dispatch Key",
+  description:
+    "Dispatch a DOM KeyboardEvent on a specific element via JS injection. PREFERRED: pass `ref` from browser_snapshot; fallback: a CSS `selector`. Use for React/Vue components that listen to synthetic events more reliably than CDP input.",
+  promptSnippet: "Dispatch a DOM KeyboardEvent on an element by ref (preferred) or selector",
+  promptGuidelines: [
+    "PREFER `ref` from browser_snapshot over a CSS selector — survives re-renders.",
+    "Dispatches a synthetic DOM KeyboardEvent — for React/Vue synthetic event listeners. Does NOT insert text (use browser_type or browser_press_key for actual typing).",
+    "Try browser_press_key first; only use browser_dispatch_key when the page ignores raw CDP key events.",
+    "The event carries keyCode/which (e.g. 13 for Enter) for legacy handlers, but is untrusted (isTrusted === false) — a few libraries may still ignore it.",
+    "eventType defaults to 'keydown'.",
+  ],
+  parameters: DispatchKeyArgs,
+  concurrency: "serialized",
+  async handler(args, { client }): Promise<Result<ToolOk, ToolErr>> {
+    const eventType = args.eventType ?? "keydown";
+    const target = args.ref ?? args.selector ?? "";
+    // Legacy handlers branch on e.keyCode/e.which rather than e.key, so populate both.
+    const code = virtualKeyCode(args.key);
+    if (args.ref !== undefined) {
+      const objectId = await resolveRefToObjectId(client, args.ref);
+      if (!objectId.success) return objectId;
+      const r = await cdpCall(client, "Runtime.callFunctionOn", {
+        objectId: objectId.data,
+        functionDeclaration: `function (type, key, keyCode) { this.dispatchEvent(new KeyboardEvent(type, { key, keyCode, which: keyCode, bubbles: true, cancelable: true })); return 1; }`,
+        arguments: [{ value: eventType }, { value: args.key }, { value: code }],
+        returnByValue: true,
+      });
+      if (!r.success) return r;
+      return ok({
+        text: `Dispatched ${eventType}('${args.key}') on ${target}`,
+        details: { matched: 1, ref: args.ref },
+      });
+    }
+    if (args.selector === undefined) {
+      return err({ kind: "invalid_state", message: "Provide either `ref` or `selector`." });
+    }
+    const expr = safeJs`
+      (() => {
+        const els = document.querySelectorAll(${args.selector});
+        if (els.length === 0) return 0;
+        for (const el of els) {
+          el.dispatchEvent(new KeyboardEvent(${eventType}, { key: ${args.key}, keyCode: ${code}, which: ${code}, bubbles: true, cancelable: true }));
+        }
+        return els.length;
+      })()
+    `;
+    const r = await evalJs(client, expr);
+    if (!r.success) return r;
+    const matched = Number(r.data ?? 0);
+    if (matched === 0) {
+      return err({
+        kind: "invalid_state",
+        message: `Selector matched 0 elements: ${args.selector}`,
+        details: { matched: 0, selector: args.selector },
+      });
+    }
+    return ok({
+      text: `Dispatched ${eventType}('${args.key}') on ${matched} element(s)`,
+      details: { matched, selector: args.selector },
+    });
+  },
+});

@@ -412,6 +412,7 @@ The `remote:<name>` form forwards the rest of the command to the selected remote
 | Extension | Responsibility |
 | --- | --- |
 | API Server | HTTP API, Applications, profile administration, sessions, logs, and terminal tickets. |
+| Browser Harness | Steel Profile-scoped CDP browser automation for active Pi Profiles. |
 | CLI Resources | Resource, package, session, and profile commands. |
 | Guardrails | Input, tool, and output policy stages. |
 | Pi Console WebUI | Browser-based operations console and terminal client. |
@@ -419,6 +420,17 @@ The `remote:<name>` form forwards the rest of the command to the selected remote
 | Pulse | Persistent schedule and heartbeat execution. |
 | Sequential Workflow | Ordered Action, Collect, and Evaluate workflows. |
 | Skill Sources | Git-backed Skill source catalog and explicit imports. |
+
+### Steel Browser Harness
+
+The Browser Harness maps each Pi Profile to a persisted Steel SessionContext. The Steel API creates and releases live browser sessions; the profile-local context restores cookies and storage for the next session. Configure the Steel endpoint and credential in each profile's `.env`:
+
+```dotenv
+STEEL_API_URL=http://127.0.0.1:3000
+STEEL_API_KEY=...
+```
+
+On first browser use, the harness creates a Steel Session through the API. When it is released, the harness stores the SessionContext in `steel.json` inside that Pi Profile directory. Steel Session identifiers are never persisted. Use `browser_setup` or `/browser-setup` to connect, `/browser-status` to inspect the active mapping, and `/browser-release` to release the temporary Steel Session.
 
 ## Installation
 
