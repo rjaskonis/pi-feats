@@ -306,7 +306,7 @@ class ApiServer {
   private async discoverSandboxedExtensionTools(profile: string): Promise<void> {
     const agentDir = this.profileDirectory(profile);
     const environment = { ...(await profileEnvironment(agentDir)), PI_PROFILE_ROOT: this.options.agentDir, PI_PROFILE_DISCOVER_TOOLS: "1" };
-    const output = await new Promise<string>((resolveRun, reject) => {
+    const output = await new Promise<{ stdout: string; stderr: string }>((resolveRun, reject) => {
       delete environment.PI_API_WORKER;
       const child = spawn(process.execPath, [process.argv[1], "profile", profile, "--no-session", "--print", ""], {
         cwd: agentDir,
@@ -317,9 +317,11 @@ class ApiServer {
       child.stdout.on("data", (chunk) => { stdout += String(chunk); });
       child.stderr.on("data", (chunk) => { stderr += String(chunk); });
       child.once("error", reject);
-      child.once("exit", (code) => code === 0 ? resolveRun(stdout) : reject(new Error(stderr.trim() || `Sandboxed tool discovery exited with ${code ?? "unknown"}`)));
+      child.once("exit", (code) => code === 0 ? resolveRun({ stdout, stderr }) : reject(new Error(stderr.trim() || `Sandboxed tool discovery exited with ${code ?? "unknown"}`)));
     });
-    const line = output.split(/\r?\n/).map((value) => value.trim()).find((value) => value.startsWith("{\"tools\":"));
+    // Nono can relay a successful child Pi process through stderr. Its JSON
+    // protocol remains authoritative regardless of the stream it arrived on.
+    const line = `${output.stdout}\n${output.stderr}`.split(/\r?\n/).map((value) => value.trim()).find((value) => value.startsWith("{\"tools\":"));
     if (!line) throw new Error("Sandboxed tool discovery returned no tool list.");
     const value = JSON.parse(line) as { tools?: unknown };
     if (!Array.isArray(value.tools) || value.tools.some((name) => typeof name !== "string")) throw new Error("Sandboxed tool discovery returned an invalid tool list.");

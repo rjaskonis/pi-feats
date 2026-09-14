@@ -37,6 +37,15 @@ export class SkillSourceStore {
     if (!existsSync(join(root, "SKILL.md"))) throw Object.assign(new Error("The skill directory does not contain SKILL.md."), { status: 400 });
   }
 
+  private publishingIdentity(source: Source): Pick<NodeJS.ProcessEnv, "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL" | "GIT_COMMITTER_NAME" | "GIT_COMMITTER_EMAIL"> {
+    const configuredName = process.env.PI_SKILL_SOURCE_GIT_AUTHOR_NAME?.trim();
+    const configuredEmail = process.env.PI_SKILL_SOURCE_GIT_AUTHOR_EMAIL?.trim();
+    const sourceName = source.username && source.username !== "x-access-token" ? source.username : undefined;
+    const name = configuredName || sourceName || "Pi Skill Publisher";
+    const email = configuredEmail || (sourceName ? `${sourceName}@users.noreply.local` : "pi-skill-publisher@localhost");
+    return { GIT_AUTHOR_NAME: name, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: name, GIT_COMMITTER_EMAIL: email };
+  }
+
   private installation(profile: string, skillName: string) {
     return this.db.prepare("SELECT source_identifier,source_relative_path,target_path FROM skill_source_installations WHERE profile=? AND skill_name=?").get(profile, skillName) as Row | undefined;
   }
@@ -69,14 +78,26 @@ export class SkillSourceStore {
       await mkdir(dirname(target), { recursive: true });
       await cp(local, target, { recursive: true, filter: (path) => !path.split("/").includes("node_modules") && !path.split("/").includes(".git") });
       const token = String((this.db.prepare("SELECT credential_token FROM skill_sources WHERE identifier=?").get(identifier) as Row).credential_token);
-      const askpass = join(this.root, `.git-askpass-publish-${randomUUID()}`), env: NodeJS.ProcessEnv = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_ASKPASS: askpass, PI_SKILL_SOURCE_GIT_USERNAME: source.username || "x-access-token", PI_SKILL_SOURCE_GIT_TOKEN: token };
+      const askpass = join(this.root, `.git-askpass-publish-${randomUUID()}`), env: NodeJS.ProcessEnv = {
+        ...process.env,
+        ...this.publishingIdentity(source),
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_ASKPASS: askpass,
+        PI_SKILL_SOURCE_GIT_USERNAME: source.username || "x-access-token",
+        PI_SKILL_SOURCE_GIT_TOKEN: token,
+      };
       await writeFile(askpass, "#!/bin/sh\ncase \"$1\" in *Username*) printf '%s\\n' \"$PI_SKILL_SOURCE_GIT_USERNAME\" ;; *Password*) printf '%s\\n' \"$PI_SKILL_SOURCE_GIT_TOKEN\" ;; esac\n", { mode: 0o700 });
       try {
         await this.git(["add", "--", targetRelative], repository, env);
         const status = await this.git(["status", "--porcelain", "--", targetRelative], repository, env);
         if (!status) return { action: "unchanged" as const, source: identifier, relativePath: targetRelative, commitHash: refreshed.commitHash };
-        await this.git(["commit", "-m", `chore(skills): update ${skillName}`], repository, env);
-        await this.git(["push", "origin", source.branch], repository, env);
+        try {
+          await this.git(["commit", "-m", `chore(skills): update ${skillName}`], repository, env);
+          await this.git(["push", "origin", source.branch], repository, env);
+        } catch (cause) {
+          const details = cause instanceof Error ? cause.message : String(cause);
+          throw Object.assign(new Error(`Could not publish the Skill to Git: ${details}`), { status: 502 });
+        }
       } finally { await rm(askpass, { force: true }); }
       const synced = await this.sync(identifier);
       if (synced.status !== "succeeded") throw Object.assign(new Error(synced.error ?? "The Skill Source was pushed but could not be synchronized."), { status: 502 });
