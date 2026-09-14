@@ -100,6 +100,7 @@ class ApiServer {
   private readonly sessions = new Map<string, SessionHandle>();
   private readonly sandboxBusy = new Set<string>();
   private readonly runtimes = new Map<string, Promise<ModelRuntime>>();
+  private readonly toolDiscoveries = new Map<string, Promise<void>>();
   readonly profiles: ProfileStore;
   readonly pulses: PulseStore;
   readonly applications: ApplicationStore;
@@ -322,7 +323,7 @@ class ApiServer {
     if (!line) throw new Error("Sandboxed tool discovery returned no tool list.");
     const value = JSON.parse(line) as { tools?: unknown };
     if (!Array.isArray(value.tools) || value.tools.some((name) => typeof name !== "string")) throw new Error("Sandboxed tool discovery returned an invalid tool list.");
-    this.profiles.registerExtensionTools(value.tools);
+    this.profiles.registerExtensionTools(profile, value.tools);
   }
 
   async complete(profile: string, prompt: string): Promise<string> {
@@ -347,32 +348,49 @@ class ApiServer {
   }
 
   async discoverExtensionTools(profile: string): Promise<void> {
-    const agentDir = this.profileDirectory(profile);
-    await this.profiles.readSettings(profile);
-    if (await this.sandboxed(profile)) return this.discoverSandboxedExtensionTools(profile);
-    await this.withProfileEnvironment(agentDir, async () => {
-      const settingsManager = SettingsManager.create(this.options.cwd, agentDir);
-      const loader = new DefaultResourceLoader({ cwd: this.options.cwd, agentDir, settingsManager });
-      await loader.reload();
-      let runtime = this.runtimes.get(agentDir);
-      if (!runtime) {
-        runtime = ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
-        this.runtimes.set(agentDir, runtime);
-      }
-      const { session } = await createAgentSession({
-        cwd: this.options.cwd,
-        agentDir,
-        sessionManager: SessionManager.inMemory(this.options.cwd),
-        settingsManager,
-        resourceLoader: loader,
-        modelRuntime: await runtime,
+    const existing = this.toolDiscoveries.get(profile);
+    if (existing) return existing;
+    const discovery = (async () => {
+      const agentDir = this.profileDirectory(profile);
+      await this.profiles.readSettings(profile);
+      if (await this.sandboxed(profile)) return this.discoverSandboxedExtensionTools(profile);
+      await this.withProfileEnvironment(agentDir, async () => {
+        const settingsManager = SettingsManager.create(this.options.cwd, agentDir);
+        const loader = new DefaultResourceLoader({ cwd: this.options.cwd, agentDir, settingsManager });
+        await loader.reload();
+        let runtime = this.runtimes.get(agentDir);
+        if (!runtime) {
+          runtime = ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
+          this.runtimes.set(agentDir, runtime);
+        }
+        const { session } = await createAgentSession({
+          cwd: this.options.cwd,
+          agentDir,
+          sessionManager: SessionManager.inMemory(this.options.cwd),
+          settingsManager,
+          resourceLoader: loader,
+          modelRuntime: await runtime,
+        });
+        try {
+          this.profiles.registerExtensionTools(profile, session.agent.state.tools.map((tool) => tool.name));
+        } finally {
+          session.dispose();
+        }
       });
-      try {
-        this.profiles.registerExtensionTools(session.agent.state.tools.map((tool) => tool.name));
-      } finally {
-        session.dispose();
-      }
-    });
+    })();
+    this.toolDiscoveries.set(profile, discovery);
+    try {
+      await discovery;
+    } catch (error) {
+      this.toolDiscoveries.delete(profile);
+      throw error;
+    }
+  }
+
+  invalidateExtensionTools(profile?: string): void {
+    if (profile) this.toolDiscoveries.delete(profile);
+    else this.toolDiscoveries.clear();
+    this.profiles.clearExtensionTools(profile);
   }
 
   private async sandboxed(profile: string): Promise<boolean> {
@@ -809,13 +827,15 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.patch<{ Params: { profile: string; name: string }; Body: { enabled?: unknown } }>("/api/profiles/:profile/packages/:name", async (request, reply) => {
       if (!guard(request, reply)) return;
       if (typeof request.body?.enabled !== "boolean") return reply.code(400).send({ error: "'enabled' must be a boolean." });
-      return { package: await api.profiles.setPackage(profileName(request), decodeURIComponent(request.params.name), request.body.enabled) };
+      const result = await api.profiles.setPackage(profileName(request), decodeURIComponent(request.params.name), request.body.enabled);
+      api.invalidateExtensionTools();
+      return { package: result };
     });
 
     server.get<{ Params: { profile: string; kind: string } }>("/api/profiles/:profile/resources/:kind", async (request, reply) => {
       if (!guard(request, reply)) return;
       const kind = resourceKind(request.params.kind);
-      if (kind === "tools") await api.discoverExtensionTools(profileName(request)).catch(() => {});
+      if (kind === "tools") await api.discoverExtensionTools(profileName(request));
       return { resources: await api.profiles.resources(profileName(request), kind) };
     });
     server.get<{ Params: { profile: string; kind: string; name: string }; Querystring: { source?: string } }>("/api/profiles/:profile/resources/:kind/:name", async (request, reply) => {
@@ -830,7 +850,9 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       if (kind === "tools") await api.discoverExtensionTools(profileName(request));
       const enabled = objectBody(request.body).enabled;
       if (typeof enabled !== "boolean") throw Object.assign(new Error("The 'enabled' field must be a boolean."), { status: 400 });
-      return api.profiles.setResource(profileName(request), kind, request.params.name, enabled, kind === "skills" ? skillSource(request.query.source) : undefined);
+      const result = await api.profiles.setResource(profileName(request), kind, request.params.name, enabled, kind === "skills" ? skillSource(request.query.source) : undefined);
+      if (kind === "extensions") api.invalidateExtensionTools();
+      return result;
     });
 
     server.delete<{ Params: { profile: string; kind: string; name: string }; Querystring: { source?: string } }>("/api/profiles/:profile/resources/:kind/:name", async (request, reply) => {

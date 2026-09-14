@@ -17,7 +17,9 @@ export async function ConsolePage({ section, applicationSlug, profile = "default
     else if (section === "guardrails") initial.guardrails = await piGet(`profiles/${profile}/guardrails`);
     else if (section === "packages") initial.packages = await piGet(`profiles/${profile}/packages`);
     else if (section === "pulses") initial.pulses = await piGet(`profiles/${profile}/pulses`);
-    else if (section === "skills" || section === "tools" || section === "extensions") initial.resources = await piGet(`profiles/${profile}/resources/${section}`);
+    // Tool discovery can require booting a sandboxed Pi runtime. Let the client
+    // render the Tools workspace immediately and load its catalog asynchronously.
+    else if (section === "skills" || section === "extensions") initial.resources = await piGet(`profiles/${profile}/resources/${section}`);
   } catch (error) { initial.error = error instanceof Error ? error.message : String(error); }
   return <Console section={section} applicationSlug={applicationSlug} initial={initial}/>;
 }

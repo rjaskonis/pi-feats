@@ -22,12 +22,23 @@ const policyKey: Record<ResourceKind, PolicyKey> = {
 const protectedExtensions = new Set(["profiles", "api-server"]);
 
 export class ProfileStore {
-  private readonly extensionTools = new Set<string>();
+  private readonly extensionTools = new Map<string, Set<string>>();
 
   constructor(readonly agentDir: string) {}
 
-  registerExtensionTools(names: Iterable<string>): void {
-    for (const name of names) if (name && !BUILTIN_TOOLS.includes(name)) this.extensionTools.add(name);
+  registerExtensionTools(profile: string, names: Iterable<string>): void {
+    const tools = this.extensionTools.get(profile) ?? new Set<string>();
+    for (const name of names) if (name && !BUILTIN_TOOLS.includes(name)) tools.add(name);
+    this.extensionTools.set(profile, tools);
+  }
+
+  extensionToolNames(profile: string): Iterable<string> {
+    return this.extensionTools.get(profile) ?? [];
+  }
+
+  clearExtensionTools(profile?: string): void {
+    if (profile) this.extensionTools.delete(profile);
+    else this.extensionTools.clear();
   }
 
   private profilesDir(): string { return join(this.agentDir, "profiles"); }
@@ -170,8 +181,9 @@ export class ProfileStore {
     const runtimeSettings = profile === "default" ? settings : await this.readSettings("default");
     if (kind === "skills") return this.skillResources(profile, settings);
     if (kind === "tools") {
-      const sources = await this.packageToolSources(runtimeSettings, this.extensionTools);
-      const names = new Set([...this.extensionTools, ...sources.keys()]);
+      const extensionTools = this.extensionToolNames(profile);
+      const sources = await this.packageToolSources(runtimeSettings, extensionTools);
+      const names = new Set([...extensionTools, ...sources.keys()]);
       return [...BUILTIN_TOOLS.map((name) => ({ name, kind, source: "builtin" as const, enabled: this.enabled(settings, kind, name) })), ...[...names].sort().map((name) => sources.has(name) ? ({ name, kind, source: "package" as const, package: sources.get(name), enabled: this.enabled(settings, kind, name) }) : ({ name, kind, source: "extension" as const, enabled: this.enabled(settings, kind, name) }))];
     }
     return [...(await this.names("extensions")).map(({ name, path }) => ({ name, kind, path, source: "shared" as const, enabled: protectedExtensions.has(name) ? true : this.enabled(runtimeSettings, kind, name, path), protected: protectedExtensions.has(name) || undefined })), ...(await this.packageExtensions(runtimeSettings)).map(({ name, path, package: packageName }) => ({ name, kind, path, source: "package" as const, package: packageName, enabled: true }))];
