@@ -25,6 +25,7 @@ Read the key only from the active profile environment. It is an administrator-pr
 - Offer a small relevant choice when needed: for example, "Connect Gmail so I can find and summarize emails" or "Connect Google Calendar so I can manage your appointments."
 - Before requesting authorization, explain only the meaningful access requested and ask for confirmation.
 - Send the secure authorization link through the active conversation channel. Tell the person to open it and return after authorizing.
+- Send an authorization URL as a bare URL on its own line. Do not wrap it in Markdown link syntax, bold/italic markers, code formatting, parentheses, quotes, or add punctuation directly after it. This prevents chat clients from including formatting characters in the clickable URL and breaking the authorization flow.
 - After the connection is confirmed, state what is ready in user terms and offer the next useful action.
 - Do not mention Composio, MCP, sessions, toolkits, API keys, webhooks, OAuth, scopes, headers, or internal IDs unless the person explicitly asks for technical details.
 - Never ask the person for a password, app password, API key, client secret, or access token.
@@ -38,7 +39,7 @@ Use `composio_manage_connections` to start a connection, `composio_list_accounts
 2. Check whether that service is already connected for the current conversation identity.
 3. If it is connected, confirm that it is ready and continue with the requested task.
 4. If it is not connected, explain the benefit and request confirmation to connect it.
-5. On confirmation, create or request a connection for the current identity and send its secure authorization link.
+5. On confirmation, create or request a connection for the current identity and send its secure authorization link as a bare, standalone URL. Put any explanatory text on separate lines before or after the URL.
 6. Wait for the connection result asynchronously. Do not make the person wait in a blocked request.
 7. On success, confirm readiness in plain language. On expiry or revocation, offer a new connection link.
 
