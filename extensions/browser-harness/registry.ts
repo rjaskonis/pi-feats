@@ -20,7 +20,8 @@ import { clearHeadersTool, setHeadersTool } from "./domains/headers";
 import { consoleTool } from "./domains/console";
 import { snapshotTool } from "./domains/snapshot";
 import { executeJsTool } from "./domains/js";
-import { setupTool } from "./domains/setup";
+import { createSetupTool, setupTool } from "./domains/setup";
+import type { ViewerUrlProvider } from "./setup";
 import { webSearchTool } from "./domains/search/web-search";
 import { readPageTool } from "./domains/readpage/read-page";
 
@@ -68,6 +69,12 @@ export const ALL_TOOLS: ReadonlyArray<AnyBrowserToolDefinition> = [
   readPageTool,
 ];
 
-export const registerAllTools = (pi: ExtensionAPI, client: BrowserClient): void => {
-  for (const t of ALL_TOOLS) registerBrowserTool(pi, client, t);
+export const registerAllTools = (
+  pi: ExtensionAPI,
+  client: BrowserClient,
+  viewerUrl?: ViewerUrlProvider,
+): void => {
+  for (const tool of ALL_TOOLS) {
+    registerBrowserTool(pi, client, tool === setupTool ? createSetupTool(viewerUrl) : tool);
+  }
 };

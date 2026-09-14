@@ -3,11 +3,11 @@ import { Text } from "@earendil-works/pi-tui";
 import type { Result } from "../util/result";
 import { err, ok } from "../util/result";
 import { defineBrowserTool, type ToolErr, type ToolOk } from "../util/tool";
-import { performSetup } from "../setup";
+import { performSetup, type ViewerUrlProvider } from "../setup";
 
 const SetupArgs = Type.Object({});
 
-export const setupTool = defineBrowserTool({
+export const createSetupTool = (viewerUrl?: ViewerUrlProvider) => defineBrowserTool({
   name: "browser_setup",
   label: "Browser Setup",
   description:
@@ -24,10 +24,12 @@ export const setupTool = defineBrowserTool({
   ensureAlive: false,
   renderCall: () => new Text("🔧 Initializing browser...", 0, 0),
   async handler(_args, { client, extensionCtx }): Promise<Result<ToolOk, ToolErr>> {
-    const result = await performSetup(client, extensionCtx);
+    const result = await performSetup(client, extensionCtx, viewerUrl);
     if (result.success) {
       return ok({ text: result.data });
     }
     return err({ kind: "internal", message: result.error });
   },
 });
+
+export const setupTool = createSetupTool();

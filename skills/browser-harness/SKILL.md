@@ -9,7 +9,7 @@ The active Pi Profile owns a persisted Steel SessionContext in its `steel.json`.
 
 ## Connection
 
-Browser control is on demand. Call `browser_setup` when a browser tool reports that it is not connected. It creates a Steel Session through the Steel API, restores the active Pi Profile's persisted context, then connects to the session CDP endpoint.
+Browser control is on demand. Call `browser_setup` when a browser tool reports that it is not connected. It creates a Steel Session through the Steel API, restores the active Pi Profile's persisted context, connects to the session CDP endpoint, and returns the live viewer URL. A person may open that URL and interact with the same tabs at the same time; do not assume exclusive browser control.
 
 Do not type credentials. If authentication, MFA, CAPTCHA, or a payment confirmation is required, stop and ask the user to take over.
 

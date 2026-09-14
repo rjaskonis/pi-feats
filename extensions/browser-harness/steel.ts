@@ -14,7 +14,13 @@ type SteelState = {
   readonly updatedAt: string;
 };
 
-type SteelSession = { readonly id: string; readonly websocketUrl: string };
+type SteelSession = {
+  readonly id: string;
+  readonly websocketUrl: string;
+  readonly debugUrl: string;
+  readonly debuggerUrl: string;
+  readonly sessionViewerUrl: string;
+};
 
 type SteelConfig = { readonly apiUrl: string; readonly apiKey?: string };
 
@@ -59,20 +65,25 @@ const saveState = async (sessionContext: Record<string, unknown> | undefined): P
   await rename(temporary, path);
 };
 
-const sessionEndpoint = (websocketUrl: string, apiUrl: string): Result<string, CdpError> => {
+const publicSessionUrl = (url: string, apiUrl: string, websocket = false): Result<string, CdpError> => {
   try {
-    const endpoint = new URL(websocketUrl);
+    const endpoint = new URL(url);
     const api = new URL(apiUrl);
-    // Self-hosted Steel returns its container hostname in websocketUrl. The API
-    // origin is the reachable public endpoint and is therefore authoritative.
+    // Self-hosted Steel can return a container hostname. The API origin is the
+    // endpoint reachable by both Pi and the supervising human.
     endpoint.hostname = api.hostname;
     endpoint.port = api.port;
-    if (api.protocol === "https:") endpoint.protocol = "wss:";
-    else endpoint.protocol = "ws:";
+    endpoint.protocol = websocket ? (api.protocol === "https:" ? "wss:" : "ws:") : api.protocol;
     return ok(endpoint.toString());
   } catch {
-    return err(cdpError("invalid_response", "Steel returned an invalid session websocketUrl"));
+    return err(cdpError("invalid_response", "Steel returned an invalid session URL"));
   }
+};
+
+const interactiveViewerUrl = (url: string): string => {
+  const viewer = new URL(url);
+  viewer.searchParams.set("interactive", "true");
+  return viewer.toString();
 };
 
 const assertNoLiveSession = async (value: SteelConfig): Promise<Result<void, CdpError>> => {
@@ -98,11 +109,17 @@ const createSession = async (value: SteelConfig, sessionContext?: Record<string,
     });
     const raw: unknown = await response.json().catch(() => undefined);
     if (!response.ok || !raw || typeof raw !== "object") return err(cdpError("remote_error", `Steel session creation failed (${response.status})`));
-    const data = raw as { id?: unknown; websocketUrl?: unknown };
-    if (typeof data.id !== "string" || typeof data.websocketUrl !== "string") {
-      return err(cdpError("invalid_response", "Steel did not return session id and websocketUrl"));
+    const data = raw as Partial<SteelSession>;
+    if (typeof data.id !== "string" || typeof data.websocketUrl !== "string" || typeof data.debugUrl !== "string" || typeof data.debuggerUrl !== "string" || typeof data.sessionViewerUrl !== "string") {
+      return err(cdpError("invalid_response", "Steel did not return the session and viewer URLs"));
     }
-    return ok({ id: data.id, websocketUrl: data.websocketUrl });
+    return ok({
+      id: data.id,
+      websocketUrl: data.websocketUrl,
+      debugUrl: data.debugUrl,
+      debuggerUrl: data.debuggerUrl,
+      sessionViewerUrl: data.sessionViewerUrl,
+    });
   } catch (error) {
     return err(cdpError("transport_closed", `Steel API is unavailable: ${error instanceof Error ? error.message : String(error)}`));
   }
@@ -118,7 +135,13 @@ const getSessionContext = async (value: SteelConfig, sessionId: string): Promise
 
 export type SteelRuntime = {
   endpoint(): Promise<Result<string, CdpError>>;
-  status(): { readonly sessionId?: string; readonly hasPersistedContext: boolean };
+  status(): {
+    readonly sessionId?: string;
+    readonly viewerUrl?: string;
+    readonly debuggerUrl?: string;
+    readonly sessionViewerUrl?: string;
+    readonly hasPersistedContext: boolean;
+  };
   release(): Promise<void>;
 };
 
@@ -131,6 +154,9 @@ export type SteelRuntime = {
 export const createSteelRuntime = (): SteelRuntime => {
   let sessionId: string | undefined;
   let endpointUrl: string | undefined;
+  let viewerUrl: string | undefined;
+  let debuggerUrl: string | undefined;
+  let sessionViewerUrl: string | undefined;
   let persistedContext = false;
 
   const endpoint = async (): Promise<Result<string, CdpError>> => {
@@ -142,16 +168,28 @@ export const createSteelRuntime = (): SteelRuntime => {
     persistedContext = state?.sessionContext !== undefined;
     const session = await createSession(settings, state?.sessionContext);
     if (!session.success) return session;
-    const resolved = sessionEndpoint(session.data.websocketUrl, settings.apiUrl);
+    const resolved = publicSessionUrl(session.data.websocketUrl, settings.apiUrl, true);
+    const viewer = publicSessionUrl(session.data.debugUrl, settings.apiUrl);
+    const debuggerEndpoint = publicSessionUrl(session.data.debuggerUrl, settings.apiUrl);
+    const viewerSession = publicSessionUrl(session.data.sessionViewerUrl, settings.apiUrl);
     if (!resolved.success) return resolved;
+    if (!viewer.success || !debuggerEndpoint.success || !viewerSession.success) {
+      return err(cdpError("invalid_response", "Steel returned invalid viewer URLs"));
+    }
     sessionId = session.data.id;
     endpointUrl = resolved.data;
+    viewerUrl = interactiveViewerUrl(viewer.data);
+    debuggerUrl = debuggerEndpoint.data;
+    sessionViewerUrl = viewerSession.data;
     return resolved;
   };
 
   return {
     endpoint,
-    status: () => ({ ...(sessionId ? { sessionId } : {}), hasPersistedContext: persistedContext }),
+    status: () => ({
+      ...(sessionId ? { sessionId, viewerUrl, debuggerUrl, sessionViewerUrl } : {}),
+      hasPersistedContext: persistedContext,
+    }),
     async release() {
       if (!sessionId) return;
       const settings = config();
@@ -163,6 +201,9 @@ export const createSteelRuntime = (): SteelRuntime => {
       }
       sessionId = undefined;
       endpointUrl = undefined;
+      viewerUrl = undefined;
+      debuggerUrl = undefined;
+      sessionViewerUrl = undefined;
       try {
         await fetch(`${settings.apiUrl}/v1/sessions/${encodeURIComponent(id)}/release`, {
           method: "POST",

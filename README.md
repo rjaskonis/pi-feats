@@ -430,7 +430,7 @@ STEEL_API_URL=http://127.0.0.1:3000
 STEEL_API_KEY=...
 ```
 
-On first browser use, the harness creates a Steel Session through the API. When it is released, the harness stores the SessionContext in `steel.json` inside that Pi Profile directory. Steel Session identifiers are never persisted. Use `browser_setup` or `/browser-setup` to connect, `/browser-status` to inspect the active mapping, and `/browser-release` to release the temporary Steel Session.
+On first browser use, the harness creates a Steel Session through the API. `browser_setup` and `/browser-setup` return Steel's interactive live viewer URL, so a person can observe and interact with the same browser and tabs while the agent works through CDP. When the session is released, the harness stores the SessionContext in `steel.json` inside that Pi Profile directory. Steel Session identifiers are never persisted. Use `/browser-viewer` to show the current viewer URL, `/browser-status` to inspect the active session, and `/browser-release` to release it.
 
 ## Installation
 

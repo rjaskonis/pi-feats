@@ -22,7 +22,22 @@ export default function steelBrowserHarnessExtension(pi: ExtensionAPI): void {
         `Pi Profile: ${process.env["PI_ACTIVE_PROFILE"] ?? "default"}`,
         `Persisted Steel context: ${steelStatus?.hasPersistedContext ? "available" : "not created"}`,
         `Steel Session: ${steelStatus?.sessionId ?? "none"}`,
+        `Live viewer: ${steelStatus?.viewerUrl ?? "unavailable"}`,
+        `DevTools: ${steelStatus?.debuggerUrl ?? "unavailable"}`,
       ].join("\n"), "info");
+    },
+  });
+
+  pi.registerCommand("browser-viewer", {
+    description: "Show the interactive Steel live viewer for the active browser session",
+    handler: async (_args, ctx) => {
+      const viewerUrl = steel?.status().viewerUrl;
+      ctx.ui.notify(
+        viewerUrl
+          ? `Open the shared Steel browser viewer:\n${viewerUrl}`
+          : "No active Steel browser session. Run /browser-setup first.",
+        viewerUrl ? "info" : "error",
+      );
     },
   });
 
@@ -43,8 +58,9 @@ export default function steelBrowserHarnessExtension(pi: ExtensionAPI): void {
       // The transport resolves the actual session CDP endpoint lazily.
       remote: { cdpUrl: "steel://active-profile", browserId: "steel" },
     });
-    registerAllTools(pi, client);
-    registerSetupCommand(pi, client);
+    const viewerUrl = () => steel?.status().viewerUrl;
+    registerAllTools(pi, client, viewerUrl);
+    registerSetupCommand(pi, client, viewerUrl);
   });
 
   pi.on("session_shutdown", async () => {
@@ -63,7 +79,8 @@ export default function steelBrowserHarnessExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (event) => {
     if (!client?.status().alive) {
       return {
-        systemPrompt: `${event.systemPrompt}\n\n## Steel Browser Control\nBrowser tools (browser_*) are available. Use browser_setup when browser interaction is needed; it creates a Steel Session through the Steel API and restores the active Pi Profile's persisted browser context.`, 
+        systemPrompt: `${event.systemPrompt}\n\n## Steel Browser Control\nBrowser tools (browser_*) are available. Use browser_setup when browser interaction is needed; it creates a Steel Session through the Steel API, restores the active Pi Profile's persisted browser context, and returns a live viewer URL that the user can open to interact with the same browser.`,
+
       };
     }
     return { systemPrompt: event.systemPrompt + getBrowserSystemPrompt() };
