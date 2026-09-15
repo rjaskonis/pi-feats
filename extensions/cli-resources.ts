@@ -218,27 +218,28 @@ async function skillRows(paths: string[], skillRoot: string, settings: Record<st
   return rows.sort((a, b) => a[0].localeCompare(b[0]) || a[2].localeCompare(b[2]));
 }
 
-async function extensionRows(paths: string[], exclusions: string[]): Promise<Row[]> {
+async function extensionRows(paths: string[], exclusions: string[], enabledExtensions?: string[]): Promise<Row[]> {
   const rows: Row[] = [];
+  const enabled = (name: string, path: string) => !enabledExtensions || enabledExtensions.includes("*") || enabledExtensions.includes(name) ? !isExcluded(path, exclusions) : false;
   for (const path of paths) {
     if (!existsSync(path)) continue;
     if ([".ts", ".js"].includes(extname(path))) {
-      rows.push([basename(path, extname(path)), isExcluded(path, exclusions) ? "disabled" : "enabled", path]);
+      rows.push([basename(path, extname(path)), enabled(basename(path, extname(path)), path) ? "enabled" : "disabled", path]);
       continue;
     }
     // A configured directory with index.ts/index.js is one extension. Its
     // sibling source/config files are implementation details, not extensions.
     if (existsSync(join(path, "index.ts")) || existsSync(join(path, "index.js"))) {
-      rows.push([basename(path), isExcluded(path, exclusions) ? "disabled" : "enabled", path]);
+      rows.push([basename(path), enabled(basename(path), path) ? "enabled" : "disabled", path]);
       continue;
     }
     for (const entry of await readdir(path, { withFileTypes: true })) {
       if (entry.isFile() && [".ts", ".js"].includes(extname(entry.name))) {
         const resourcePath = join(path, entry.name);
-        rows.push([basename(entry.name, extname(entry.name)), isExcluded(resourcePath, exclusions) ? "disabled" : "enabled", resourcePath]);
+        rows.push([basename(entry.name, extname(entry.name)), enabled(basename(entry.name, extname(entry.name)), resourcePath) ? "enabled" : "disabled", resourcePath]);
       } else if (entry.isDirectory() && (existsSync(join(path, entry.name, "index.ts")) || existsSync(join(path, entry.name, "index.js")))) {
         const resourcePath = join(path, entry.name);
-        rows.push([entry.name, isExcluded(resourcePath, exclusions) ? "disabled" : "enabled", resourcePath]);
+        rows.push([entry.name, enabled(entry.name, resourcePath) ? "enabled" : "disabled", resourcePath]);
       }
     }
   }
@@ -569,7 +570,7 @@ export default async function (pi: ExtensionAPI) {
       const paths = kind === "skills"
         ? [...new Set([catalogRoot, ...configuredPaths, ...packageResources.map(({ path }) => path)])]
         : [...new Set([...(configuredPaths.length > 0 ? configuredPaths : [catalogRoot]), ...packageResources.map(({ path }) => path)])];
-      const rows: SourceRow[] = (kind === "skills" ? await skillRows(paths, catalogRoot, settings, exclusions) : await extensionRows(paths, exclusions)).map((row) => {
+      const rows: SourceRow[] = (kind === "skills" ? await skillRows(paths, catalogRoot, settings, exclusions) : await extensionRows(paths, exclusions, (loaded.runtimeSettings.profile as { enabledExtensions?: string[] } | undefined)?.enabledExtensions)).map((row) => {
         const packageName = packageResources.find(({ path }) => row[2] === path || isWithin(row[2], path))?.packageName;
         const source = packageName ? `Package: ${packageName}` : (row[2].startsWith(join(resourceRoot, "skills")) ? "Shared" : row[2].includes("/profiles/") ? "Profile" : "Local");
         return [row[0], row[1], source, row[2]];
