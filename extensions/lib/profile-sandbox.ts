@@ -48,6 +48,9 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
         join(agentDir, "prompts"),
         join(agentDir, "themes"),
         join(agentDir, "guardrails"),
+        // Application handlers are runtime-owned code. A named Profile may
+        // read them when an Application session starts, but never modify them.
+        join(agentDir, "applications"),
         join(agentDir, "AGENTS.md"),
         // Resource commands need the default runtime's package and extension
         // configuration while operating on the named profile.
