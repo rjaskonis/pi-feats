@@ -10,7 +10,7 @@ const agentRoot = () => process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGE
 const profileDirectory = () => process.env.PI_CODING_AGENT_DIR ?? agentRoot();
 function executionContext() {
   const application = applicationExecutionContext.getStore();
-  return { application: application?.application ?? process.env.PI_APPLICATION_SLUG, identityKey: application?.identityKey ?? process.env.PI_APPLICATION_IDENTITY_KEY, profile: application?.profile ?? process.env.PI_ACTIVE_PROFILE ?? "default", sessionId: application?.sessionId };
+  return { application: application?.application ?? process.env.PI_APPLICATION_SLUG, identityKey: application?.identityKey ?? process.env.PI_APPLICATION_IDENTITY_KEY, profile: application?.profile ?? process.env.PI_ACTIVE_PROFILE ?? "default", sessionId: application?.sessionId ?? process.env.PI_APPLICATION_SESSION_ID };
 }
 
 export default function registerContextMemory(pi: ExtensionAPI): void {

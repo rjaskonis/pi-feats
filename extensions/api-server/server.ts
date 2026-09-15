@@ -415,7 +415,7 @@ class ApiServer {
     try {
       const session = (await this.listProfileSessions(profile)).find((item) => item.id === id);
       if (!session) throw Object.assign(new Error(`No session found matching '${id}'`), { status: 404 });
-      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application } : {}) };
+      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application, PI_APPLICATION_SESSION_ID: id } : {}) };
       // The HTTP gateway is an API worker itself. Its children are agent
       // runtimes, not additional HTTP servers.
       delete workerEnv.PI_API_WORKER;
