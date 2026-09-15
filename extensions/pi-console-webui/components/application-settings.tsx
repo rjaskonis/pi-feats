@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/components/toast";
 
-type Settings = { inboundHandler: string; outboundHandler?: string; transformHandlers?: string[] };
+type Settings = { inboundHandler: string; outboundHandler?: string; transformHandlers?: string[]; messageCoalescing?: { enabled?: boolean; silenceDebounceSeconds?: number } };
 type App = { name: string; slug: string; enabled: boolean; responseMode: "ack" | "result"; defaultProfile: string | null; routingPolicy: "default_as_fallback" | "drop"; settings: Settings };
 type HandlerOptions = { inbound: string[]; outbound: string[]; transform: string[] };
 const api = async (path: string, init?: RequestInit) => { const response = await fetch(`/api/pi/${path}`, { ...init, headers: { "content-type": "application/json", ...init?.headers } }); if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error?.message ?? "Request failed"); return response.json(); };
@@ -47,6 +47,10 @@ export function ApplicationSettings({ slug }: { slug: string }) {
       <label className="text-sm font-medium">Response mode<select className="mt-1 w-full rounded-lg border border-zinc-200 px-3 py-2" value={app.responseMode} onChange={(event) => update({ responseMode: event.target.value as App["responseMode"] })}><option value="ack">Acknowledgement (ack)</option><option value="result">Wait for result</option></select></label>
       <label className="text-sm font-medium">Routing policy<select className="mt-1 w-full rounded-lg border border-zinc-200 px-3 py-2" value={app.routingPolicy} onChange={(event) => update({ routingPolicy: event.target.value as App["routingPolicy"] })}><option value="default_as_fallback">Use default profile as fallback</option><option value="drop">Reject unresolved routes</option></select></label>
       <label className="flex items-center gap-2 text-sm font-medium md:col-span-2"><Switch checked={app.enabled} onCheckedChange={(enabled) => update({ enabled })}/>Enabled</label>
+    </Card>
+    <Card className="space-y-4">
+      <div><CardTitle>Message coalescing</CardTitle><p className="mt-1 text-sm text-zinc-500">Collects messages from the same resolved identity after inbound handling. Only the last message after the silence interval dispatches the combined content to Pi.</p></div>
+      <div className="grid gap-4 md:grid-cols-2"><label className="flex items-center gap-2 text-sm font-medium"><Switch checked={settings.messageCoalescing?.enabled === true} onCheckedChange={(enabled) => updateSettings({ messageCoalescing: { enabled, silenceDebounceSeconds: settings.messageCoalescing?.silenceDebounceSeconds ?? 10 } })}/>Enabled</label><label className="text-sm font-medium">Silence debounce (seconds)<Input className="mt-1" type="number" min="1" max="3600" disabled={!settings.messageCoalescing?.enabled} value={settings.messageCoalescing?.silenceDebounceSeconds ?? 10} onChange={(event) => updateSettings({ messageCoalescing: { enabled: settings.messageCoalescing?.enabled === true, silenceDebounceSeconds: Number(event.target.value) } })}/></label></div>
     </Card>
     <Card className="space-y-4">
       <div><CardTitle>Pipeline</CardTitle><p className="mt-1 text-sm text-zinc-500">{isNew ? "Save the Application before creating and selecting custom handlers." : "Handlers are managed in the Handlers tab. Transform order is execution order."}</p></div>

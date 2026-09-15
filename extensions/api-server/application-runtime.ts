@@ -13,6 +13,8 @@ type Handler = (payload: RecordValue, headers?: RecordValue | null, query?: Reco
 type ApplicationApi = { agentSettings(): Promise<Record<string, unknown>>; listSessions(profile: string): Promise<Array<Record<string, unknown>>>; createSession(profile: string, input: unknown): Promise<Record<string, unknown>>; getSessionConversation(profile: string, sessionId: string): Promise<Record<string, unknown>>; complete(profile: string, prompt: string): Promise<string>; prompt(profile: string, sessionId: string, message: string, handoff?: string, applicationContext?: { application: string; identityKey: string }): Promise<{ profile: string; sessionId: string; response: string }>; getIdentityMapping(application: string, identityKey: string): Promise<{ profile: string; sessionMode: "fixed" | "automatic"; sessionPrefix: string | null } | undefined>; automaticApplicationSessionPrefix(application: string, identityKey: string): Promise<string>;  getApplicationSession(application: string, profile: string, prefix: string): Promise<{ sessionId: string } | undefined>; getActiveApplicationSession(application: string, profile: string, prefix: string): Promise<{ sessionId: string } | undefined>; nextApplicationSessionId(application: string, profile: string, prefix: string): Promise<string>; recordApplicationSession(application: string, profile: string, prefix: string, sessionId: string, rollover: boolean): Promise<void>; touchApplicationSession(application: string, profile: string, prefix: string, sessionId: string, from?: string): Promise<void>;  retargetPulseThreadSessions(profile: string, fromSessionId: string, toSessionId: string): Promise<void>; handlerEnvironment(profile: string): Promise<Record<string, string | undefined>> };
 type Handoff = { sourceSessionId: string | null; summary: string; createdAt: string; targetCreatedAt: string };
 type WorkingSession = { sessionId: string; updatedAt: string; reason: "message" | "rollover" };
+type CoalescedEntry = { call: ReturnType<ApplicationLogStore["start"]>; stage: ReturnType<ApplicationLogStore["stage"]>; message: string; state: RecordValue; version: number; dispatch: (message: string, state: RecordValue) => Promise<unknown>; resolve: (output: unknown) => void; reject: (error: unknown) => void };
+type CoalescingBuffer = { version: number; entries: CoalescedEntry[] };
 export type ApplicationIdentity = { id: string; name: string; slug: string; enabled: boolean; responseMode: "ack" | "result"; defaultProfile: string | null; routingPolicy: "default_as_fallback" | "drop"; settings: Record<string, unknown> }; 
 
 const safeName = (name: string) => /^[A-Za-z][A-Za-z0-9_-]*$/.test(name);
@@ -37,6 +39,8 @@ export class ApplicationRuntime {
   readonly settings: Settings;
   private readonly jiti = createJiti(process.cwd(), { moduleCache: false, fsCache: false });
   private queues = new Map<string, Promise<void>>();
+  private coalescingBuffers = new Map<string, CoalescingBuffer>();
+  private coalescingTimers = new Set<ReturnType<typeof setTimeout>>();
 
   readonly logs: ApplicationLogStore;
   constructor(readonly directory: string, settings: Settings, private readonly api: ApplicationApi, private readonly persistSettings: (settings: Settings) => Promise<void>, private readonly application: ApplicationIdentity) { this.name = application.slug; this.settings = settings; this.logs = new ApplicationLogStore(directory, this.name); }
@@ -183,6 +187,52 @@ export class ApplicationRuntime {
     });
   }
 
+  private async collect(key: string, call: ReturnType<ApplicationLogStore["start"]>, message: string, state: RecordValue, dispatch: (message: string, state: RecordValue) => Promise<unknown>): Promise<unknown> {
+    const seconds = this.settings.messageCoalescing?.silenceDebounceSeconds ?? 0;
+    if (!this.settings.messageCoalescing?.enabled || seconds <= 0) return dispatch(message, state);
+    const buffer = this.coalescingBuffers.get(key) ?? { version: 0, entries: [] };
+    this.coalescingBuffers.set(key, buffer);
+    const version = ++buffer.version;
+    const stage = this.logs.stage(call, "coalescing", "Message coalescing", { key, version, silenceDebounceSeconds: seconds, messageCharacters: message.length });
+    this.logs.complete(call, stage, { status: "collected", version });
+    return new Promise((resolve, reject) => {
+      const entry: CoalescedEntry = { call, stage, message, state, version, dispatch, resolve, reject };
+      buffer.entries.push(entry);
+      const timer = setTimeout(() => { this.coalescingTimers.delete(timer); void this.flushCoalesced(key, version); }, seconds * 1_000);
+      this.coalescingTimers.add(timer);
+    });
+  }
+
+  private async flushCoalesced(key: string, version: number): Promise<void> {
+    const buffer = this.coalescingBuffers.get(key);
+    if (!buffer) return;
+    if (buffer.version !== version) {
+      for (const entry of buffer.entries.filter((item) => item.version === version)) this.logs.annotate(entry.call, entry.stage, { status: "superseded", version, latestVersion: buffer.version });
+      return;
+    }
+    this.coalescingBuffers.delete(key);
+    const entries = buffer.entries, leader = entries.at(-1)!;
+    const message = entries.map((entry) => entry.message).join("\n");
+    for (const entry of entries) this.logs.annotate(entry.call, entry.stage, { status: entry === leader ? "dispatched" : "merged", version, leaderCallId: leader.call.id, messageCount: entries.length, messageCharacters: message.length });
+    try {
+      const output = await leader.dispatch(message, leader.state);
+      for (const entry of entries) {
+        if (entry !== leader) this.logs.finish(entry.call, { coalescing: { status: "merged", leaderCallId: leader.call.id, messageCount: entries.length } });
+        entry.resolve(output);
+      }
+    } catch (error) {
+      for (const entry of entries) { if (entry.call.status !== "error") this.logs.fail(entry.call, entry === leader ? undefined : entry.stage, error); entry.reject(error); }
+    }
+  }
+
+  dispose(): void {
+    for (const timer of this.coalescingTimers) clearTimeout(timer);
+    this.coalescingTimers.clear();
+    const error = new Error("Message coalescing was interrupted because the Application runtime was reloaded.");
+    for (const buffer of this.coalescingBuffers.values()) for (const entry of buffer.entries) { this.logs.fail(entry.call, entry.stage, error); entry.reject(error); }
+    this.coalescingBuffers.clear();
+  }
+
   async process(payload: unknown, headers: RecordValue, query: RecordValue): Promise<unknown> {
     const call = this.logs.start(payload, headers); let active: any; let current = asRecord(payload); let state: RecordValue = {};
     const context = { application: this.application, settings: await this.api.agentSettings(), request: { id: call.id, headers, query }, log: { info: (...values: unknown[]) => active?.stdout.push(values.map(String).join(" ")), error: (...values: unknown[]) => active?.stderr.push(values.map(String).join(" ")) } };
@@ -191,19 +241,23 @@ export class ApplicationRuntime {
       for (const name of this.settings.transformHandlers ?? []) { const result = await run("transform", `Transform: ${name}`, current, async () => this.handler("transform", name)(current, headers, query, context, state, await this.environmentFor(current, payload, query))); if (result && typeof result === "object" && "payload" in result) { current = asRecord(result.payload); state = { ...state, ...asRecord(result.state) }; } else current = asRecord(result); }
       const inbound = await run("inbound-handler", `Inbound handler: ${this.settings.inboundHandler}`, current, async () => this.handler("inbound", this.settings.inboundHandler)(current, headers, query, context, state, await this.environmentFor(current, payload, query)));
       const routed = asRecord(inbound); const hasIdentityKey = Object.prototype.hasOwnProperty.call(routed, "identityKey"); const identityKey = typeof routed.identityKey === "string" ? routed.identityKey.trim() : undefined; if (hasIdentityKey && !identityKey) throw Object.assign(new Error("identityKey must be a non-empty string when provided."), { status: 422 }); let profile: string | undefined, sessionPrefix: string | null | undefined; if (identityKey) { const mapped = await this.api.getIdentityMapping(this.application.slug, identityKey); if (!mapped) throw Object.assign(new Error("No Identity Key mapping was found for this Application."), { status: 422 }); profile = mapped.profile; sessionPrefix = mapped.sessionMode === "automatic" ? await this.api.automaticApplicationSessionPrefix(this.application.slug, identityKey) : mapped.sessionPrefix; if (!sessionPrefix) throw Object.assign(new Error("The Identity Key mapping has no session prefix."), { status: 422 }); } else { profile = typeof routed.profile === "string" && routed.profile.trim() ? routed.profile.trim() : undefined; sessionPrefix = typeof (routed.sessionPrefix ?? routed.session_prefix) === "string" ? String(routed.sessionPrefix ?? routed.session_prefix).trim() || undefined : undefined; if (!profile) throw Object.assign(new Error("Inbound must return profile when identityKey is not provided."), { status: 422 }); sessionPrefix ??= "default"; } if (!profile || !sessionPrefix) throw Object.assign(new Error("No Application route was resolved."), { status: 422 }); const message = asRecord(routed.payload).message; if (typeof message !== "string" || !message.trim()) throw Object.assign(new Error("The Application did not produce a text message."), { status: 422 }); state = { ...state, ...asRecord(routed.state) };
-      const sessionId = await this.resolveSession(profile, sessionPrefix);
-      let handoff: string | undefined;
-      try { handoff = await run("handoff-relevance", "Handoff relevance", { profile, sessionId, message }, () => this.relevantHandoff(profile, sessionId, sessionPrefix, message)); }
-      catch (error) { context.log.error("Handoff skipped:", error instanceof Error ? error.message : String(error)); }
-      const result = await run("pi-agent", "Pi agent", { profile, sessionId, message, handoff: Boolean(handoff) }, () => this.api.prompt(profile, sessionId, message, handoff, identityKey ? { application: this.application.slug, identityKey } : undefined));
-      await this.setWorkingSession(profile, sessionPrefix, sessionId, "message"); await this.api.touchApplicationSession(this.application.slug, profile, sessionPrefix, sessionId, identityKey);
-      let output: unknown = result;
-      if (this.settings.outboundHandler) {
-        const outboundInput = { profile, sessionId, message: { content: result.response } };
-        const handler = this.handler("outbound", this.settings.outboundHandler);
-        output = await run("outbound-handler", `Outbound handler: ${this.settings.outboundHandler}`, outboundInput, async () => handler(outboundInput, headers, query, context, state, await this.api.handlerEnvironment(profile)));
-      }
-      this.logs.finish(call, output); return output;
+      const dispatch = async (coalescedMessage: string, coalescedState: RecordValue): Promise<unknown> => {
+        const sessionId = await this.resolveSession(profile!, sessionPrefix!);
+        let handoff: string | undefined;
+        try { handoff = await run("handoff-relevance", "Handoff relevance", { profile, sessionId, message: coalescedMessage }, () => this.relevantHandoff(profile!, sessionId, sessionPrefix, coalescedMessage)); }
+        catch (error) { context.log.error("Handoff skipped:", error instanceof Error ? error.message : String(error)); }
+        const result = await run("pi-agent", "Pi agent", { profile, sessionId, message: coalescedMessage, handoff: Boolean(handoff) }, () => this.api.prompt(profile!, sessionId, coalescedMessage, handoff, identityKey ? { application: this.application.slug, identityKey } : undefined));
+        await this.setWorkingSession(profile!, sessionPrefix!, sessionId, "message"); await this.api.touchApplicationSession(this.application.slug, profile!, sessionPrefix!, sessionId, identityKey);
+        let output: unknown = result;
+        if (this.settings.outboundHandler) {
+          const outboundInput = { profile, sessionId, message: { content: result.response } };
+          const handler = this.handler("outbound", this.settings.outboundHandler);
+          output = await run("outbound-handler", `Outbound handler: ${this.settings.outboundHandler}`, outboundInput, async () => handler(outboundInput, headers, query, context, coalescedState, await this.api.handlerEnvironment(profile!)));
+        }
+        this.logs.finish(call, output); return output;
+      };
+      const key = `${this.application.slug}:${identityKey ? `identity:${identityKey}` : `route:${profile}:${sessionPrefix}`}`;
+      return await this.collect(key, call, message, state, dispatch);
     } catch (error) { if (call.status !== "error") this.logs.fail(call, undefined, error); throw error; }
   }
 }
@@ -214,5 +268,7 @@ export function validateApplicationSettings(raw: unknown): asserts raw is Settin
   if (!safeName(settings.inboundHandler)) throw Object.assign(new Error("Invalid inbound handler."), { status: 400 });
   if (settings.outboundHandler !== undefined && !safeName(settings.outboundHandler)) throw Object.assign(new Error("Invalid outbound handler."), { status: 400 });
   if (settings.transformHandlers !== undefined && (!Array.isArray(settings.transformHandlers) || settings.transformHandlers.some((name) => !safeName(name)))) throw Object.assign(new Error("Invalid transform handlers."), { status: 400 });
+  const coalescing = settings.messageCoalescing;
+  if (coalescing !== undefined && (!coalescing || typeof coalescing !== "object" || (coalescing.enabled !== undefined && typeof coalescing.enabled !== "boolean") || (coalescing.silenceDebounceSeconds !== undefined && (!Number.isInteger(coalescing.silenceDebounceSeconds) || coalescing.silenceDebounceSeconds < 1 || coalescing.silenceDebounceSeconds > 3600)))) throw Object.assign(new Error("Invalid message coalescing settings."), { status: 400 });
 }
 
