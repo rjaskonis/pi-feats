@@ -36,8 +36,11 @@ export class ApplicationLogStore {
     this.calls.set(call.id, call); void this.save(call);
   }
   list() { return [...this.calls.values()].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)); }
-  listSummaries(limit = 100) {
-    return this.list().slice(0, limit).map((call) => ({
+  listSummaries(limit = 100, start?: Date, end?: Date) {
+    return this.list().filter((call) => {
+      const receivedAt = new Date(call.receivedAt);
+      return (!start || receivedAt >= start) && (!end || receivedAt <= end);
+    }).slice(0, limit).map((call) => ({
       id: call.id, application: call.application, origin: call.origin, receivedAt: call.receivedAt, finishedAt: call.finishedAt, status: call.status, error: call.error,
       stages: call.stages.map((stage) => ({ id: stage.id, type: stage.type, label: stage.label, startedAt: stage.startedAt, finishedAt: stage.finishedAt, error: stage.error, completed: Boolean(stage.finishedAt) })),
     }));
