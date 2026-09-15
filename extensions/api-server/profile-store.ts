@@ -186,7 +186,7 @@ export class ProfileStore {
       const names = new Set([...extensionTools, ...sources.keys()]);
       return [...BUILTIN_TOOLS.map((name) => ({ name, kind, source: "builtin" as const, enabled: this.enabled(settings, kind, name) })), ...[...names].sort().map((name) => sources.has(name) ? ({ name, kind, source: "package" as const, package: sources.get(name), enabled: this.enabled(settings, kind, name) }) : ({ name, kind, source: "extension" as const, enabled: this.enabled(settings, kind, name) }))];
     }
-    return [...(await this.names("extensions")).map(({ name, path }) => ({ name, kind, path, source: "shared" as const, enabled: protectedExtensions.has(name) ? true : this.enabled(runtimeSettings, kind, name, path), protected: protectedExtensions.has(name) || undefined })), ...(await this.packageExtensions(runtimeSettings)).map(({ name, path, package: packageName }) => ({ name, kind, path, source: "package" as const, package: packageName, enabled: true }))];
+    return [...(await this.names("extensions")).map(({ name, path }) => ({ name, kind, path, source: "shared" as const, enabled: protectedExtensions.has(name) ? true : this.enabled(runtimeSettings, kind, name, path), protected: protectedExtensions.has(name) || undefined })), ...(await this.packageExtensions(runtimeSettings)).map(({ name, path, package: packageName }) => ({ name, kind, path, source: "package" as const, package: packageName, enabled: protectedExtensions.has(name) ? true : this.enabled(runtimeSettings, kind, name, path), protected: protectedExtensions.has(name) || undefined }))];
   }
 
   async resource(profile: string, kind: ResourceKind, name: string, source?: "shared" | "profile"): Promise<Resource> {

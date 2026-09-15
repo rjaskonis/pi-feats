@@ -131,14 +131,24 @@ function packageInstallPath(root: string, source: string): string | undefined {
 
 async function rootRuntimeSources(root: string, base: ProfileSettings): Promise<string[]> {
   const sources = new Set<string>();
-  const add = (source: unknown) => {
-    if (typeof source !== "string") return;
-    const packagePath = packageInstallPath(root, source);
-    const path = packagePath ?? (source.startsWith(".") ? resolve(root, source) : source);
-    if (existsSync(path)) sources.add(path);
+  const enabled = base.profile?.enabledExtensions;
+  const extensionName = (path: string) => basename(path).replace(/\.(?:ts|js)$/, "");
+  const add = (path: string) => {
+    if (!existsSync(path)) return;
+    const name = extensionName(path);
+    if (!enabled || enabled.includes("*") || enabled.includes(name)) sources.add(path);
   };
-  if (Array.isArray(base.packages)) for (const entry of base.packages) add(typeof entry === "object" && entry !== null ? (entry as { source?: unknown }).source : entry);
-  if (Array.isArray(base.extensions)) for (const entry of base.extensions) add(entry);
+  if (Array.isArray(base.packages)) for (const entry of base.packages) {
+    const source = typeof entry === "object" && entry !== null ? (entry as { source?: unknown }).source : entry;
+    if (typeof source !== "string") continue;
+    const packagePath = packageInstallPath(root, source);
+    if (!packagePath) { add(source.startsWith(".") ? resolve(root, source) : source); continue; }
+    try {
+      const manifest = JSON.parse(await readFile(join(packagePath, "package.json"), "utf8")) as { pi?: { extensions?: unknown } };
+      if (Array.isArray(manifest.pi?.extensions)) for (const extension of manifest.pi.extensions) if (typeof extension === "string") add(join(packagePath, extension));
+    } catch {}
+  }
+  if (Array.isArray(base.extensions)) for (const entry of base.extensions) if (typeof entry === "string") add(entry.startsWith(".") ? resolve(root, entry) : entry);
   // Pi auto-discovers these for the default profile. Add them explicitly when
   // re-executing a named profile, where that profile's extensions directory is
   // intentionally empty.
