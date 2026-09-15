@@ -36,6 +36,12 @@ export class ApplicationLogStore {
     this.calls.set(call.id, call); void this.save(call);
   }
   list() { return [...this.calls.values()].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)); }
+  listSummaries(limit = 100) {
+    return this.list().slice(0, limit).map((call) => ({
+      id: call.id, application: call.application, origin: call.origin, receivedAt: call.receivedAt, finishedAt: call.finishedAt, status: call.status, error: call.error,
+      stages: call.stages.map((stage) => ({ id: stage.id, type: stage.type, label: stage.label, startedAt: stage.startedAt, finishedAt: stage.finishedAt, error: stage.error, completed: Boolean(stage.finishedAt) })),
+    }));
+  }
   get(id: string) { return this.calls.get(id); }
   async clear() { this.calls.clear(); await rm(this.directory, { recursive: true, force: true }); await mkdir(this.directory, { recursive: true }); this.events.emit("event", { type: "logs.cleared" }); }
   on(listener: (event: unknown) => void) { this.events.on("event", listener); return () => this.events.off("event", listener); }
