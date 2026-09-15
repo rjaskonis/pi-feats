@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import type { ContextMemoryExecutionLog } from "../lib/application-context.ts";
 export type CallStage = { id: string; type: string; label: string; startedAt: string; finishedAt?: string; input?: unknown; output?: unknown; payload?: unknown; stdout: string[]; stderr: string[]; error?: string };
 export type ApplicationCall = { id: string; application: string; origin: string; receivedAt: string; finishedAt?: string; status: "running" | "success" | "error"; headers: Record<string, unknown>; stages: CallStage[]; error?: string };
 export class ApplicationLogStore {
@@ -14,6 +15,26 @@ export class ApplicationLogStore {
   complete(call: ApplicationCall, stage: CallStage, output: unknown) { stage.output = output; stage.finishedAt = new Date().toISOString(); void this.save(call); }
   fail(call: ApplicationCall, stage: CallStage | undefined, error: unknown) { const message = error instanceof Error ? `${error.message}\n${error.stack ?? ""}` : String(error); if (stage) { stage.error = message; stage.finishedAt = new Date().toISOString(); } call.error = message; call.status = "error"; call.finishedAt = new Date().toISOString(); void this.save(call); }
   finish(call: ApplicationCall, output: unknown) { call.status = "success"; call.finishedAt = new Date().toISOString(); const stage = this.stage(call, "final-response", "Final response", output); this.complete(call, stage, output); }
+  recordContextMemory(input: { profile: string; identityKey: string; sessionId: string; execution: ContextMemoryExecutionLog }) {
+    const { execution } = input;
+    const stage: CallStage = {
+      id: randomUUID(),
+      type: "context-memory",
+      label: `Context Memory: ${execution.handler}`,
+      startedAt: execution.startedAt,
+      finishedAt: new Date(new Date(execution.startedAt).getTime() + execution.durationMs).toISOString(),
+      input: { profile: input.profile, identityKey: input.identityKey, sessionId: input.sessionId, handler: execution.handler },
+      output: { injected: execution.status === "success" && execution.outputCharacters > 0, outputCharacters: execution.outputCharacters },
+      stdout: execution.stdout,
+      stderr: execution.stderr,
+      ...(execution.error ? { error: execution.error } : {}),
+    };
+    const call: ApplicationCall = {
+      id: randomUUID(), application: this.application, origin: "Pi Console session", receivedAt: execution.startedAt,
+      finishedAt: stage.finishedAt, status: execution.status === "success" ? "success" : "error", headers: {}, stages: [stage], ...(execution.error ? { error: execution.error } : {}),
+    };
+    this.calls.set(call.id, call); void this.save(call);
+  }
   list() { return [...this.calls.values()].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt)); }
   get(id: string) { return this.calls.get(id); }
   async clear() { this.calls.clear(); await rm(this.directory, { recursive: true, force: true }); await mkdir(this.directory, { recursive: true }); this.events.emit("event", { type: "logs.cleared" }); }

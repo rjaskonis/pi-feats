@@ -21,7 +21,14 @@ export default function registerContextMemory(pi: ExtensionAPI): void {
     if (entries.some((entry) => entry.type === "message")) return;
     try {
       await ensureDefaultProfileContextMemory(profileDirectory());
-      const memory = await resolveContextMemory(agentRoot(), profileDirectory(), executionContext());
+      const context = executionContext();
+      const memory = await resolveContextMemory(agentRoot(), profileDirectory(), context);
+      if (memory.handlerExecution && context.application && context.identityKey) {
+        const event = memory.handlerExecution;
+        const execution = applicationExecutionContext.getStore();
+        if (execution?.onContextMemoryExecution) execution.onContextMemoryExecution(event);
+        else process.stderr.write(`PI_CONTEXT_MEMORY_LOG:${JSON.stringify(event)}\n`);
+      }
       const content = snapshotMessage(memory);
       if (!content) return;
       return { message: { customType: "context-memory-snapshot", content, display: false } };

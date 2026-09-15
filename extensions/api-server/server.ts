@@ -18,7 +18,7 @@ import { ProfileStore, RESOURCE_KINDS, type ProfileSettings, type ResourceKind }
 import { ApplicationRuntime, type Settings as ApplicationSettings } from "./application-runtime.ts";
 import { ApplicationStore, type ApplicationRecord } from "./application-store.ts";
 import { applicationHandlerTemplate } from "../lib/application-handler-templates.ts";
-import { applicationExecutionContext } from "../lib/application-context.ts";
+import { applicationExecutionContext, type ContextMemoryExecutionLog } from "../lib/application-context.ts";
 import { contextMemoryCharacters, contextMemoryConfig, contextMemoryLimit, memoryPath, readMemory } from "../lib/context-memory.ts";
 import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
@@ -105,6 +105,7 @@ class ApiServer {
   readonly pulses: PulseStore;
   readonly applications: ApplicationStore;
   readonly skillSources: SkillSourceStore;
+  private contextMemoryLogger?: (application: string, profile: string, identityKey: string, sessionId: string, execution: ContextMemoryExecutionLog) => void;
 
   constructor(private readonly options: ServerOptions, private readonly config: ApiConfig) {
     this.profiles = new ProfileStore(options.agentDir);
@@ -395,6 +396,14 @@ class ApiServer {
     this.profiles.clearExtensionTools(profile);
   }
 
+  setContextMemoryLogger(logger: (application: string, profile: string, identityKey: string, sessionId: string, execution: ContextMemoryExecutionLog) => void): void {
+    this.contextMemoryLogger = logger;
+  }
+
+  private recordContextMemoryExecution(application: string, profile: string, identityKey: string, sessionId: string, execution: ContextMemoryExecutionLog): void {
+    this.contextMemoryLogger?.(application, profile, identityKey, sessionId, execution);
+  }
+
   private async sandboxed(profile: string): Promise<boolean> {
     return isSandboxEnabled(this.profileDirectory(profile), profile === "default");
   }
@@ -426,7 +435,15 @@ class ApiServer {
         child.once("error", reject);
         child.once("exit", (code) => resolveRun({ stdout, stderr, code: code ?? 1 }));
       });
-      if (result.code !== 0) throw new Error(result.stderr.trim() || `Sandboxed Pi exited with ${result.code}`);
+      const stderr = result.stderr.split(/\r?\n/).filter((line) => {
+        if (!line.startsWith("PI_CONTEXT_MEMORY_LOG:")) return true;
+        if (applicationContext) try {
+          const execution = JSON.parse(line.slice("PI_CONTEXT_MEMORY_LOG:".length)) as ContextMemoryExecutionLog;
+          this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution);
+        } catch { /* Ignore malformed child telemetry. */ }
+        return false;
+      }).join("\n").trim();
+      if (result.code !== 0) throw new Error(stderr || `Sandboxed Pi exited with ${result.code}`);
       return result.stdout.trim();
     } finally { this.sandboxBusy.delete(key); }
   }
@@ -438,7 +455,7 @@ class ApiServer {
     handle.busy = true;
     try {
       const promptSession = () => this.withProfileEnvironment(this.profileDirectory(profile), () => handle.session.prompt(message, { source: "rpc" }), handoff ? { PI_APPLICATION_HANDOFF: handoff } : {});
-      if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id }, promptSession);
+      if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, promptSession);
       else await promptSession();
       const assistant = [...handle.session.messages].reverse().find((item) => item.role === "assistant");
       return { profile, sessionId: id, response: textFromMessage(assistant) };
@@ -489,7 +506,7 @@ class ApiServer {
         response.once("close", () => { closed = true; void handle.session.abort(); });
       }
       const promptSession = () => this.withProfileEnvironment(this.profileDirectory(profile), () => handle.session.prompt(message, { source: "rpc" }));
-      if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id }, promptSession);
+      if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, promptSession);
       else await promptSession();
       const assistant = [...handle.session.messages].reverse().find((item) => item.role === "assistant");
       const response = textFromMessage(assistant);
@@ -875,6 +892,9 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     const loadApplication = async (record: ApplicationRecord) => { const directory = join(applicationsRoot, record.slug); await ensureApplicationFiles(record.slug); const runtime = await ApplicationRuntime.load(directory, api, applicationSettings(record), async (settings) => { const saved = applicationStore.update(record.slug, { settings, responseMode: settings.responseMode, defaultProfile: settings.defaultProfile ?? null }); applicationBySlug.set(saved.slug, { record: saved, runtime }); }, record); applicationBySlug.set(record.slug, { record, runtime }); };
     for (const record of applicationStore.list()) await loadApplication(record);
     const registeredApplication = (slug: string) => { const application = applicationBySlug.get(slug); if (!application) throw Object.assign(new Error("Application not found."), { status: 404 }); return application; };
+    api.setContextMemoryLogger((application, profile, identityKey, sessionId, execution) => {
+      applicationBySlug.get(application)?.runtime.logs.recordContextMemory({ profile, identityKey, sessionId, execution });
+    });
     const handlerFiles = async (directory: string, prefix = ""): Promise<string[]> => { const entries = await readdir(directory, { withFileTypes: true }); const files: string[] = []; for (const entry of entries) { const path = join(directory, entry.name), name = `${prefix}${entry.name}`; if (entry.isDirectory()) files.push(...await handlerFiles(path, `${name}/`)); else if (entry.isFile() && entry.name.endsWith(".ts")) files.push(name); } return files; };
     const applicationHandlerPath = (slug: string, file: unknown) => {
       if (typeof file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_./-]*\.ts$/.test(file) || file.includes("..")) throw Object.assign(new Error("Invalid handler path."), { status: 400 });
