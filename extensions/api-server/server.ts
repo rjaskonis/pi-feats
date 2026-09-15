@@ -775,6 +775,15 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       await api.profiles.readSettings(profileName(request));
       return { pulses: api.pulses.list(profileName(request)) };
     });
+    server.get<{ Params: { profile: string; name: string }; Querystring: { start?: string; end?: string; limit?: string } }>("/api/profiles/:profile/pulses/:name/runs", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      const profile = profileName(request); await api.profiles.readSettings(profile);
+      const end = request.query.end ?? new Date().toISOString(), start = request.query.start ?? new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString(), limit = request.query.limit === undefined ? 100 : Number(request.query.limit);
+      if (Number.isNaN(Date.parse(start)) || Number.isNaN(Date.parse(end)) || Date.parse(start) > Date.parse(end)) throw Object.assign(new Error("'start' and 'end' must be a valid chronological ISO-8601 range."), { status: 400 });
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw Object.assign(new Error("The 'limit' query parameter must be an integer from 1 to 100."), { status: 400 });
+      try { return { runs: api.pulses.runs(profile, request.params.name, start, end, limit) }; }
+      catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 404 }); }
+    });
     server.get<{ Params: { profile: string } }>("/api/profiles/:profile/pulses/history", async (request, reply) => {
       if (!guard(request, reply)) return;
       await api.profiles.readSettings(profileName(request));

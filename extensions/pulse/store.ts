@@ -5,7 +5,8 @@ import { dirname } from "node:path";
 
 export type PulseType = "cron" | "heartbeat";
 export type Pulse = { id: string; name: string; description: string; type: PulseType; schedule: string; prompt: string; thread_session_id: string; result: string | null; profile: string; enabled: boolean; nextRunAt: string | null; lastRunAt: string | null };
-export type PulseHistory = Pulse & { startedAt: string; finishedAt: string | null; status: string; error: string | null }; 
+export type PulseHistory = Pulse & { startedAt: string; finishedAt: string | null; status: string; error: string | null };
+export type PulseRun = { id: string; startedAt: string; finishedAt: string | null; status: "running" | "success" | "error"; response: string | null; error: string | null };
 type Row = Record<string, unknown>;
 const iso = (date = new Date()) => date.toISOString();
 
@@ -60,7 +61,8 @@ export class PulseStore {
     this.db.exec(`CREATE TABLE IF NOT EXISTS pulses (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('cron','heartbeat')), schedule TEXT NOT NULL, prompt TEXT NOT NULL, thread_session_id TEXT NOT NULL, result TEXT);
       CREATE TABLE IF NOT EXISTS pulse_control (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, profile TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, last_run_at TEXT, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pulse_state (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, handoff TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
-      CREATE TABLE IF NOT EXISTS pulse_runs (id TEXT PRIMARY KEY, pulse_id TEXT NOT NULL REFERENCES pulses(id) ON DELETE CASCADE, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, response TEXT, error TEXT);`);
+      CREATE TABLE IF NOT EXISTS pulse_runs (id TEXT PRIMARY KEY, pulse_id TEXT NOT NULL REFERENCES pulses(id) ON DELETE CASCADE, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, response TEXT, error TEXT);
+      CREATE INDEX IF NOT EXISTS pulse_runs_pulse_started ON pulse_runs(pulse_id, started_at DESC);`);
     // Migrate databases created before the denormalized latest result column.
     const columns = this.db.prepare("PRAGMA table_info(pulses)").all() as Row[];
     if (!columns.some((column) => column.name === "result")) this.db.exec("ALTER TABLE pulses ADD COLUMN result TEXT");
@@ -72,6 +74,7 @@ export class PulseStore {
   list(profile?: string): Pulse[] { const query = `SELECT p.*, c.profile, c.enabled, c.next_run_at, c.last_run_at FROM pulses p JOIN pulse_control c ON c.pulse_id=p.id${profile ? " WHERE c.profile=?" : ""} ORDER BY p.name`; return this.db.prepare(query).all(...(profile ? [profile] : [])) .map((row) => this.pulse(row as Row)); }
   get(name: string, profile?: string): Pulse | undefined { return this.list(profile).find((item) => item.name === name); }
   history(profile: string): PulseHistory[] { return this.db.prepare(`SELECT p.*, c.profile, c.enabled, c.next_run_at, c.last_run_at, r.started_at AS startedAt, r.finished_at AS finishedAt, r.status, r.error FROM pulses p JOIN pulse_control c ON c.pulse_id=p.id JOIN pulse_runs r ON r.id=(SELECT id FROM pulse_runs WHERE pulse_id=p.id AND finished_at IS NOT NULL ORDER BY started_at DESC LIMIT 1) WHERE c.profile=? AND p.schedule LIKE '@once:%' ORDER BY r.started_at DESC`).all(profile).map((row) => { const record = row as Row; return { ...this.pulse(record), startedAt: String(record.startedAt), finishedAt: record.finishedAt == null ? null : String(record.finishedAt), status: String(record.status), error: record.error == null ? null : String(record.error) }; }); }
+  runs(profile: string, name: string, start: string, end: string, limit = 100): PulseRun[] { const pulse = this.get(name, profile); if (!pulse) throw new Error("Pulse not found."); return this.db.prepare("SELECT id, started_at, finished_at, status, response, error FROM pulse_runs WHERE pulse_id=? AND started_at>=? AND started_at<=? ORDER BY started_at DESC LIMIT ?").all(pulse.id, start, end, limit).map((row) => { const item = row as Row; return { id: String(item.id), startedAt: String(item.started_at), finishedAt: item.finished_at == null ? null : String(item.finished_at), status: item.status as PulseRun["status"], response: item.response == null ? null : String(item.response), error: item.error == null ? null : String(item.error) }; }); }
   create(input: Omit<Pulse, "id" | "enabled" | "nextRunAt" | "lastRunAt" | "type" | "result">): Pulse {
     if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(input.name)) throw new Error("Invalid pulse name.");
     if (!validSchedule(input.schedule)) throw new Error("Invalid schedule. Use a five-field UTC cron expression or @once:<ISO-8601>.");
