@@ -52,7 +52,11 @@ Example:
 
 ## Strictly sequential execution
 
-Execution is strictly ordered **inside each workflow**. Multiple workflows may coexist, so always select the intended workflow ID and pass `workflowId` to `sequential_workflow_record_result` and `sequential_workflow_evaluate`.
+Execution is strictly ordered **inside each workflow**, with ownership and focus enforced by the harness for the current session. Pass both `workflowId` and the current `taskId` to `sequential_workflow_record_result` and `sequential_workflow_evaluate`. Use one tool call per model turn while focused. External tools are blocked unless the current task is a running Action; Collect requires a new user message after activation. The harness requests bounded continuation when an Action or evaluation is left unfinished; it does not certify the semantic correctness of results.
+
+The harness resolves requests such as `ative o sequential workflow basic` directly to `basic.json`. If the activation was already performed by the harness, do not create another workflow. Missing templates must not be replaced with invented tasks.
+
+Session focus survives reload/resume of the same session. A new or forked session starts without focus or ownership of old executions. `/workflow-suspend` releases focus without cancelling; `/workflow-focus <id>` resumes an owned execution; `/workflow-adopt <rootId>` explicitly transfers a whole workflow tree from another session (including legacy unowned runs). Adoption revokes the old owner's access. These are user controls, not actions the model may silently perform.
 
 Do not inspect, resume, or otherwise select a persisted workflow merely because it is active. A request to create or activate a workflow starts a new workflow unless the user explicitly asks to continue, inspect, list, cancel, or identifies an existing workflow by ID.
 
@@ -63,4 +67,4 @@ Do not inspect, resume, or otherwise select a persisted workflow merely because 
 - For an `evaluate`, assess the available information according to the instruction and call `sequential_workflow_evaluate`.
 - If an evaluation rejects an `action`, correct or repeat the current action. If it rejects a `collect`, explain what is missing and request the information again. A rejected `workflow` task becomes runnable again and may create a replacement child.
 
-`parentWorkflowId` creates a hierarchical relationship only. `parentTaskId` additionally creates an operational dependency: the parent task waits for that child. Use `sequential_workflow_status` without an ID to list active workflows or with `workflowId` to inspect one. Use `/workflow-cancel <workflowId>` only when the user requests cancellation.
+`parentWorkflowId` creates a hierarchical relationship only. `parentTaskId` additionally creates an operational dependency: the parent task waits for that child. Use `sequential_workflow_status` without an ID to list this session's active workflows or with `workflowId` to inspect an owned execution. Status never changes focus. Use `/workflow-cancel <workflowId>` only when the user requests cancellation.

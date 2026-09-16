@@ -294,7 +294,11 @@ Refreshing synchronizes the source and atomically replaces the complete installe
 ### Sequential Workflow
 
 - Create persistent workflows made of strictly ordered **Action**, **Collect**, **Evaluate**, and subworkflow tasks.
-- Run multiple workflows per profile, independently or in parent/child hierarchies.
+- Run multiple workflows per profile, independently or in parent/child hierarchies, with execution ownership and persisted focus isolated by Pi session ID.
+- Enforce current-task IDs, ownership, phase gates, and one tool call per model turn in the harness. External tools are allowed only during running Action tasks. Collect requires a subsequent user message. These controls enforce ordering, not the semantic truth of agent-reported results.
+- Restore focus on same-session resume/reload, never automatically on new/forked sessions. `/workflow-suspend`, `/workflow-focus <id>`, and `/workflow-adopt <rootId>` provide explicit user control; adoption transfers the entire tree and revokes the former owner's access. Legacy executions remain unowned until adopted.
+- Resolve `ative o sequential workflow basic` to `sequential_workflow_templates/basic.json` without inventing a new definition. Each activation creates a new execution. Missing templates fail closed.
+- Refresh task context before every model request and request at most two automatic continuations per unchanged unfinished phase. Failure to progress leaves the task pending with a warning; it never auto-accepts a task.
 - Let a subworkflow task wait for its linked child while unrelated workflows continue independently.
 - Prevent advancement until the current task result has been recorded and accepted.
 - Persist workflow state in SQLite for auditable retries and continuation.

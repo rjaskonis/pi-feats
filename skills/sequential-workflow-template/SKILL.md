@@ -16,7 +16,7 @@ Do not use this skill for ordinary planning, checklists, or step-by-step answers
 
 1. Read `schemas/sequential-workflow-template.schema.json` from the installed `pi-feats` package when its exact location is needed.
 2. Convert the user's requested process into a JSON document that conforms to schema version `1`.
-3. Classify each task as `action`, `collect`, or `evaluate`.
+3. Classify each task as `action`, `collect`, `evaluate`, or `workflow` (a task that starts and waits for a child execution). Runtime workflow/task/session IDs must not appear as template properties. External tool calls belong in Action tasks: the harness blocks them during Collect, Evaluate, and subworkflow waiting phases.
 4. Give every task a non-empty `instruction`. A `collect` task must have non-empty `criteria`.
 5. If the user specifies an output directory or path, write the JSON exactly there. Otherwise, call `sequential_workflow_prepare_template_directory` and write the file in its returned directory. This is `${PI_CODING_AGENT_DIR}/sequential_workflow_templates` for the active runtime, or `~/.pi/agent/sequential_workflow_templates` when `PI_CODING_AGENT_DIR` is not set.
 6. Call `sequential_workflow_validate_template` with the resulting path and correct any validation error before reporting completion.
