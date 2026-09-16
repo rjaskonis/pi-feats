@@ -14,7 +14,7 @@ Do not infer Sequential Workflow intent from a request for a plan, planning, che
 
 ## JSON template execution
 
-When the user explicitly asks to execute Sequential Workflow using a JSON template path, call `sequential_workflow_create_from_template` with that path. Do not read, parse, or reconstruct the template in the conversation first; the extension validates and persists it directly.
+When the user explicitly asks to execute Sequential Workflow using a JSON template path, call `sequential_workflow_create_from_template` with that path. A relative template path resolves in the active profile's `sequential_workflow_templates` directory; use an absolute path or a `./` or `../` path only when the user explicitly requested another location. Do not read, parse, or reconstruct the template in the conversation first; the extension validates and persists it directly.
 
 Use `sequential_workflow_validate_template` only when the user asks to validate a template or when creating/editing one through the `sequential-workflow-template` skill.
 

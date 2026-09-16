@@ -297,7 +297,7 @@ Refreshing synchronizes the source and atomically replaces the complete installe
 - Prevent advancement until the current task result has been recorded and accepted.
 - Persist workflow state in SQLite for auditable retries and continuation.
 - Validate reusable JSON definitions against [`schemas/sequential-workflow-template.schema.json`](schemas/sequential-workflow-template.schema.json), then create and start a workflow directly from the template.
-- Include separate Skills for executing named Sequential Workflows and authoring their JSON templates.
+- Include separate Skills for executing named Sequential Workflows and authoring their JSON templates. Templates created without an explicitly requested output path default to `<PI_CODING_AGENT_DIR>/sequential_workflow_templates/` (or `~/.pi/agent/sequential_workflow_templates/`); template tools resolve relative paths in that same directory.
 
 ## Command cookbook
 

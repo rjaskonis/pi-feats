@@ -2,9 +2,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { DatabaseSync } from "node:sqlite";
-import { stat, readFile } from "node:fs/promises";
+import { mkdir, stat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 
 type TaskType = "action" | "collect" | "evaluate";
@@ -54,7 +54,9 @@ const taskType = StringEnum(["action", "collect", "evaluate"] as const);
 const phaseType = StringEnum(["action", "collect"] as const);
 // Keep workflow state inside the active profile. Named profiles run under
 // nono and cannot write the shared extension directory.
-const workflowDatabase = () => join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "sequential-workflow.db");
+const workflowRoot = () => process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+const workflowDatabase = () => join(workflowRoot(), "sequential-workflow.db");
+const templateDirectory = () => join(workflowRoot(), "sequential_workflow_templates");
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
@@ -97,8 +99,14 @@ const validateTemplate = (value: unknown): WorkflowTemplate => {
   };
 };
 
+const resolveTemplatePath = (inputPath: string) => {
+  const expanded = inputPath === "~" ? homedir() : inputPath.startsWith("~/") ? join(homedir(), inputPath.slice(2)) : inputPath;
+  if (isAbsolute(expanded) || expanded === "." || expanded === ".." || expanded.startsWith("./") || expanded.startsWith("../") || expanded.startsWith(".\\") || expanded.startsWith("..\\")) return resolve(process.cwd(), expanded);
+  return resolve(templateDirectory(), expanded);
+};
+
 const loadTemplate = async (inputPath: string) => {
-  const path = resolve(process.cwd(), inputPath === "~" ? homedir() : inputPath.startsWith("~/") ? join(homedir(), inputPath.slice(2)) : inputPath);
+  const path = resolveTemplatePath(inputPath);
   let content: string;
   try {
     const info = await stat(path);
@@ -252,13 +260,27 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerTool({
+    name: "sequential_workflow_prepare_template_directory",
+    label: "Prepare Sequential Workflow Template Directory",
+    description: "Cria, quando necessário, e informa o diretório padrão de templates JSON de Sequential Workflow do profile ativo.",
+    promptSnippet: "Prepare the active profile's default Sequential Workflow template directory",
+    promptGuidelines: ["Use sequential_workflow_prepare_template_directory only when the user explicitly names Sequential Workflow and asks to create or edit its JSON template without specifying an output directory."],
+    parameters: Type.Object({}),
+    async execute() {
+      const path = templateDirectory();
+      await mkdir(path, { recursive: true });
+      return { content: [{ type: "text", text: `Diretório de templates pronto: ${path}` }], details: { path } };
+    },
+  });
+
+  pi.registerTool({
     name: "sequential_workflow_validate_template",
     label: "Validate Sequential Workflow Template",
     description: "Lê e valida um arquivo JSON de template de Sequential Workflow sem criar ou executar um workflow.",
     promptSnippet: "Validate a Sequential Workflow JSON template before it is used",
     promptGuidelines: ["Use sequential_workflow_validate_template only when the user explicitly names Sequential Workflow and asks to create, edit, or validate its JSON template."],
     parameters: Type.Object({
-      path: Type.String({ minLength: 1, description: "Path to the Sequential Workflow JSON template." }),
+      path: Type.String({ minLength: 1, description: "Template path. Relative paths resolve in the active profile's sequential_workflow_templates directory; use an absolute path or a ./ or ../ path for another location." }),
     }),
     async execute(_id, params) {
       const { path, hash, template } = await loadTemplate(params.path);
@@ -276,7 +298,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Create and start a persisted Sequential Workflow from a validated JSON template",
     promptGuidelines: ["Use sequential_workflow_create_from_template only when the user explicitly names Sequential Workflow and asks to execute a JSON template."],
     parameters: Type.Object({
-      path: Type.String({ minLength: 1, description: "Path to the Sequential Workflow JSON template." }),
+      path: Type.String({ minLength: 1, description: "Template path. Relative paths resolve in the active profile's sequential_workflow_templates directory; use an absolute path or a ./ or ../ path for another location." }),
     }),
     async execute(_id, params) {
       const { path, hash, template } = await loadTemplate(params.path);
