@@ -829,9 +829,9 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.post<{ Params: { profile: string; name: string }; Querystring: { source?: string } }>("/api/profiles/:profile/skills/:name/publish", async (request, reply) => { if (!guard(request, reply)) return; const profile=profileName(request), body=objectBody(request.body), source=skillSource(request.query.source); if (typeof body.identifier !== "string" || !body.identifier) throw Object.assign(new Error("A Skill Source is required."), { status: 400 }); const skill=await api.profiles.resource(profile, "skills", request.params.name, source); if (!skill.path) throw Object.assign(new Error("Skill path is not available."), { status: 404 }); if (source === "shared" && profile !== "default") throw Object.assign(new Error("Shared Skills can only be published by the default profile."), { status: 403 }); const publication=await api.skillSources.publish(body.identifier, profile, request.params.name, skill.path); await api.profiles.refreshSkills(profile); return reply.code(publication.action === "created" ? 201 : 200).send({ publication }); });
     server.post<{ Params: { profile: string; name: string }; Querystring: { source?: string } }>("/api/profiles/:profile/skills/:name/sync", async (request, reply) => { if (!guard(request, reply)) return; const profile=profileName(request), source=skillSource(request.query.source), skill=await api.profiles.resource(profile, "skills", request.params.name, source); if (!skill.path) throw Object.assign(new Error("Skill path is not available."), { status: 404 }); const synchronization=await api.skillSources.syncInstallation(profile, request.params.name, skill.path); await api.profiles.refreshSkills(profile); return { synchronization }; });
 
-    const skillSource = (value: unknown): "shared" | "profile" | undefined => {
+    const skillSource = (value: unknown): "shared" | "profile" | "package" | undefined => {
       if (value === undefined) return undefined;
-      if (value === "shared" || value === "profile") return value;
+      if (value === "shared" || value === "profile" || value === "package") return value;
       throw Object.assign(new Error("Invalid skill source."), { status: 400 });
     };
     server.get<{ Params: { profile: string } }>("/api/profiles/:profile/skills/sources", async (request, reply) => {

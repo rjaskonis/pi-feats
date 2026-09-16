@@ -8,6 +8,7 @@ export const RESOURCE_KINDS = ["tools", "skills", "extensions"] as const;
 export type ResourceKind = typeof RESOURCE_KINDS[number];
 type PolicyKey = "enabledTools" | "enabledSkills" | "enabledProfileSkills" | "enabledExtensions";
 type SkillSources = { shared?: boolean; profile?: boolean };
+type SkillResourceSource = "shared" | "profile" | "package";
 type ProfilePolicy = Partial<Record<PolicyKey, string[]>> & { skillSources?: SkillSources; contextMemory?: { mode: "file"; target: "profile" | "identity" } | { mode: "handler"; handler: string } };
 export type ProfileSettings = Record<string, unknown> & { profile?: ProfilePolicy; sandbox?: boolean };
 export type Resource = { name: string; kind: ResourceKind; path?: string; source: "builtin" | "shared" | "profile" | "extension" | "package"; package?: string; enabled: boolean; protected?: boolean };
@@ -110,14 +111,26 @@ export class ProfileStore {
     return !path || !exclusions.includes(`!${path}`);
   }
 
-  private async skillResources(profile: string, settings: ProfileSettings): Promise<Resource[]> {
-    const sources = this.skillSources(profile, settings);
-    const entries = await Promise.all((["profile", "shared"] as const).filter((source) => sources[source]).map(async (source) => ({ source, entries: await this.skillNames(this.skillBase(profile, source)) })));
-    return entries.flatMap(({ source, entries }) => entries.map(({ name, path }) => ({ name, kind: "skills" as const, path, source, enabled: this.skillEnabled(settings, source, name) })));
+  private async packageSkillResources(settings: ProfileSettings): Promise<Resource[]> {
+    const resources: Resource[] = [];
+    for (const pkg of await this.configuredPackages(settings)) {
+      for (const entry of Array.isArray(pkg.manifest?.pi?.skills) ? pkg.manifest.pi.skills : []) {
+        if (typeof entry !== "string") continue;
+        for (const skill of await this.skillNames(join(pkg.base, entry))) resources.push({ name: skill.name, kind: "skills", path: skill.path, source: "package", package: pkg.name, enabled: this.skillEnabled(settings, "package", skill.name) });
+      }
+    }
+    return resources;
   }
 
-  private skillEnabled(settings: ProfileSettings, source: "shared" | "profile", name: string): boolean {
-    const values = settings.profile?.[source === "shared" ? "enabledSkills" : "enabledProfileSkills"];
+  private async skillResources(profile: string, settings: ProfileSettings, runtimeSettings: ProfileSettings = settings): Promise<Resource[]> {
+    const sources = this.skillSources(profile, settings);
+    const entries = await Promise.all((["profile", "shared"] as const).filter((source) => sources[source]).map(async (source) => ({ source, entries: await this.skillNames(this.skillBase(profile, source)) })));
+    const local = entries.flatMap(({ source, entries }) => entries.map(({ name, path }) => ({ name, kind: "skills" as const, path, source, enabled: this.skillEnabled(settings, source, name) })));
+    return [...local, ...(sources.shared ? await this.packageSkillResources(runtimeSettings) : [])];
+  }
+
+  private skillEnabled(settings: ProfileSettings, source: SkillResourceSource, name: string): boolean {
+    const values = settings.profile?.[source === "profile" ? "enabledProfileSkills" : "enabledSkills"];
     return !values || values.includes("*") || values.includes(name);
   }
 
@@ -131,12 +144,12 @@ export class ProfileStore {
     return join(this.agentDir, "git", remote);
   }
 
-  private async configuredPackages(settings: ProfileSettings): Promise<Array<{ source: string; base: string; name: string; manifest?: { version?: string; description?: string; pi?: { extensions?: unknown } } }>> {
+  private async configuredPackages(settings: ProfileSettings): Promise<Array<{ source: string; base: string; name: string; manifest?: { version?: string; description?: string; pi?: { extensions?: unknown; skills?: unknown } } }>> {
     const sources = Array.isArray(settings.packages) ? settings.packages.filter((value): value is string => typeof value === "string") : [];
-    const packages: Array<{ source: string; base: string; name: string; manifest?: { version?: string; description?: string; pi?: { extensions?: unknown } } }> = [];
+    const packages: Array<{ source: string; base: string; name: string; manifest?: { version?: string; description?: string; pi?: { extensions?: unknown; skills?: unknown } } }> = [];
     for (const source of sources) {
       const base = this.packageBase(source); if (!base) continue;
-      try { const manifest = JSON.parse(await readFile(join(base, "package.json"), "utf8")) as { name?: string; version?: string; description?: string; pi?: { extensions?: unknown } }; packages.push({ source, base, name: manifest.name ?? source, manifest }); }
+      try { const manifest = JSON.parse(await readFile(join(base, "package.json"), "utf8")) as { name?: string; version?: string; description?: string; pi?: { extensions?: unknown; skills?: unknown } }; packages.push({ source, base, name: manifest.name ?? source, manifest }); }
       catch { packages.push({ source, base, name: source.replace(/^npm:/, "") }); }
     }
     return packages;
@@ -179,7 +192,7 @@ export class ProfileStore {
   async resources(profile: string, kind: ResourceKind): Promise<Resource[]> {
     const settings = await this.readSettings(profile);
     const runtimeSettings = profile === "default" ? settings : await this.readSettings("default");
-    if (kind === "skills") return this.skillResources(profile, settings);
+    if (kind === "skills") return this.skillResources(profile, settings, runtimeSettings);
     if (kind === "tools") {
       const extensionTools = this.extensionToolNames(profile);
       const sources = await this.packageToolSources(runtimeSettings, extensionTools);
@@ -189,14 +202,15 @@ export class ProfileStore {
     return [...(await this.names("extensions")).map(({ name, path }) => ({ name, kind, path, source: "shared" as const, enabled: protectedExtensions.has(name) ? true : this.enabled(runtimeSettings, kind, name, path), protected: protectedExtensions.has(name) || undefined })), ...(await this.packageExtensions(runtimeSettings)).map(({ name, path, package: packageName }) => ({ name, kind, path, source: "package" as const, package: packageName, enabled: protectedExtensions.has(name) ? true : this.enabled(runtimeSettings, kind, name, path), protected: protectedExtensions.has(name) || undefined }))];
   }
 
-  async resource(profile: string, kind: ResourceKind, name: string, source?: "shared" | "profile"): Promise<Resource> {
+  async resource(profile: string, kind: ResourceKind, name: string, source?: SkillResourceSource): Promise<Resource> {
     const resource = (await this.resources(profile, kind)).find((item) => item.name === name && (!source || item.source === source));
     if (!resource) throw Object.assign(new Error("Resource not found"), { status: 404 });
     return resource;
   }
 
   private async skillPaths(name: string, settings: ProfileSettings): Promise<string[]> {
-    return (await this.skillResources(name, settings)).filter((skill) => skill.enabled).map((skill) => skill.path!).filter(Boolean);
+    const runtimeSettings = name === "default" ? settings : await this.readSettings("default");
+    return (await this.skillResources(name, settings, runtimeSettings)).filter((skill) => skill.enabled).map((skill) => skill.path!).filter(Boolean);
   }
 
   private async materializeResources(name: string, settings: ProfileSettings): Promise<ProfileSettings> {
@@ -244,7 +258,7 @@ export class ProfileStore {
     return this.skillSources(profile, settings);
   }
 
-  async readSkillDocument(profile: string, name: string, source?: "shared" | "profile"): Promise<{ name: string; frontmatter: Record<string, string>; content: string }> {
+  async readSkillDocument(profile: string, name: string, source?: SkillResourceSource): Promise<{ name: string; frontmatter: Record<string, string>; content: string }> {
     const skill = await this.resource(profile, "skills", name, source);
     if (!skill.path) throw Object.assign(new Error("Skill document not found"), { status: 404 });
     const document = await readFile(join(skill.path, "SKILL.md"), "utf8");
@@ -259,7 +273,7 @@ export class ProfileStore {
     return { name, frontmatter, content: match ? document.slice(match[0].length) : document };
   }
 
-  async setResource(profile: string, kind: ResourceKind, name: string, enabled: boolean, source?: "shared" | "profile"): Promise<Resource> {
+  async setResource(profile: string, kind: ResourceKind, name: string, enabled: boolean, source?: SkillResourceSource): Promise<Resource> {
     const current = await this.resource(profile, kind, name, source);
     if (current.protected && !enabled) throw Object.assign(new Error("This extension is required and cannot be disabled."), { status: 422 });
     // Extensions are shared runtime resources, so toggling one always updates
@@ -276,8 +290,9 @@ export class ProfileStore {
     return this.resource(profile, kind, name, source);
   }
 
-  async deleteSkill(profile: string, name: string, source?: "shared" | "profile"): Promise<void> {
+  async deleteSkill(profile: string, name: string, source?: SkillResourceSource): Promise<void> {
     const current = await this.resource(profile, "skills", name, source);
+    if (current.source === "package") throw Object.assign(new Error("Package Skills cannot be deleted here."), { status: 403 });
     if (current.source === "shared" && profile !== "default") { await this.setResource(profile, "skills", name, false, "shared"); return; }
     if (!current.path) throw Object.assign(new Error("Skill path not found."), { status: 404 });
     await rm(current.path, { recursive: true, force: false });
