@@ -54,6 +54,8 @@ Example:
 
 Execution is strictly ordered **inside each workflow**. Multiple workflows may coexist, so always select the intended workflow ID and pass `workflowId` to `sequential_workflow_record_result` and `sequential_workflow_evaluate`.
 
+Do not inspect, resume, or otherwise select a persisted workflow merely because it is active. A request to create or activate a workflow starts a new workflow unless the user explicitly asks to continue, inspect, list, cancel, or identifies an existing workflow by ID.
+
 - For an `action`, perform the action and call `sequential_workflow_record_result` with `phase: "action"` and a verifiable result summary.
 - For a `collect`, request the required information from the user. After receiving it, call `sequential_workflow_record_result` with `phase: "collect"` and the received response.
 - For a `workflow` task, create the child with `parentTaskId` set to that task ID. The parent task waits automatically; do not record a result for it.

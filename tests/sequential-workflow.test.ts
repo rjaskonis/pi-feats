@@ -23,6 +23,7 @@ const setup = async () => {
   } as any);
   return {
     tool: (name: string) => tools.get(name)!,
+    handlers,
     close: async () => {
       for (const handler of handlers.get("session_shutdown") ?? []) handler();
       await rm(root, { recursive: true, force: true });
@@ -40,6 +41,16 @@ test("multiple independent workflows can remain active", async () => {
 
     const status = await harness.tool("sequential_workflow_status").execute("3", {});
     assert.equal(status.details.workflows.length, 2);
+  } finally {
+    await harness.close();
+  }
+});
+
+test("does not inject active workflows into unrelated sessions", async () => {
+  const harness = await setup();
+  try {
+    await harness.tool("sequential_workflow_create").execute("1", { title: "Existing", source: "test", tasks: [{ type: "action", instruction: "Do work" }] });
+    assert.equal(harness.handlers.get("before_agent_start")?.length ?? 0, 0);
   } finally {
     await harness.close();
   }
