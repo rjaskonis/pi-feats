@@ -25,6 +25,7 @@ Use `sequential_workflow_validate_template` only when the user asks to validate 
    - `action`: performs an action.
    - `collect`: requests information from the user. **Always requires `criteria`.**
    - `evaluate`: evaluates information or a result only.
+   - `workflow`: creates and waits for a subworkflow. Use it when the parent must not advance until that child has reached a terminal state.
 3. For `action`, include `criteria` when there is an acceptance condition. For `collect`, `criteria` is mandatory.
 4. Call `sequential_workflow_create` with the plan. Do not invent results or perform steps before creation is confirmed.
 
@@ -51,12 +52,13 @@ Example:
 
 ## Strictly sequential execution
 
-The extension identifies the current task. Work **only** on that task.
+Execution is strictly ordered **inside each workflow**. Multiple workflows may coexist, so always select the intended workflow ID and pass `workflowId` to `sequential_workflow_record_result` and `sequential_workflow_evaluate`.
 
 - For an `action`, perform the action and call `sequential_workflow_record_result` with `phase: "action"` and a verifiable result summary.
 - For a `collect`, request the required information from the user. After receiving it, call `sequential_workflow_record_result` with `phase: "collect"` and the received response.
+- For a `workflow` task, create the child with `parentTaskId` set to that task ID. The parent task waits automatically; do not record a result for it.
 - If a task has `criteria`, call `sequential_workflow_evaluate` to record whether the criterion was accepted. Do not advance before acceptance.
 - For an `evaluate`, assess the available information according to the instruction and call `sequential_workflow_evaluate`.
-- If an evaluation rejects an `action`, correct or repeat the current action. If it rejects a `collect`, explain what is missing and request the information again. Never advance after rejection.
+- If an evaluation rejects an `action`, correct or repeat the current action. If it rejects a `collect`, explain what is missing and request the information again. A rejected `workflow` task becomes runnable again and may create a replacement child.
 
-Use `sequential_workflow_status` to inspect persisted state. Use `/workflow-cancel` only when the user requests cancellation.
+`parentWorkflowId` creates a hierarchical relationship only. `parentTaskId` additionally creates an operational dependency: the parent task waits for that child. Use `sequential_workflow_status` without an ID to list active workflows or with `workflowId` to inspect one. Use `/workflow-cancel <workflowId>` only when the user requests cancellation.

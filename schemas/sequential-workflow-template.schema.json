@@ -32,7 +32,7 @@
         "required": ["type", "instruction"],
         "properties": {
           "type": {
-            "enum": ["action", "collect", "evaluate"]
+            "enum": ["action", "collect", "evaluate", "workflow"]
           },
           "instruction": {
             "type": "string",

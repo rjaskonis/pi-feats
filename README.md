@@ -293,7 +293,9 @@ Refreshing synchronizes the source and atomically replaces the complete installe
 
 ### Sequential Workflow
 
-- Create persistent workflows made of strictly ordered **Action**, **Collect**, and **Evaluate** tasks.
+- Create persistent workflows made of strictly ordered **Action**, **Collect**, **Evaluate**, and subworkflow tasks.
+- Run multiple workflows per profile, independently or in parent/child hierarchies.
+- Let a subworkflow task wait for its linked child while unrelated workflows continue independently.
 - Prevent advancement until the current task result has been recorded and accepted.
 - Persist workflow state in SQLite for auditable retries and continuation.
 - Validate reusable JSON definitions against [`schemas/sequential-workflow-template.schema.json`](schemas/sequential-workflow-template.schema.json), then create and start a workflow directly from the template.
