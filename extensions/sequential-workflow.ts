@@ -2,8 +2,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { DatabaseSync } from "node:sqlite";
+import { stat, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { createHash } from "node:crypto";
 
 type TaskType = "action" | "collect" | "evaluate";
 type TaskStatus = "pending" | "running" | "awaiting_user" | "evaluating" | "accepted" | "rejected" | "failed";
@@ -29,11 +31,91 @@ type Workflow = {
   status: WorkflowStatus;
 };
 
+type WorkflowTaskDefinition = {
+  type: TaskType;
+  instruction: string;
+  criteria?: string;
+};
+
+type WorkflowDefinition = {
+  title: string;
+  source: string;
+  tasks: WorkflowTaskDefinition[];
+};
+
+type WorkflowTemplate = WorkflowDefinition & { version: 1 };
+
+const templateMaxBytes = 1024 * 1024;
+const templateMaxTasks = 1000;
+const templateMaxTitleLength = 1000;
+const templateMaxSourceLength = 2000;
+const templateMaxTextLength = 10000;
 const taskType = StringEnum(["action", "collect", "evaluate"] as const);
 const phaseType = StringEnum(["action", "collect"] as const);
 // Keep workflow state inside the active profile. Named profiles run under
 // nono and cannot write the shared extension directory.
 const workflowDatabase = () => join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "sequential-workflow.db");
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+const requiredText = (value: unknown, field: string, maxLength: number) => {
+  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`Template inválido: ${field} é obrigatório.`);
+  if (value.length > maxLength) throw new Error(`Template inválido: ${field} excede ${maxLength} caracteres.`);
+  return value;
+};
+
+const onlyProperties = (value: Record<string, unknown>, allowed: string[], field: string) => {
+  const unexpected = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unexpected) throw new Error(`Template inválido: ${field} contém a propriedade não permitida ${unexpected}.`);
+};
+
+const validateTemplate = (value: unknown): WorkflowTemplate => {
+  if (!isRecord(value)) throw new Error("Template inválido: a raiz deve ser um objeto JSON.");
+  onlyProperties(value, ["version", "title", "source", "tasks"], "raiz");
+  if (value.version !== 1) throw new Error("Template inválido: version deve ser 1.");
+  if (!Array.isArray(value.tasks) || value.tasks.length === 0) throw new Error("Template inválido: tasks deve conter ao menos uma task.");
+  if (value.tasks.length > templateMaxTasks) throw new Error(`Template inválido: tasks não pode exceder ${templateMaxTasks} itens.`);
+
+  const tasks = value.tasks.map((item, index) => {
+    if (!isRecord(item)) throw new Error(`Template inválido: tasks[${index}] deve ser um objeto.`);
+    onlyProperties(item, ["type", "instruction", "criteria"], `tasks[${index}]`);
+    if (item.type !== "action" && item.type !== "collect" && item.type !== "evaluate") throw new Error(`Template inválido: tasks[${index}].type deve ser action, collect ou evaluate.`);
+    const criteria = item.criteria === undefined ? undefined : requiredText(item.criteria, `tasks[${index}].criteria`, templateMaxTextLength);
+    if (item.type === "collect" && !criteria) throw new Error(`Template inválido: tasks[${index}] é Collect e exige criteria.`);
+    return {
+      type: item.type as TaskType,
+      instruction: requiredText(item.instruction, `tasks[${index}].instruction`, templateMaxTextLength),
+      criteria,
+    };
+  });
+
+  return {
+    version: 1,
+    title: requiredText(value.title, "title", templateMaxTitleLength),
+    source: requiredText(value.source, "source", templateMaxSourceLength),
+    tasks,
+  };
+};
+
+const loadTemplate = async (inputPath: string) => {
+  const path = resolve(process.cwd(), inputPath === "~" ? homedir() : inputPath.startsWith("~/") ? join(homedir(), inputPath.slice(2)) : inputPath);
+  let content: string;
+  try {
+    const info = await stat(path);
+    if (!info.isFile()) throw new Error("não é um arquivo regular");
+    if (info.size > templateMaxBytes) throw new Error(`excede o limite de ${templateMaxBytes} bytes`);
+    content = await readFile(path, "utf8");
+  } catch (error) {
+    throw new Error(`Não foi possível ler o template ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let document: unknown;
+  try {
+    document = JSON.parse(content);
+  } catch (error) {
+    throw new Error(`Template inválido: JSON malformado em ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { path, hash: createHash("sha256").update(content).digest("hex"), template: validateTemplate(document) };
+};
 
 export default function (pi: ExtensionAPI) {
   const db = new DatabaseSync(workflowDatabase());
@@ -112,6 +194,26 @@ export default function (pi: ExtensionAPI) {
     return { completed: false, task: activated };
   };
 
+  const createWorkflow = (definition: WorkflowDefinition) => {
+    const active = activeWorkflow();
+    if (active) throw new Error(`Já existe um workflow ativo (#${active.id}: ${active.title}). Conclua ou cancele-o antes de criar outro.`);
+    for (const [index, task] of definition.tasks.entries()) {
+      if (task.type === "collect" && !task.criteria) throw new Error(`Task ${index + 1} é Collect e exige criteria.`);
+    }
+    const inserted = db.prepare("INSERT INTO workflows (title, source, status) VALUES (?, ?, 'running')")
+      .run(definition.title, definition.source);
+    const workflowId = Number(inserted.lastInsertRowid);
+    const insertTask = db.prepare("INSERT INTO workflow_tasks (workflow_id, position, type, instruction, criteria, status) VALUES (?, ?, ?, ?, ?, 'pending')");
+    definition.tasks.forEach((task, index) => insertTask.run(workflowId, index + 1, task.type, task.instruction, task.criteria ?? null));
+    const workflow = one<Workflow>("SELECT id, title, source, status FROM workflows WHERE id = ?", workflowId)!;
+    event(workflowId, null, "created", { title: definition.title, taskCount: definition.tasks.length });
+    const next = activateNext(workflow);
+    const message = next.completed
+      ? `Workflow #${workflowId} criado e concluído sem tasks pendentes.`
+      : `Workflow #${workflowId} criado. Execute somente a task #${next.task!.position}: ${next.task!.instruction}`;
+    return { content: [{ type: "text" as const, text: message }], details: { workflowId, next } };
+  };
+
   pi.on("before_agent_start", (_event, _ctx) => {
     const workflow = activeWorkflow();
     if (!workflow) return;
@@ -132,7 +234,7 @@ export default function (pi: ExtensionAPI) {
     description: "Persiste um plano de workflow e ativa exclusivamente sua primeira task.",
     promptSnippet: "Create a persisted sequential workflow from a validated Action/Collect/Evaluate plan",
     promptGuidelines: [
-      "Use sequential_workflow_create only after an explicit request to create or execute a workflow has been identified.",
+      "Use sequential_workflow_create only after the user explicitly names Sequential Workflow, sequential-workflow, workflow sequencial, or fluxo de trabalho sequencial and asks to create or execute it.",
       "A Collect task passed to sequential_workflow_create must include acceptance criteria.",
     ],
     parameters: Type.Object({
@@ -145,25 +247,44 @@ export default function (pi: ExtensionAPI) {
       }), { minItems: 1 }),
     }),
     async execute(_id, params) {
-      const active = activeWorkflow();
-      if (active) throw new Error(`Já existe um workflow ativo (#${active.id}: ${active.title}). Conclua ou cancele-o antes de criar outro.`);
-      for (const [index, task] of params.tasks.entries()) {
-        if (task.type === "collect" && !task.criteria) {
-          throw new Error(`Task ${index + 1} é Collect e exige criteria.`);
-        }
-      }
-      const inserted = db.prepare("INSERT INTO workflows (title, source, status) VALUES (?, ?, 'running')")
-        .run(params.title, params.source);
-      const workflowId = Number(inserted.lastInsertRowid);
-      const insertTask = db.prepare("INSERT INTO workflow_tasks (workflow_id, position, type, instruction, criteria, status) VALUES (?, ?, ?, ?, ?, 'pending')");
-      params.tasks.forEach((task, index) => insertTask.run(workflowId, index + 1, task.type, task.instruction, task.criteria ?? null));
-      const workflow = one<Workflow>("SELECT id, title, source, status FROM workflows WHERE id = ?", workflowId)!;
-      event(workflowId, null, "created", { title: params.title, taskCount: params.tasks.length });
-      const next = activateNext(workflow);
-      const message = next.completed
-        ? `Workflow #${workflowId} criado e concluído sem tasks pendentes.`
-        : `Workflow #${workflowId} criado. Execute somente a task #${next.task!.position}: ${next.task!.instruction}`;
-      return { content: [{ type: "text", text: message }], details: { workflowId, next } };
+      return createWorkflow(params);
+    },
+  });
+
+  pi.registerTool({
+    name: "sequential_workflow_validate_template",
+    label: "Validate Sequential Workflow Template",
+    description: "Lê e valida um arquivo JSON de template de Sequential Workflow sem criar ou executar um workflow.",
+    promptSnippet: "Validate a Sequential Workflow JSON template before it is used",
+    promptGuidelines: ["Use sequential_workflow_validate_template only when the user explicitly names Sequential Workflow and asks to create, edit, or validate its JSON template."],
+    parameters: Type.Object({
+      path: Type.String({ minLength: 1, description: "Path to the Sequential Workflow JSON template." }),
+    }),
+    async execute(_id, params) {
+      const { path, hash, template } = await loadTemplate(params.path);
+      return {
+        content: [{ type: "text", text: `Template válido: ${path} (${template.tasks.length} tasks, SHA-256: ${hash}).` }],
+        details: { path, hash, template },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "sequential_workflow_create_from_template",
+    label: "Create Sequential Workflow from Template",
+    description: "Lê um template JSON validado, persiste o workflow e ativa exclusivamente sua primeira task.",
+    promptSnippet: "Create and start a persisted Sequential Workflow from a validated JSON template",
+    promptGuidelines: ["Use sequential_workflow_create_from_template only when the user explicitly names Sequential Workflow and asks to execute a JSON template."],
+    parameters: Type.Object({
+      path: Type.String({ minLength: 1, description: "Path to the Sequential Workflow JSON template." }),
+    }),
+    async execute(_id, params) {
+      const { path, hash, template } = await loadTemplate(params.path);
+      return createWorkflow({
+        title: template.title,
+        source: `Template ${path} (SHA-256: ${hash}): ${template.source}`,
+        tasks: template.tasks,
+      });
     },
   });
 

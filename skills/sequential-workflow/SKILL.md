@@ -12,6 +12,12 @@ Use this skill only when both conditions are met:
 
 Do not infer Sequential Workflow intent from a request for a plan, planning, checklist, strategy, analysis, recommendation, task organization, or an ordinary step-by-step response. Even when such a request has multiple steps, respond normally without creating or executing a workflow unless the user explicitly names the feature.
 
+## JSON template execution
+
+When the user explicitly asks to execute Sequential Workflow using a JSON template path, call `sequential_workflow_create_from_template` with that path. Do not read, parse, or reconstruct the template in the conversation first; the extension validates and persists it directly.
+
+Use `sequential_workflow_validate_template` only when the user asks to validate a template or when creating/editing one through the `sequential-workflow-template` skill.
+
 ## Plan creation
 
 1. Extract the requested steps and produce an ordered mental plan.

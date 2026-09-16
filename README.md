@@ -296,6 +296,8 @@ Refreshing synchronizes the source and atomically replaces the complete installe
 - Create persistent workflows made of strictly ordered **Action**, **Collect**, and **Evaluate** tasks.
 - Prevent advancement until the current task result has been recorded and accepted.
 - Persist workflow state in SQLite for auditable retries and continuation.
+- Validate reusable JSON definitions against [`schemas/sequential-workflow-template.schema.json`](schemas/sequential-workflow-template.schema.json), then create and start a workflow directly from the template.
+- Include separate Skills for executing named Sequential Workflows and authoring their JSON templates.
 
 ## Command cookbook
 
