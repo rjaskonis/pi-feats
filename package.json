@@ -51,6 +51,7 @@
     "@codemirror/lang-json": "^6.0.2",
     "@codemirror/lang-markdown": "^6.5.2",
     "@composio/core": "^0.18.1",
+    "@earendil-works/pi-ai": "^0.85.1",
     "@fastify/websocket": "^11.3.0",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.14.1",
     "@radix-ui/react-slot": "^1.2.4",

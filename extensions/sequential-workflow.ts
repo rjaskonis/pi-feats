@@ -1,4 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { DatabaseSync } from "node:sqlite";
 import { mkdir, stat, readFile } from "node:fs/promises";
@@ -21,8 +22,8 @@ const templateMaxTasks = 1000;
 const templateMaxTitleLength = 1000;
 const templateMaxSourceLength = 2000;
 const templateMaxTextLength = 10000;
-const taskType = Type.Union([Type.Literal("action"), Type.Literal("collect"), Type.Literal("evaluate"), Type.Literal("workflow")]);
-const phaseType = Type.Union([Type.Literal("action"), Type.Literal("collect")]);
+const taskType = StringEnum(["action", "collect", "evaluate", "workflow"] as const);
+const phaseType = StringEnum(["action", "collect"] as const);
 const workflowRoot = () => process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const workflowDatabase = () => join(workflowRoot(), "sequential-workflow.db");
 const templateDirectory = () => join(workflowRoot(), "sequential_workflow_templates");
