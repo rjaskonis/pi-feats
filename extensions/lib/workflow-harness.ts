@@ -65,7 +65,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     const assertOperation = (name: string, params: any) => {
         if (namedFailure && (name === "sequential_workflow_create" || name.endsWith("create_from_template")))
             throw new Error("Named activation failed; a new user request is required before creating a replacement.");
-        if (params.workflowId !== undefined)
+        if (params.workflowId !== undefined && name !== "sequential_workflow_cancel")
             own(params.workflowId);
         if (name.endsWith("record_result") || name.endsWith("evaluate")) {
             if (focus() !== params.workflowId)

@@ -122,15 +122,16 @@ test("child returns focus to parent; rejection allows replacement and cancellati
         await h.close();
     }
 });
-test("cancellation is owner-restricted and does not cascade to descendants", async () => {
+test("cancellation crosses sessions without changing descendant ownership", async () => {
     const h = await setup();
     try {
         const parent = ids(await h.call("create", definition([{ type: "workflow", instruction: "Child" }])));
         const child = ids(await h.call("create", { ...definition(), parentTaskId: parent.taskId }));
         h.session("B");
-        await assert.rejects(h.call("cancel", { workflowId: parent.workflowId }), /does not belong/);
+        const cancelled = await h.call("cancel", { workflowId: parent.workflowId });
+        assert.equal(cancelled.details.status, "cancelled");
+        await assert.rejects(h.call("status", parent), /does not belong/);
         h.session("A");
-        await h.call("cancel", { workflowId: parent.workflowId });
         assert.equal((await h.call("status", parent)).details.workflow.status, "cancelled");
         assert.equal((await h.call("status", child)).details.workflow.status, "running");
     }
