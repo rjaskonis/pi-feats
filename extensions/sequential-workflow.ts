@@ -180,6 +180,13 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
         event(item.id, activated.id, "activated", taskSummary(activated));
         return { completed: false, task: activated };
     };
+    const cancelWorkflow = (workflowId: number) => {
+        const item = requireActiveWorkflow(workflowId);
+        db.prepare("UPDATE workflows SET status='cancelled', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(item.id);
+        event(item.id, null, "cancelled", { by: "user" });
+        resolveParentAfterChild(workflow(item.id)!);
+        return { content: [{ type: "text" as const, text: `Workflow #${item.id} cancelado.` }], details: { workflowId: item.id, status: "cancelled" } };
+    };
     const createWorkflow = (definition: WorkflowDefinition, parentWorkflowId?: number, parentTaskId?: number) => {
         for (const [index, task] of definition.tasks.entries())
             if (task.type === "collect" && !task.criteria)
@@ -296,6 +303,13 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             event(item.id, task.id, "rejected", { reasoning: params.reasoning });
             return { content: [{ type: "text", text: task.type === "collect" ? `Critério reprovado. Permaneça na task #${task.position}.` : `Critério reprovado. Permaneça na task #${task.position} e repita a ação.` }], details: { accepted: false, task: taskSummary(currentTask(item.id)!) } };
         } });
+    pi.registerTool({ name: "sequential_workflow_cancel", label: "Cancel Sequential Workflow", description: "Cancela um workflow ativo pertencente à sessão, sem cancelar seus descendentes.", promptSnippet: "Cancel an owned Sequential Workflow", promptGuidelines: ["Use sequential_workflow_cancel only after the user explicitly asks to cancel a named Sequential Workflow.", "Cancelling a child workflow lets its parent handle the terminal child state; do not cancel descendants automatically."], parameters: Type.Object({ workflowId: Type.Integer({ minimum: 1 }) }), async execute(_id, params): Promise<{
+            content: {
+                type: "text";
+                text: string;
+            }[];
+            details: Record<string, unknown>;
+        }> { return cancelWorkflow(params.workflowId); } });
     pi.registerTool({ name: "sequential_workflow_status", label: "Sequential Workflow Status", description: "Lista workflows ativos ou consulta o estado persistido de um workflow.", promptGuidelines: ["Use sequential_workflow_status only when the user explicitly asks to inspect, list, or continue a persisted Sequential Workflow. Never select or resume an existing workflow merely because it is active."], parameters: Type.Object({ workflowId: Type.Optional(Type.Integer({ minimum: 1 })), includeChildren: Type.Optional(Type.Boolean()) }), async execute(_id, params): Promise<{
             content: {
                 type: "text";
@@ -328,12 +342,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
     pi.registerCommand("workflow-cancel", { description: "Cancel an owned workflow by ID without cancelling descendants", handler: async (args, ctx) => {
             try {
                 await harness.transaction(ctx, () => {
-                    const item = harness.own(Number(args.trim()));
-                    if (!isActive(item))
-                        throw new Error("Workflow is already terminal.");
-                    db.prepare("UPDATE workflows SET status='cancelled', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(item.id);
-                    event(item.id, null, "cancelled", { by: "user" });
-                    resolveParentAfterChild(workflow(item.id)!);
+                    cancelWorkflow(harness.own(Number(args.trim())).id);
                 });
                 ctx.ui.notify("Workflow cancelled.", "warning");
             }

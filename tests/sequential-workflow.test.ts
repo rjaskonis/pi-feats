@@ -110,10 +110,29 @@ test("child returns focus to parent; rejection allows replacement and cancellati
         await h.call("record_result", { ...child, phase: "action", result: "done" });
         await h.call("evaluate", { ...parent, accepted: false, reasoning: "retry" });
         const replacement = ids(await h.call("create", { ...definition(), parentTaskId: parent.taskId }));
-        await h.command("cancel", String(replacement.workflowId));
+        const cancelled = await h.call("cancel", { workflowId: replacement.workflowId });
+        assert.equal(cancelled.details.status, "cancelled");
+        assert.equal((await h.call("status", replacement)).details.workflow.status, "cancelled");
+        await assert.rejects(h.call("cancel", { workflowId: replacement.workflowId }), /não pode ser alterado/);
         assert.equal((await h.call("status", parent)).details.tasks[0].status, "evaluating");
         await h.call("evaluate", { ...parent, accepted: true, reasoning: "Explicitly accept cancellation" });
         assert.equal((await h.call("status", parent)).details.tasks[1].status, "running");
+    }
+    finally {
+        await h.close();
+    }
+});
+test("cancellation is owner-restricted and does not cascade to descendants", async () => {
+    const h = await setup();
+    try {
+        const parent = ids(await h.call("create", definition([{ type: "workflow", instruction: "Child" }])));
+        const child = ids(await h.call("create", { ...definition(), parentTaskId: parent.taskId }));
+        h.session("B");
+        await assert.rejects(h.call("cancel", { workflowId: parent.workflowId }), /does not belong/);
+        h.session("A");
+        await h.call("cancel", { workflowId: parent.workflowId });
+        assert.equal((await h.call("status", parent)).details.workflow.status, "cancelled");
+        assert.equal((await h.call("status", child)).details.workflow.status, "running");
     }
     finally {
         await h.close();
