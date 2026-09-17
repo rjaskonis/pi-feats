@@ -195,15 +195,18 @@ async function findSkillFiles(path: string): Promise<string[]> {
   return files;
 }
 
-function skillEnabled(resourcePath: string, skillRoot: string, settings: Record<string, unknown>, exclusions: string[]): boolean {
-  const policy = (settings.profile as { enabledSkills?: unknown } | undefined)?.enabledSkills;
+export function skillEnabled(resourcePath: string, sharedSkillRoot: string, profileSkillRoot: string | undefined, settings: Record<string, unknown>, exclusions: string[]): boolean {
+  const isProfileSkill = profileSkillRoot !== undefined && isWithin(resourcePath, profileSkillRoot);
+  const skillRoot = isProfileSkill ? profileSkillRoot! : sharedSkillRoot;
+  const policyKey = isProfileSkill ? "enabledProfileSkills" : "enabledSkills";
+  const policy = (settings.profile as Record<string, unknown> | undefined)?.[policyKey];
   const relativeName = relative(skillRoot, resourcePath).replaceAll("\\", "/");
   const name = relativeName.startsWith("../") ? basename(resourcePath) : relativeName;
   if (Array.isArray(policy)) return policy.includes("*") || policy.includes(name);
   return !isExcluded(resourcePath, exclusions);
 }
 
-async function skillRows(paths: string[], skillRoot: string, settings: Record<string, unknown>, exclusions: string[]): Promise<Row[]> {
+export async function skillRows(paths: string[], sharedSkillRoot: string, profileSkillRoot: string | undefined, settings: Record<string, unknown>, exclusions: string[]): Promise<Row[]> {
   const rows: Row[] = [];
   const seen = new Set<string>();
   for (const path of paths) {
@@ -211,8 +214,9 @@ async function skillRows(paths: string[], skillRoot: string, settings: Record<st
       if (seen.has(skillFile)) continue;
       seen.add(skillFile);
       const resourcePath = dirname(skillFile);
+      const skillRoot = profileSkillRoot !== undefined && isWithin(resourcePath, profileSkillRoot) ? profileSkillRoot : sharedSkillRoot;
       const name = relative(skillRoot, resourcePath).replaceAll("\\", "/");
-      rows.push([name && !name.startsWith("..") ? name : basename(resourcePath), skillEnabled(resourcePath, skillRoot, settings, exclusions) ? "enabled" : "disabled", skillFile]);
+      rows.push([name && !name.startsWith("..") ? name : basename(resourcePath), skillEnabled(resourcePath, sharedSkillRoot, profileSkillRoot, settings, exclusions) ? "enabled" : "disabled", skillFile]);
     }
   }
   return rows.sort((a, b) => a[0].localeCompare(b[0]) || a[2].localeCompare(b[2]));
@@ -570,7 +574,8 @@ export default async function (pi: ExtensionAPI) {
       const paths = kind === "skills"
         ? [...new Set([catalogRoot, ...configuredPaths, ...packageResources.map(({ path }) => path)])]
         : [...new Set([...(configuredPaths.length > 0 ? configuredPaths : [catalogRoot]), ...packageResources.map(({ path }) => path)])];
-      const rows: SourceRow[] = (kind === "skills" ? await skillRows(paths, catalogRoot, settings, exclusions) : await extensionRows(paths, exclusions, (loaded.runtimeSettings.profile as { enabledExtensions?: string[] } | undefined)?.enabledExtensions)).map((row) => {
+      const profileSkillRoot = kind === "skills" && loaded.agentDir !== resourceRoot ? join(loaded.agentDir, "skills") : undefined;
+      const rows: SourceRow[] = (kind === "skills" ? await skillRows(paths, catalogRoot, profileSkillRoot, settings, exclusions) : await extensionRows(paths, exclusions, (loaded.runtimeSettings.profile as { enabledExtensions?: string[] } | undefined)?.enabledExtensions)).map((row) => {
         const packageName = packageResources.find(({ path }) => row[2] === path || isWithin(row[2], path))?.packageName;
         const source = packageName ? `Package: ${packageName}` : (row[2].startsWith(join(resourceRoot, "skills")) ? "Shared" : row[2].includes("/profiles/") ? "Profile" : "Local");
         return [row[0], row[1], source, row[2]];
