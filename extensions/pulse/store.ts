@@ -7,6 +7,7 @@ export type PulseType = "cron" | "heartbeat";
 export type Pulse = { id: string; name: string; description: string; type: PulseType; schedule: string; prompt: string; thread_session_id: string; result: string | null; profile: string; enabled: boolean; nextRunAt: string | null; lastRunAt: string | null };
 export type PulseHistory = Pulse & { startedAt: string; finishedAt: string | null; status: string; error: string | null };
 export type PulseRun = { id: string; startedAt: string; finishedAt: string | null; status: "running" | "success" | "error"; response: string | null; error: string | null };
+export type ClaimedPulse = { pulse: Pulse; runId: string };
 type Row = Record<string, unknown>;
 const iso = (date = new Date()) => date.toISOString();
 
@@ -59,13 +60,16 @@ export class PulseStore {
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true }); this.db = new DatabaseSync(path); this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
     this.db.exec(`CREATE TABLE IF NOT EXISTS pulses (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('cron','heartbeat')), schedule TEXT NOT NULL, prompt TEXT NOT NULL, thread_session_id TEXT NOT NULL, result TEXT);
-      CREATE TABLE IF NOT EXISTS pulse_control (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, profile TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, last_run_at TEXT, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS pulse_control (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, profile TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, last_run_at TEXT, claimed_at TEXT, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pulse_state (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, handoff TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pulse_runs (id TEXT PRIMARY KEY, pulse_id TEXT NOT NULL REFERENCES pulses(id) ON DELETE CASCADE, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, response TEXT, error TEXT);
       CREATE INDEX IF NOT EXISTS pulse_runs_pulse_started ON pulse_runs(pulse_id, started_at DESC);`);
     // Migrate databases created before the denormalized latest result column.
     const columns = this.db.prepare("PRAGMA table_info(pulses)").all() as Row[];
     if (!columns.some((column) => column.name === "result")) this.db.exec("ALTER TABLE pulses ADD COLUMN result TEXT");
+    const controlColumns = this.db.prepare("PRAGMA table_info(pulse_control)").all() as Row[];
+    if (!controlColumns.some((column) => column.name === "claimed_at")) this.db.exec("ALTER TABLE pulse_control ADD COLUMN claimed_at TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS pulse_control_due ON pulse_control(enabled, claimed_at, next_run_at)");
     this.db.exec("UPDATE pulses SET result=(SELECT response FROM pulse_runs WHERE pulse_id=pulses.id AND status='success' ORDER BY finished_at DESC LIMIT 1) WHERE result IS NULL");
     // Keep records created before the schedule-based classifier in sync.
     for (const row of this.db.prepare("SELECT id, schedule, type FROM pulses").all() as Row[]) { const type = pulseType(String(row.schedule)); if (row.type !== type) this.db.prepare("UPDATE pulses SET type=? WHERE id=?").run(type, row.id); }
@@ -80,7 +84,7 @@ export class PulseStore {
     if (!validSchedule(input.schedule)) throw new Error("Invalid schedule. Use a five-field UTC cron expression or @once:<ISO-8601>.");
     const type = pulseType(input.schedule), id = randomUUID(), next = nextRun(input.schedule)?.toISOString() ?? null;
     this.db.prepare("INSERT INTO pulses (id, name, description, type, schedule, prompt, thread_session_id, result) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)").run(id, input.name, input.description, type, input.schedule, input.prompt, input.thread_session_id);
-    this.db.prepare("INSERT INTO pulse_control VALUES (?, ?, 1, ?, NULL, ?)").run(id, input.profile, next, iso());
+    this.db.prepare("INSERT INTO pulse_control (pulse_id, profile, enabled, next_run_at, last_run_at, claimed_at, updated_at) VALUES (?, ?, 1, ?, NULL, NULL, ?)").run(id, input.profile, next, iso());
     if (type === "heartbeat") this.db.prepare("INSERT INTO pulse_state VALUES (?, '', ?)").run(id, iso());
     return this.get(input.name, input.profile)!;
   }
@@ -99,10 +103,24 @@ export class PulseStore {
     return this.get(name, profile)!;
   }
   delete(name: string, profile?: string): void { const pulse = this.get(name, profile); if (!pulse) throw new Error("Pulse not found."); this.db.prepare("DELETE FROM pulses WHERE id=?").run(pulse.id); }
-  due(now = iso()): Pulse[] { return this.db.prepare("SELECT p.*, c.profile, c.enabled, c.next_run_at, c.last_run_at FROM pulses p JOIN pulse_control c ON c.pulse_id=p.id WHERE c.enabled=1 AND c.next_run_at IS NOT NULL AND c.next_run_at<=? ORDER BY c.next_run_at").all(now).map((row) => this.pulse(row as Row)); }
-  begin(pulse: Pulse): string { const id = randomUUID(); this.db.prepare("INSERT INTO pulse_runs VALUES (?, ?, ?, NULL, 'running', NULL, NULL)").run(id, pulse.id, iso()); return id; }
-  complete(pulse: Pulse, runId: string, response: string, handoff?: string): void { const next = nextRun(pulse.schedule)?.toISOString() ?? null; this.db.prepare("UPDATE pulse_runs SET finished_at=?, status='success', response=? WHERE id=?").run(iso(), response, runId); this.db.prepare("UPDATE pulses SET result=? WHERE id=?").run(response, pulse.id); this.db.prepare("UPDATE pulse_control SET last_run_at=?, next_run_at=?, updated_at=? WHERE pulse_id=?").run(iso(), next, iso(), pulse.id); if (pulse.type === "heartbeat" && handoff !== undefined) this.db.prepare("UPDATE pulse_state SET handoff=?, updated_at=? WHERE pulse_id=?").run(handoff, iso(), pulse.id); }
-  fail(pulse: Pulse, runId: string, error: string): void { this.db.prepare("UPDATE pulse_runs SET finished_at=?, status='error', error=? WHERE id=?").run(iso(), error, runId); this.db.prepare("UPDATE pulse_control SET next_run_at=?, updated_at=? WHERE pulse_id=?").run(nextRun(pulse.schedule, new Date(Date.now() + 60_000))?.toISOString() ?? null, iso(), pulse.id); }
+  due(now = iso()): Pulse[] { return this.db.prepare("SELECT p.*, c.profile, c.enabled, c.next_run_at, c.last_run_at FROM pulses p JOIN pulse_control c ON c.pulse_id=p.id WHERE c.enabled=1 AND c.claimed_at IS NULL AND c.next_run_at IS NOT NULL AND c.next_run_at<=? ORDER BY c.next_run_at").all(now).map((row) => this.pulse(row as Row)); }
+  claimDue(now = iso()): ClaimedPulse[] {
+    const claimed: ClaimedPulse[] = [];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const pulse of this.due(now)) {
+        const result = this.db.prepare("UPDATE pulse_control SET claimed_at=?, next_run_at=NULL, updated_at=? WHERE pulse_id=? AND enabled=1 AND claimed_at IS NULL AND next_run_at IS NOT NULL AND next_run_at<=?").run(now, now, pulse.id, now);
+        if (!result.changes) continue;
+        const runId = randomUUID();
+        this.db.prepare("INSERT INTO pulse_runs VALUES (?, ?, ?, NULL, 'running', NULL, NULL)").run(runId, pulse.id, now);
+        claimed.push({ pulse, runId });
+      }
+      this.db.exec("COMMIT");
+      return claimed;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  complete(pulse: Pulse, runId: string, response: string, handoff?: string): void { const next = nextRun(pulse.schedule)?.toISOString() ?? null; this.db.prepare("UPDATE pulse_runs SET finished_at=?, status='success', response=? WHERE id=?").run(iso(), response, runId); this.db.prepare("UPDATE pulses SET result=? WHERE id=?").run(response, pulse.id); this.db.prepare("UPDATE pulse_control SET last_run_at=?, next_run_at=?, claimed_at=NULL, updated_at=? WHERE pulse_id=?").run(iso(), next, iso(), pulse.id); if (pulse.type === "heartbeat" && handoff !== undefined) this.db.prepare("UPDATE pulse_state SET handoff=?, updated_at=? WHERE pulse_id=?").run(handoff, iso(), pulse.id); }
+  fail(pulse: Pulse, runId: string, error: string): void { this.db.prepare("UPDATE pulse_runs SET finished_at=?, status='error', error=? WHERE id=?").run(iso(), error, runId); this.db.prepare("UPDATE pulse_control SET next_run_at=?, claimed_at=NULL, updated_at=? WHERE pulse_id=?").run(nextRun(pulse.schedule, new Date(Date.now() + 60_000))?.toISOString() ?? null, iso(), pulse.id); }
   handoff(id: string): string { return String((this.db.prepare("SELECT handoff FROM pulse_state WHERE pulse_id=?").get(id) as Row | undefined)?.handoff ?? ""); }
   retarget(profile: string, from: string, to: string): void { this.db.prepare("UPDATE pulses SET thread_session_id=? WHERE id IN (SELECT pulse_id FROM pulse_control WHERE profile=?) AND thread_session_id=?").run(to, profile, from); }
 }
