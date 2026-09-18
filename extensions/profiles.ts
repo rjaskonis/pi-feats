@@ -439,7 +439,9 @@ export default async function (pi: ExtensionAPI) {
     const enabledTools = settings.profile?.enabledTools;
     if (!enabledTools || enabledTools.includes("*")) return;
     const allowed = new Set(enabledTools);
-    pi.setActiveTools(pi.getAllTools().filter((tool) => allowed.has(tool.name)).map((tool) => tool.name));
+    // Conversation search is a package-wide profile capability, even when a
+    // profile limits optional tools to an explicit allow-list.
+    pi.setActiveTools(pi.getAllTools().filter((tool) => allowed.has(tool.name) || tool.name === "conversation_search").map((tool) => tool.name));
   });
 
   pi.on("before_agent_start", async (event) => {

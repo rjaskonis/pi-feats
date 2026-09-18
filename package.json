@@ -92,6 +92,7 @@
       "./extensions/cli-resources.ts",
       "./extensions/composio",
       "./extensions/context-memory",
+      "./extensions/conversation-search",
       "./extensions/guardrails",
       "./extensions/pi-console-webui",
       "./extensions/profiles.ts",
