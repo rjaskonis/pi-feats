@@ -55,6 +55,9 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
         // Resource commands need the default runtime's package and extension
         // configuration while operating on the named profile.
         join(agentDir, "settings.json"),
+        // Named profiles reference this shared catalog through models.json;
+        // Nono must permit resolving the symlink target in the root runtime.
+        join(agentDir, "models.json"),
         ...sharedRuntimeSources,
         ...(skillSources.shared ? [join(agentDir, "skills")] : []),
         // SSH resolves the current UID through these public account maps.
