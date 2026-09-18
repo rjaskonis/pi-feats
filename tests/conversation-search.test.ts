@@ -14,6 +14,16 @@ test("searches prior conversations by topic without a session ID", () => {
   assert.match(results[0].excerpts[0].text, /OmniRoute/);
 });
 
+test("finds an exact session ID even when that ID is absent from message text", () => {
+  const results = searchConversationEntries("01a0b453-d669-74c6-b9e6-9626b8fe45b7", [
+    { id: "01a0b453-d669-74c6-b9e6-9626b8fe45b7", name: "Pulse fixes", updatedAt: at("2026-09-18T22:12:00Z"), entries: [{ role: "user", text: "Foram feitas as correções no pulso do package.", timestamp: 1 }] },
+    { id: "other", updatedAt: at("2026-09-18T22:43:00Z"), entries: [{ role: "assistant", text: "Essa sessão não foi encontrada.", timestamp: 2 }] },
+  ]);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].id, "01a0b453-d669-74c6-b9e6-9626b8fe45b7");
+  assert.match(results[0].excerpts[0].text, /correções/);
+});
+
 test("ranks exact topic matches before partial, then recency", () => {
   const results = searchConversationEntries("api evolution", [
     { id: "partial", updatedAt: at("2026-09-03T00:00:00Z"), entries: [{ role: "assistant", text: "A API está pronta.", timestamp: 1 }] },
