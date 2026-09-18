@@ -635,6 +635,31 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       return reply.code(204).send();
     });
 
+    server.get<{ Params: { profile: string } }>("/api/profiles/:profile/model", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      const profile = profileName(request), directory = api.profiles.directory(profile);
+      const runtime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath: join(directory, "models.json"), refreshOnCreate: false });
+      if (runtime.getError()) throw Object.assign(new Error(runtime.getError()), { status: 400 });
+      const providers = new Map<string, Array<{ id: string; name: string }>>();
+      for (const model of runtime.getModels()) {
+        const models = providers.get(model.provider) ?? [];
+        models.push({ id: model.id, name: model.name ?? model.id });
+        providers.set(model.provider, models);
+      }
+      return { settings: await api.profiles.readSettings(profile), providers: [...providers.entries()].sort(([left], [right]) => left.localeCompare(right)).map(([id, models]) => ({ id, models: models.sort((left, right) => left.name.localeCompare(right.name)) })) };
+    });
+    server.put<{ Params: { profile: string } }>("/api/profiles/:profile/model", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      const profile = profileName(request), body = objectBody(request.body), provider = body.provider, model = body.model;
+      if (typeof provider !== "string" || !provider || typeof model !== "string" || !model) throw Object.assign(new Error("provider and model must be non-empty strings."), { status: 400 });
+      const directory = api.profiles.directory(profile);
+      const runtime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath: join(directory, "models.json"), refreshOnCreate: false });
+      if (runtime.getError()) throw Object.assign(new Error(runtime.getError()), { status: 400 });
+      if (!runtime.getModel(provider, model)) throw Object.assign(new Error("The selected provider and model are not available."), { status: 400 });
+      const settings = await api.profiles.readSettings(profile);
+      return { settings: await api.profiles.writeSettings(profile, { ...settings, defaultProvider: provider, defaultModel: model }) };
+    });
+
     server.get<{ Params: { profile: string } }>("/api/profiles/:profile/settings", async (request, reply) => {
       if (!guard(request, reply)) return;
       return { settings: await api.profiles.readSettings(profileName(request)) };

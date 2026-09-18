@@ -14,6 +14,7 @@ export async function ConsolePage({ section, applicationSlug, profile = "default
     else if (section === "pi-console-webui") initial.adminConfig = await readAdminConfig("pi-console-webui");
     else if (section === "models") initial.models = await readModelsConfig();
     else if (section === "settings") initial.settings = await piGet(`profiles/${profile}/settings`);
+    else if (section === "model") initial.profileModel = await piGet(`profiles/${profile}/model`);
     else if (section === "env") initial.env = await piGet(`profiles/${profile}/env`);
     else if (section === "soul") initial.document = await piGet(`profiles/${profile}/${section}`);
     else if (section === "guardrails") initial.guardrails = await piGet(`profiles/${profile}/guardrails`);

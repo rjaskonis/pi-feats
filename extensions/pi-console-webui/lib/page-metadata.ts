@@ -5,6 +5,7 @@ const sectionLabels: Record<string, string> = {
   chat: "Chat",
   profiles: "Profiles",
   settings: "Settings",
+  model: "Model",
   env: "Environment",
   soul: "SOUL",
   "context-memory": "Context Memory",
