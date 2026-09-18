@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { ensureProfileSandbox } from "../lib/profile-sandbox.ts";
 
@@ -24,8 +24,9 @@ const protectedExtensions = new Set(["profiles", "api-server"]);
 
 export class ProfileStore {
   private readonly extensionTools = new Map<string, Set<string>>();
+  readonly agentDir: string;
 
-  constructor(readonly agentDir: string) {}
+  constructor(agentDir: string) { this.agentDir = agentDir; }
 
   registerExtensionTools(profile: string, names: Iterable<string>): void {
     const tools = this.extensionTools.get(profile) ?? new Set<string>();
@@ -49,6 +50,13 @@ export class ProfileStore {
     return join(this.profilesDir(), name);
   }
   private settingsPath(name: string): string { return join(this.directory(name), "settings.json"); }
+  private async linkSharedModels(name: string): Promise<void> {
+    if (name === "default") return;
+    const source = join(this.agentDir, "models.json"), target = join(this.directory(name), "models.json");
+    try { if (resolve(this.directory(name), await readlink(target)) === source) return; } catch { /* Missing or non-symlink target must be replaced. */ }
+    await rm(target, { force: true });
+    if (existsSync(source)) await symlink(source, target);
+  }
   private skillSources(name: string, settings: ProfileSettings): Required<SkillSources> {
     if (name === "default") return { shared: true, profile: false };
     return { shared: settings.profile?.skillSources?.shared !== false, profile: settings.profile?.skillSources?.profile === true };
@@ -62,6 +70,7 @@ export class ProfileStore {
     try {
       const value = JSON.parse(await readFile(path, "utf8")) as unknown;
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("settings.json must contain an object");
+      await this.linkSharedModels(name);
       return value as ProfileSettings;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT" && name === "default") return {};
@@ -317,10 +326,9 @@ export class ProfileStore {
     await ensureProfileSandbox(destination, resolve(process.argv[1]));
     await writeFile(join(destination, "SOUL.md"), "", "utf8");
     await writeFile(join(destination, "guardrails.json"), "{\n  \"guardrails\": []\n}\n", "utf8");
-    for (const file of ["auth.json", "models.json"]) {
-      const source = join(this.agentDir, file);
-      if (existsSync(source)) await copyFile(source, join(destination, file));
-    }
+    const auth = join(this.agentDir, "auth.json");
+    if (existsSync(auth)) await copyFile(auth, join(destination, "auth.json"));
+    await this.linkSharedModels(name);
     return { name, path: destination };
   }
 

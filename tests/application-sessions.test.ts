@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationStore } from "../extensions/api-server/application-store.ts";
 import { ApplicationLogStore } from "../extensions/api-server/application-log-store.ts";
+import { ProfileStore } from "../extensions/api-server/profile-store.ts";
 
 test("an identity miss is logged as ignored, not as an error", () => {
   const logs = new ApplicationLogStore(join(tmpdir(), "pi-application-log-test"), "support");
@@ -15,6 +16,21 @@ test("an identity miss is logged as ignored, not as an error", () => {
   assert.equal(call.status, "ignored");
   assert.equal(call.error, undefined);
   assert.equal(call.stages.at(-1)?.type, "identity-miss");
+});
+
+test("named profiles always link the shared root models catalog", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-profile-models-"));
+  try {
+    const profile = join(directory, "profiles", "support");
+    await mkdir(profile, { recursive: true });
+    await writeFile(join(directory, "models.json"), '{"providers":{}}\n');
+    await writeFile(join(profile, "models.json"), '{"providers":{"obsolete":{}}}\n');
+    await writeFile(join(profile, "settings.json"), "{}\n");
+
+    await new ProfileStore(directory).readSettings("support");
+
+    assert.equal(await readlink(join(profile, "models.json")), join(directory, "models.json"));
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("deleting a profile removes all Application state that targets it", async () => {

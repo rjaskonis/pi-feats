@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, render, Text } from "ink";
 import React from "react";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -227,6 +227,12 @@ async function removeProfileRuntimeArtifacts(destination: string) {
   await Promise.all(["extensions", "git", "npm", "node_modules"].map((name) => rm(join(destination, name), { recursive: true, force: true })));
 }
 
+async function linkSharedModels(root: string, destination: string): Promise<void> {
+  const source = join(root, "models.json"), target = join(destination, "models.json");
+  await rm(target, { force: true });
+  if (existsSync(source)) await symlink(source, target);
+}
+
 async function createProfile(name: string) {
   if (!validProfileName(name)) fail("invalid name; use letters, numbers, hyphens, or underscores (max. 64 characters).");
   if (name === "default") fail("default is the primary profile and cannot be created.");
@@ -247,10 +253,7 @@ async function createProfile(name: string) {
   const authPath = join(root, "auth.json");
   if (existsSync(authPath)) await copyFile(authPath, join(destination, "auth.json"));
 
-  const modelsPath = join(root, "models.json");
-  if (existsSync(modelsPath)) {
-    await symlink(modelsPath, join(destination, "models.json"));
-  }
+  await linkSharedModels(root, destination);
 
   await writeStdout(`Profile '${name}' created at ${destination}\n`);
 }
@@ -338,6 +341,7 @@ async function syncProfileResources(name: string) {
   Object.assign(settings, sharedResources(root, settings.profile, join(profileDir(name), "skills")));
   await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
   await removeProfileRuntimeArtifacts(profileDir(name));
+  await linkSharedModels(root, profileDir(name));
 }
 
 async function reexecWithProfile(name: string, args: string[]) {
