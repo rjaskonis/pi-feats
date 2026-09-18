@@ -3,6 +3,7 @@ import { Console, type ConsoleInitialData } from "@/components/console";
 import { authenticated } from "@/lib/auth";
 import { piGet } from "@/lib/pi-api";
 import { readAdminConfig } from "@/lib/admin-config";
+import { readModelsConfig } from "@/lib/admin-models";
 
 type Props = { section: string; applicationSlug?: string; profile?: string };
 export async function ConsolePage({ section, applicationSlug, profile = "default" }: Props) {
@@ -11,6 +12,7 @@ export async function ConsolePage({ section, applicationSlug, profile = "default
   try {
     if (section === "api-server") initial.adminConfig = await readAdminConfig("api-server");
     else if (section === "pi-console-webui") initial.adminConfig = await readAdminConfig("pi-console-webui");
+    else if (section === "models") initial.models = await readModelsConfig();
     else if (section === "settings") initial.settings = await piGet(`profiles/${profile}/settings`);
     else if (section === "env") initial.env = await piGet(`profiles/${profile}/env`);
     else if (section === "soul") initial.document = await piGet(`profiles/${profile}/${section}`);
