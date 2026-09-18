@@ -95,12 +95,22 @@ export class ApplicationRuntime {
     try { return await operation(); } finally { release(); if (this.queues.get(key) === current) this.queues.delete(key); }
   }
 
+  private async createApplicationSession(profile: string, sessionPrefix: string, rollover: boolean): Promise<string> {
+    const id = await this.api.nextApplicationSessionId(this.application.slug, profile, sessionPrefix);
+    // A process can stop after Pi has persisted the session file but before the
+    // Application row is written. Reclaim that deterministic orphan instead of
+    // attempting to create it again and permanently failing with a 409.
+    const exists = (await this.api.listSessions(profile)).some((session) => session.id === id);
+    if (!exists) await this.api.createSession(profile, { id });
+    await this.api.recordApplicationSession(this.application.slug, profile, sessionPrefix, id, rollover);
+    return id;
+  }
+
   private async resolveSession(profile: string, sessionPrefix: string): Promise<string> {
     if (!safeName(sessionPrefix)) throw Object.assign(new Error("Invalid sessionPrefix."), { status: 422 });
     return this.withQueue(`${this.application.slug}:${profile}:${sessionPrefix}:${day()}`, async () => {
       const current = await this.api.getApplicationSession(this.application.slug, profile, sessionPrefix); if (current) return current.sessionId;
-      const id = await this.api.nextApplicationSessionId(this.application.slug, profile, sessionPrefix);
-      await this.api.createSession(profile, { id }); await this.api.recordApplicationSession(this.application.slug, profile, sessionPrefix, id, false); return id;
+      return this.createApplicationSession(profile, sessionPrefix, false);
     });
   }
 
@@ -176,8 +186,8 @@ export class ApplicationRuntime {
     if (typeof sessionPrefix !== "string" || !sessionPrefix) throw Object.assign(new Error("The 'sessionPrefix' field is required."), { status: 400 });
     if (!safeName(sessionPrefix)) throw Object.assign(new Error("Invalid sessionPrefix"), { status: 400 });
     return this.withQueue(`${this.application.slug}:${profile}:${sessionPrefix}:${day()}`, async () => {
-      const previous = await this.api.getActiveApplicationSession(this.application.slug, profile, sessionPrefix); const sessionId = await this.api.nextApplicationSessionId(this.application.slug, profile, sessionPrefix);
-      await this.api.createSession(profile, { id: sessionId }); await this.api.recordApplicationSession(this.application.slug, profile, sessionPrefix, sessionId, true); if (previous?.sessionId && previous.sessionId !== sessionId) await this.api.retargetPulseThreadSessions(profile, previous.sessionId, sessionId);
+      const previous = await this.api.getActiveApplicationSession(this.application.slug, profile, sessionPrefix); const sessionId = await this.createApplicationSession(profile, sessionPrefix, true);
+      if (previous?.sessionId && previous.sessionId !== sessionId) await this.api.retargetPulseThreadSessions(profile, previous.sessionId, sessionId);
       try {
         const handoff = await this.handoff(profile, sessionId, sessionPrefix, true);
         return { profile, sessionId, messageCount: 0, handoff: { status: handoff?.summary ? "ready" : "none", sourceSessionId: handoff?.sourceSessionId ?? null } };

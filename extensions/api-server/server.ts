@@ -200,6 +200,20 @@ class ApiServer {
     return SessionManager.listAll(sessionDir);
   }
 
+  async deleteProfile(profile: string): Promise<void> {
+    if (profile === "default") throw Object.assign(new Error("The default profile cannot be deleted"), { status: 400 });
+    await this.profiles.readSettings(profile);
+    const handles = [...this.sessions.values()].filter((handle) => handle.profile === profile);
+    if (handles.some((handle) => handle.busy) || [...this.sandboxBusy].some((key) => key.startsWith(`${profile}:`))) throw Object.assign(new Error("The profile has a session that is processing a request."), { status: 409 });
+    for (const handle of handles) { handle.session.dispose(); this.sessions.delete(`${profile}:${handle.sessionId}`); }
+    this.runtimes.delete(this.profileDirectory(profile));
+    this.toolDiscoveries.delete(profile);
+    this.profiles.clearExtensionTools(profile);
+    await this.profiles.delete(profile);
+    this.applications.deleteProfile(profile);
+    this.pulses.deleteProfile(profile);
+  }
+
   async listSessions(profile: string): Promise<Array<Record<string, unknown>>> {
     await this.profiles.readSettings(profile);
     const sessions = await this.listProfileSessions(profile);
@@ -617,7 +631,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.delete<{ Params: { profile: string } }>("/api/profiles/:profile", async (request, reply) => {
       if (!guard(request, reply)) return;
       if (objectBody(request.body).force !== true) throw Object.assign(new Error('Profile deletion requires { "force": true }.'), { status: 400 });
-      await api.profiles.delete(profileName(request));
+      await api.deleteProfile(profileName(request));
       return reply.code(204).send();
     });
 

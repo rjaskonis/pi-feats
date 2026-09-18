@@ -103,6 +103,7 @@ export class PulseStore {
     return this.get(name, profile)!;
   }
   delete(name: string, profile?: string): void { const pulse = this.get(name, profile); if (!pulse) throw new Error("Pulse not found."); this.db.prepare("DELETE FROM pulses WHERE id=?").run(pulse.id); }
+  deleteProfile(profile: string): void { this.db.prepare("DELETE FROM pulses WHERE id IN (SELECT pulse_id FROM pulse_control WHERE profile=?)").run(profile); }
   due(now = iso()): Pulse[] { return this.db.prepare("SELECT p.*, c.profile, c.enabled, c.next_run_at, c.last_run_at FROM pulses p JOIN pulse_control c ON c.pulse_id=p.id WHERE c.enabled=1 AND c.claimed_at IS NULL AND c.next_run_at IS NOT NULL AND c.next_run_at<=? ORDER BY c.next_run_at").all(now).map((row) => this.pulse(row as Row)); }
   claimDue(now = iso()): ClaimedPulse[] {
     const claimed: ClaimedPulse[] = [];
