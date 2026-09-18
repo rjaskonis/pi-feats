@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { skillRows } from "../extensions/cli-resources.ts";
+import { rootRuntimeSources } from "../extensions/profiles.ts";
 
 test("profile Skills use enabledProfileSkills when listed", async () => {
   const root = await mkdtemp(join(tmpdir(), "cli-resources-test-"));
@@ -25,6 +26,18 @@ test("profile Skills use enabledProfileSkills when listed", async () => {
       ["aquanext-account-activity", "enabled"],
       ["aquanext-account-info", "enabled"],
     ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("conversation search is a required runtime extension for named profiles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "profile-runtime-sources-test-"));
+  try {
+    await mkdir(join(root, "extensions", "conversation-search"), { recursive: true });
+    await writeFile(join(root, "extensions", "conversation-search", "index.ts"), "export default () => {};\n");
+    const sources = await rootRuntimeSources(root, { profile: { enabledExtensions: ["profiles"] } });
+    assert.deepEqual(sources, [join(root, "extensions", "conversation-search")]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

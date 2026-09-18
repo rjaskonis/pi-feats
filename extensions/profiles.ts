@@ -129,14 +129,19 @@ function packageInstallPath(root: string, source: string): string | undefined {
   return existsSync(join(path, "package.json")) ? path : undefined;
 }
 
-async function rootRuntimeSources(root: string, base: ProfileSettings): Promise<string[]> {
+const requiredRuntimeExtensions = new Set(["profiles", "api-server", "conversation-search"]);
+
+export async function rootRuntimeSources(root: string, base: ProfileSettings): Promise<string[]> {
   const sources = new Set<string>();
   const enabled = base.profile?.enabledExtensions;
   const extensionName = (path: string) => basename(path).replace(/\.(?:ts|js)$/, "");
   const add = (path: string) => {
     if (!existsSync(path)) return;
     const name = extensionName(path);
-    if (!enabled || enabled.includes("*") || enabled.includes(name)) sources.add(path);
+    // Profiles are workspaces, but these extensions are core runtime
+    // capabilities and must cross the default-runtime boundary even when a
+    // profile limits optional extensions.
+    if (requiredRuntimeExtensions.has(name) || !enabled || enabled.includes("*") || enabled.includes(name)) sources.add(path);
   };
   if (Array.isArray(base.packages)) for (const entry of base.packages) {
     const source = typeof entry === "object" && entry !== null ? (entry as { source?: unknown }).source : entry;
