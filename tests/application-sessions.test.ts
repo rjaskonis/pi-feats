@@ -4,6 +4,18 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ApplicationStore } from "../extensions/api-server/application-store.ts";
+import { ApplicationLogStore } from "../extensions/api-server/application-log-store.ts";
+
+test("an identity miss is logged as ignored, not as an error", () => {
+  const logs = new ApplicationLogStore(join(tmpdir(), "pi-application-log-test"), "support");
+  const call = logs.start({}, {});
+  const result = logs.ignore(call, "unknown@example.com");
+
+  assert.deepEqual(result, { status: "ignored", reason: "identity_miss", identityKey: "unknown@example.com" });
+  assert.equal(call.status, "ignored");
+  assert.equal(call.error, undefined);
+  assert.equal(call.stages.at(-1)?.type, "identity-miss");
+});
 
 test("deleting a profile removes all Application state that targets it", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-application-store-"));
