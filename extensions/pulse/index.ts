@@ -11,6 +11,7 @@ const root = () => process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DI
 const dbPath = () => join(root(), "pulse.db");
 const statePath = () => join(root(), "pulse-tick.state.json");
 const logPath = () => join(root(), "pulse-tick.log");
+const TICK_INTERVAL_MS = 60_000;
 type State = { pid: number; startedAt: string };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 async function json<T>(path: string): Promise<T | undefined> { try { return JSON.parse(await readFile(path, "utf8")) as T; } catch { return undefined; } }
@@ -74,7 +75,7 @@ async function tick() {
   try {
     while (!stopped) {
       for (const pulse of store.claimDue()) { if (stopped) break; await executePulse(store, pulse); }
-      await new Promise<void>((resolve) => { wake = resolve; setTimeout(resolve, 15_000); }); wake = undefined;
+      await new Promise<void>((resolve) => { wake = resolve; setTimeout(resolve, TICK_INTERVAL_MS); }); wake = undefined;
     }
   } finally { await release(); }
 }
