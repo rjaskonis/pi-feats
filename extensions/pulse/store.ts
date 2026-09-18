@@ -60,16 +60,28 @@ export class PulseStore {
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true }); this.db = new DatabaseSync(path); this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
     this.db.exec(`CREATE TABLE IF NOT EXISTS pulses (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('cron','heartbeat')), schedule TEXT NOT NULL, prompt TEXT NOT NULL, thread_session_id TEXT NOT NULL, result TEXT);
-      CREATE TABLE IF NOT EXISTS pulse_control (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, profile TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, last_run_at TEXT, claimed_at TEXT, updated_at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS pulse_control (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, profile TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, last_run_at TEXT, claimed_at TEXT, active_run_id TEXT, claim_owner TEXT, lease_expires_at TEXT, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pulse_state (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, handoff TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pulse_runs (id TEXT PRIMARY KEY, pulse_id TEXT NOT NULL REFERENCES pulses(id) ON DELETE CASCADE, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, response TEXT, error TEXT);
+      CREATE TABLE IF NOT EXISTS pulse_tick_lease (name TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS pulse_runs_pulse_started ON pulse_runs(pulse_id, started_at DESC);`);
     // Migrate databases created before the denormalized latest result column.
     const columns = this.db.prepare("PRAGMA table_info(pulses)").all() as Row[];
     if (!columns.some((column) => column.name === "result")) this.db.exec("ALTER TABLE pulses ADD COLUMN result TEXT");
     const controlColumns = this.db.prepare("PRAGMA table_info(pulse_control)").all() as Row[];
-    if (!controlColumns.some((column) => column.name === "claimed_at")) this.db.exec("ALTER TABLE pulse_control ADD COLUMN claimed_at TEXT");
-    this.db.exec("CREATE INDEX IF NOT EXISTS pulse_control_due ON pulse_control(enabled, claimed_at, next_run_at)");
+    for (const column of ["claimed_at", "active_run_id", "claim_owner", "lease_expires_at"]) if (!controlColumns.some((item) => item.name === column)) this.db.exec(`ALTER TABLE pulse_control ADD COLUMN ${column} TEXT`);
+    // Older ticks could create overlapping running rows. Resolve them before
+    // installing the database-level invariant that permits only one.
+    const duplicates = this.db.prepare("SELECT pulse_id FROM pulse_runs WHERE status='running' GROUP BY pulse_id HAVING COUNT(*) > 1").all() as Row[];
+    for (const duplicate of duplicates) {
+      const rows = this.db.prepare("SELECT id FROM pulse_runs WHERE pulse_id=? AND status='running' ORDER BY started_at DESC, id DESC").all(duplicate.pulse_id) as Row[];
+      for (const row of rows.slice(1)) this.db.prepare("UPDATE pulse_runs SET status='error',finished_at=?,error=? WHERE id=?").run(iso(), "Superseded while enforcing the single active Pulse run invariant.", row.id);
+    }
+    // Adopt a pre-migration active run so a legacy tick cannot be joined by a
+    // new scheduler until its bounded lease expires.
+    const active = this.db.prepare("SELECT pulse_id,id,started_at FROM pulse_runs WHERE status='running'").all() as Row[];
+    for (const run of active) this.db.prepare("UPDATE pulse_control SET active_run_id=COALESCE(active_run_id,?),claim_owner=COALESCE(claim_owner,'legacy'),claimed_at=COALESCE(claimed_at,?),lease_expires_at=COALESCE(lease_expires_at,?),next_run_at=NULL,updated_at=? WHERE pulse_id=?").run(run.id, run.started_at, new Date(Date.now() + 15 * 60_000).toISOString(), iso(), run.pulse_id);
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS pulse_runs_one_active ON pulse_runs(pulse_id) WHERE status='running'; CREATE INDEX IF NOT EXISTS pulse_control_due ON pulse_control(enabled, active_run_id, next_run_at);");
     this.db.exec("UPDATE pulses SET result=(SELECT response FROM pulse_runs WHERE pulse_id=pulses.id AND status='success' ORDER BY finished_at DESC LIMIT 1) WHERE result IS NULL");
     // Keep records created before the schedule-based classifier in sync.
     for (const row of this.db.prepare("SELECT id, schedule, type FROM pulses").all() as Row[]) { const type = pulseType(String(row.schedule)); if (row.type !== type) this.db.prepare("UPDATE pulses SET type=? WHERE id=?").run(type, row.id); }
@@ -104,15 +116,15 @@ export class PulseStore {
   }
   delete(name: string, profile?: string): void { const pulse = this.get(name, profile); if (!pulse) throw new Error("Pulse not found."); this.db.prepare("DELETE FROM pulses WHERE id=?").run(pulse.id); }
   deleteProfile(profile: string): void { this.db.prepare("DELETE FROM pulses WHERE id IN (SELECT pulse_id FROM pulse_control WHERE profile=?)").run(profile); }
-  due(now = iso()): Pulse[] { return this.db.prepare("SELECT p.*, c.profile, c.enabled, c.next_run_at, c.last_run_at FROM pulses p JOIN pulse_control c ON c.pulse_id=p.id WHERE c.enabled=1 AND c.claimed_at IS NULL AND c.next_run_at IS NOT NULL AND c.next_run_at<=? ORDER BY c.next_run_at").all(now).map((row) => this.pulse(row as Row)); }
-  claimDue(now = iso()): ClaimedPulse[] {
-    const claimed: ClaimedPulse[] = [];
+  due(now = iso()): Pulse[] { return this.db.prepare("SELECT p.*, c.profile, c.enabled, c.next_run_at, c.last_run_at FROM pulses p JOIN pulse_control c ON c.pulse_id=p.id WHERE c.enabled=1 AND c.active_run_id IS NULL AND c.next_run_at IS NOT NULL AND c.next_run_at<=? ORDER BY c.next_run_at").all(now).map((row) => this.pulse(row as Row)); }
+  claimDue(now = iso(), owner = "unknown", leaseMs = 15 * 60_000): ClaimedPulse[] {
+    const claimed: ClaimedPulse[] = [], expiresAt = new Date(new Date(now).getTime() + leaseMs).toISOString();
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const pulse of this.due(now)) {
-        const result = this.db.prepare("UPDATE pulse_control SET claimed_at=?, next_run_at=NULL, updated_at=? WHERE pulse_id=? AND enabled=1 AND claimed_at IS NULL AND next_run_at IS NOT NULL AND next_run_at<=?").run(now, now, pulse.id, now);
-        if (!result.changes) continue;
         const runId = randomUUID();
+        const result = this.db.prepare("UPDATE pulse_control SET claimed_at=?,active_run_id=?,claim_owner=?,lease_expires_at=?,next_run_at=NULL,updated_at=? WHERE pulse_id=? AND enabled=1 AND active_run_id IS NULL AND next_run_at IS NOT NULL AND next_run_at<=?").run(now, runId, owner, expiresAt, now, pulse.id, now);
+        if (!result.changes) continue;
         this.db.prepare("INSERT INTO pulse_runs VALUES (?, ?, ?, NULL, 'running', NULL, NULL)").run(runId, pulse.id, now);
         claimed.push({ pulse, runId });
       }
@@ -120,8 +132,50 @@ export class PulseStore {
       return claimed;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
-  complete(pulse: Pulse, runId: string, response: string, handoff?: string): void { const next = nextRun(pulse.schedule)?.toISOString() ?? null; this.db.prepare("UPDATE pulse_runs SET finished_at=?, status='success', response=? WHERE id=?").run(iso(), response, runId); this.db.prepare("UPDATE pulses SET result=? WHERE id=?").run(response, pulse.id); this.db.prepare("UPDATE pulse_control SET last_run_at=?, next_run_at=?, claimed_at=NULL, updated_at=? WHERE pulse_id=?").run(iso(), next, iso(), pulse.id); if (pulse.type === "heartbeat" && handoff !== undefined) this.db.prepare("UPDATE pulse_state SET handoff=?, updated_at=? WHERE pulse_id=?").run(handoff, iso(), pulse.id); }
-  fail(pulse: Pulse, runId: string, error: string): void { this.db.prepare("UPDATE pulse_runs SET finished_at=?, status='error', error=? WHERE id=?").run(iso(), error, runId); this.db.prepare("UPDATE pulse_control SET next_run_at=?, claimed_at=NULL, updated_at=? WHERE pulse_id=?").run(nextRun(pulse.schedule, new Date(Date.now() + 60_000))?.toISOString() ?? null, iso(), pulse.id); }
+  renewClaim(pulseId: string, runId: string, owner: string, leaseMs = 15 * 60_000): boolean { return Boolean(this.db.prepare("UPDATE pulse_control SET lease_expires_at=?,updated_at=? WHERE pulse_id=? AND active_run_id=? AND claim_owner=?").run(new Date(Date.now() + leaseMs).toISOString(), iso(), pulseId, runId, owner).changes); }
+  recoverExpiredClaims(now = iso()): number {
+    // An expired lease proves the scheduler stopped renewing it, not that its
+    // child Pi process is dead. Keep the active run intact: safety wins over
+    // automatic retry, and no tick may duplicate an ambiguous execution.
+    return Number((this.db.prepare("SELECT COUNT(*) AS count FROM pulse_control WHERE active_run_id IS NOT NULL AND lease_expires_at IS NOT NULL AND lease_expires_at<=?").get(now) as Row).count);
+  }
+  complete(pulse: Pulse, runId: string, response: string, handoff?: string, owner = "unknown"): void {
+    const now = iso(), next = nextRun(pulse.schedule)?.toISOString() ?? null;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const owns = this.db.prepare("SELECT 1 FROM pulse_control WHERE pulse_id=? AND active_run_id=? AND claim_owner=?").get(pulse.id, runId, owner);
+      if (owns) {
+        this.db.prepare("UPDATE pulse_runs SET finished_at=?,status='success',response=? WHERE id=? AND status='running'").run(now, response, runId);
+        this.db.prepare("UPDATE pulse_control SET last_run_at=?,next_run_at=?,claimed_at=NULL,active_run_id=NULL,claim_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE pulse_id=? AND active_run_id=? AND claim_owner=?").run(now, next, now, pulse.id, runId, owner);
+        this.db.prepare("UPDATE pulses SET result=? WHERE id=?").run(response, pulse.id);
+        if (pulse.type === "heartbeat" && handoff !== undefined) this.db.prepare("UPDATE pulse_state SET handoff=?,updated_at=? WHERE pulse_id=?").run(handoff, now, pulse.id);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  fail(pulse: Pulse, runId: string, error: string, owner = "unknown"): void {
+    const now = iso(), retry = nextRun(pulse.schedule, new Date(Date.now() + 60_000))?.toISOString() ?? null;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const owns = this.db.prepare("SELECT 1 FROM pulse_control WHERE pulse_id=? AND active_run_id=? AND claim_owner=?").get(pulse.id, runId, owner);
+      if (owns) {
+        this.db.prepare("UPDATE pulse_runs SET finished_at=?,status='error',error=? WHERE id=? AND status='running'").run(now, error, runId);
+        this.db.prepare("UPDATE pulse_control SET next_run_at=?,claimed_at=NULL,active_run_id=NULL,claim_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE pulse_id=? AND active_run_id=? AND claim_owner=?").run(retry, now, pulse.id, runId, owner);
+      }
+      this.db.exec("COMMIT");
+    } catch (cause) { this.db.exec("ROLLBACK"); throw cause; }
+  }
+  claimTickLease(owner: string, leaseMs = 90_000): boolean {
+    const now = iso(), expiresAt = new Date(Date.now() + leaseMs).toISOString();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.db.prepare("SELECT owner,expires_at FROM pulse_tick_lease WHERE name='scheduler'").get() as Row | undefined;
+      if (current && String(current.owner) !== owner && String(current.expires_at) > now) { this.db.exec("COMMIT"); return false; }
+      this.db.prepare("INSERT INTO pulse_tick_lease(name,owner,expires_at,updated_at) VALUES ('scheduler',?,?,?) ON CONFLICT(name) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at,updated_at=excluded.updated_at").run(owner, expiresAt, now);
+      this.db.exec("COMMIT"); return true;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+  releaseTickLease(owner: string): void { this.db.prepare("DELETE FROM pulse_tick_lease WHERE name='scheduler' AND owner=?").run(owner); }
   handoff(id: string): string { return String((this.db.prepare("SELECT handoff FROM pulse_state WHERE pulse_id=?").get(id) as Row | undefined)?.handoff ?? ""); }
   retarget(profile: string, from: string, to: string): void { this.db.prepare("UPDATE pulses SET thread_session_id=? WHERE id IN (SELECT pulse_id FROM pulse_control WHERE profile=?) AND thread_session_id=?").run(to, profile, from); }
 }

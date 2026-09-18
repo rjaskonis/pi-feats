@@ -1,5 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { randomUUID } from "node:crypto";
 import { openSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -12,31 +13,22 @@ const dbPath = () => join(root(), "pulse.db");
 const statePath = () => join(root(), "pulse-tick.state.json");
 const logPath = () => join(root(), "pulse-tick.log");
 const TICK_INTERVAL_MS = 60_000;
-type State = { pid: number; startedAt: string };
+type State = { pid: number; owner?: string; startedAt: string };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 async function json<T>(path: string): Promise<T | undefined> { try { return JSON.parse(await readFile(path, "utf8")) as T; } catch { return undefined; } }
 async function write(path: string, value: unknown, exclusive = false) { await mkdir(root(), { recursive: true }); await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: exclusive ? "wx" : "w" }); }
 
-/** Acquire the daemon singleton lock. The lock is owned by the tick process, not its launcher. */
-async function acquireTickLock(): Promise<(() => Promise<void>) | undefined> {
-  const path = statePath(), state: State = { pid: process.pid, startedAt: new Date().toISOString() };
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      await write(path, state, true);
-      return async () => {
-        const current = await json<State>(path);
-        if (current?.pid === state.pid) await unlink(path).catch(() => {});
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      const current = await json<State>(path);
-      if (current && alive(current.pid)) return undefined;
-      // Moving a stale lock, rather than deleting it, prevents deleting a lock
-      // acquired by another contender between the read and cleanup.
-      await rename(path, `${path}.stale-${process.pid}-${Date.now()}`).catch(() => {});
-    }
-  }
-  return undefined;
+/** The SQLite lease is the singleton authority; the state file is diagnostic only. */
+async function acquireTickLock(store: PulseStore): Promise<(() => Promise<void>) | undefined> {
+  const owner = randomUUID();
+  if (!store.claimTickLease(owner)) return undefined;
+  const state: State = { pid: process.pid, owner, startedAt: new Date().toISOString() };
+  await write(statePath(), state);
+  return async () => {
+    store.releaseTickLease(owner);
+    const current = await json<State>(statePath());
+    if (current?.owner === owner) await unlink(statePath()).catch(() => {});
+  };
 }
 
 async function sessionFile(profile: string, id: string): Promise<{ file: string; cwd: string } | undefined> {
@@ -50,7 +42,8 @@ function table(profile?: string) { const rows = new PulseStore(dbPath()).list(pr
 async function start() { const current = await json<State>(statePath()); if (current && alive(current.pid)) return console.log(`Pulse tick is already running (PID ${current.pid}).`); const fd = openSync(logPath(), "a"); const child = spawn("sh", ["-c", "tail -f /dev/null | \"$@\"", "pi-pulse-tick", process.execPath, process.argv[1], "pulse", "tick"], { cwd: process.cwd(), detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, PI_PULSE_TICK: "1" } }); child.unref(); console.log(`Pulse tick starting (PID ${child.pid}).`); }
 async function stop() { const current = await json<State>(statePath()); if (!current || !alive(current.pid)) return console.log("Pulse tick is not running."); try { process.kill(-current.pid, "SIGTERM"); } catch { process.kill(current.pid, "SIGTERM"); } console.log(`Pulse tick stopping (PID ${current.pid}).`); }
 async function status() { const state = await json<State>(statePath()); const store = new PulseStore(dbPath()); const enabled = store.list().filter((item) => item.enabled).length; console.log(!state || !alive(state.pid) ? `Pulse tick: stopped (${enabled} enabled pulses)` : `Pulse tick: running (PID ${state.pid}, ${enabled} enabled pulses, since ${state.startedAt})`); }
-async function executePulse(store: PulseStore, pulse: Awaited<ReturnType<PulseStore["claimDue"]>>[number]) {
+async function executePulse(store: PulseStore, pulse: Awaited<ReturnType<PulseStore["claimDue"]>>[number], owner: string) {
+  const renew = setInterval(() => { store.renewClaim(pulse.pulse.id, pulse.runId, owner); store.claimTickLease(owner); }, 30_000);
   try {
     const handoff = pulse.pulse.type === "heartbeat" ? store.handoff(pulse.pulse.id) : "";
     const message = `[Pulse: ${pulse.pulse.name}]\n${pulse.pulse.prompt}${handoff ? `\n\nPrevious heartbeat state (private):\n${handoff}` : ""}`;
@@ -63,18 +56,25 @@ async function executePulse(store: PulseStore, pulse: Awaited<ReturnType<PulseSt
       child.once("exit", (code) => code === 0 ? resolve(output.trim()) : reject(new Error(error.trim() || `Pi exited with ${code}`)));
       child.once("error", reject);
     });
-    store.complete(pulse.pulse, pulse.runId, result, pulse.pulse.type === "heartbeat" ? result.slice(-8000) : undefined);
-  } catch (error) { store.fail(pulse.pulse, pulse.runId, error instanceof Error ? error.message : String(error)); }
+    store.complete(pulse.pulse, pulse.runId, result, pulse.pulse.type === "heartbeat" ? result.slice(-8000) : undefined, owner);
+  } catch (error) { store.fail(pulse.pulse, pulse.runId, error instanceof Error ? error.message : String(error), owner); }
+  finally { clearInterval(renew); }
 }
 async function tick() {
-  const release = await acquireTickLock();
+  const store = new PulseStore(dbPath());
+  const release = await acquireTickLock(store);
   if (!release) return console.log("Pulse tick is already running.");
-  const store = new PulseStore(dbPath()); let stopped = false, wake: (() => void) | undefined;
+  const owner = (await json<State>(statePath()))?.owner;
+  if (!owner) { await release(); throw new Error("Pulse tick lease owner was not persisted."); }
+  const expiredClaims = store.recoverExpiredClaims();
+  if (expiredClaims) console.error(`Pulse tick found ${expiredClaims} expired active claim(s); leaving them locked to prevent duplicate execution.`);
+  let stopped = false, wake: (() => void) | undefined;
   const close = () => { stopped = true; wake?.(); };
   process.once("SIGTERM", close); process.once("SIGINT", close);
   try {
     while (!stopped) {
-      for (const pulse of store.claimDue()) { if (stopped) break; await executePulse(store, pulse); }
+      if (!store.claimTickLease(owner)) { console.error("Pulse tick lost its SQLite lease; stopping."); break; }
+      for (const pulse of store.claimDue(undefined, owner)) { if (stopped) break; await executePulse(store, pulse, owner); }
       await new Promise<void>((resolve) => { wake = resolve; setTimeout(resolve, TICK_INTERVAL_MS); }); wake = undefined;
     }
   } finally { await release(); }
