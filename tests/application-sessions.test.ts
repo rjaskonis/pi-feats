@@ -7,15 +7,35 @@ import { ApplicationStore } from "../extensions/api-server/application-store.ts"
 import { ApplicationLogStore } from "../extensions/api-server/application-log-store.ts";
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
 
-test("an identity miss is logged as ignored, not as an error", () => {
+test("an identity miss is an ignored successful outcome, not an error", () => {
   const logs = new ApplicationLogStore(join(tmpdir(), "pi-application-log-test"), "support");
   const call = logs.start({}, {});
   const result = logs.ignore(call, "unknown@example.com");
 
   assert.deepEqual(result, { status: "ignored", reason: "identity_miss", identityKey: "unknown@example.com" });
-  assert.equal(call.status, "ignored");
+  assert.equal(call.status, "success");
+  assert.equal(call.outcome, "ignored");
   assert.equal(call.error, undefined);
   assert.equal(call.stages.at(-1)?.type, "identity-miss");
+});
+
+test("an ignore mapping has a successful explicit terminal log stage", () => {
+  const logs = new ApplicationLogStore(join(tmpdir(), "pi-application-log-ignore-test"), "support");
+  const call = logs.start({}, {});
+  const result = logs.ignore(call, "blocked@example.com", "identity_mapping_none");
+  assert.deepEqual(result, { status: "ignored", reason: "identity_mapping_none", identityKey: "blocked@example.com" });
+  assert.equal(call.status, "success");
+  assert.equal(call.outcome, "ignored");
+  assert.equal(call.stages.at(-1)?.type, "identity-ignored");
+});
+
+test("an ignore mapping persists without a profile or session prefix", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-application-store-ignore-"));
+  try {
+    const store = new ApplicationStore(join(directory, "applications.sqlite"));
+    const mapping = store.saveIdentityMapping("support", "blocked@example.com", null, "ignore", null);
+    assert.deepEqual(mapping, { profile: null, sessionMode: "ignore", sessionPrefix: null });
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test("named profiles always link the shared root models catalog", async () => {
