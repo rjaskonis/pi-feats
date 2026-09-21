@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { PulseStore } from "../extensions/pulse/store.ts";
-import { profileModelArgs } from "../extensions/pulse/index.ts";
+import { profileModelArgs, pulseSessionId } from "../extensions/pulse/index.ts";
 
 async function withStore(run: (path: string, store: PulseStore) => void | Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "pi-pulse-")), path = join(directory, "pulse.db");
@@ -21,6 +21,20 @@ test("resolves the configured model from the pulse profile", async () => {
     assert.deepEqual(await profileModelArgs("default", directory), ["--provider", "openai", "--model", "gpt-5"]);
     assert.deepEqual(await profileModelArgs("support", directory), ["--provider", "anthropic", "--model", "claude-sonnet"]);
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("names Pulse execution sessions with their type and UTC minute", () => {
+  const timestamp = new Date("2026-09-18T01:01:59.999Z");
+  assert.equal(pulseSessionId("cron", timestamp), "pulse-cron_2026-09-18-01-01");
+  assert.equal(pulseSessionId("heartbeat", timestamp), "pulse-heartbeat_2026-09-18-01-01");
+});
+
+test("persists API session insertion preference", async () => {
+  await withStore((_path, store) => {
+    const pulse = store.create({ name: "api-report", description: "Report", schedule: "0 9 * * *", prompt: "Run", profile: "support", thread_session_id: "session", insertIntoApiSession: true });
+    assert.equal(pulse.insertIntoApiSession, true);
+    assert.equal(store.update("api-report", "support", { description: "Report", schedule: "0 9 * * *", prompt: "Run", thread_session_id: "session", insertIntoApiSession: false }).insertIntoApiSession, false);
+  });
 });
 
 test("claims a due pulse once until its execution completes", async () => {
@@ -44,7 +58,7 @@ test("database rejects a second active run even from a legacy writer", async () 
     const pulse = store.create({ name: "exclusive-report", description: "Report", schedule: "* * * * *", prompt: "Run", profile: "support", thread_session_id: "session" });
     new DatabaseSync(path).prepare("UPDATE pulse_control SET next_run_at=? WHERE pulse_id=?").run("2020-01-01T00:00:00.000Z", pulse.id);
     store.claimDue("2026-01-01T00:00:00.000Z", "tick-a");
-    assert.throws(() => new DatabaseSync(path).prepare("INSERT INTO pulse_runs VALUES (?, ?, ?, NULL, 'running', NULL, NULL)").run("legacy-duplicate", pulse.id, "2026-01-01T00:00:01.000Z"), /UNIQUE constraint failed/);
+    assert.throws(() => new DatabaseSync(path).prepare("INSERT INTO pulse_runs (id, pulse_id, session_id, started_at, finished_at, status, response, error) VALUES (?, ?, NULL, ?, NULL, 'running', NULL, NULL)").run("legacy-duplicate", pulse.id, "2026-01-01T00:00:01.000Z"), /UNIQUE constraint failed/);
   });
 });
 
