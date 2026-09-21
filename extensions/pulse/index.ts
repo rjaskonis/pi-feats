@@ -31,6 +31,14 @@ async function acquireTickLock(store: PulseStore): Promise<(() => Promise<void>)
   };
 }
 
+export async function profileModelArgs(profile: string, agentDir = root()): Promise<string[]> {
+  const settingsPath = profile === "default" ? join(agentDir, "settings.json") : join(agentDir, "profiles", profile, "settings.json");
+  const settings = await json<Record<string, unknown>>(settingsPath);
+  const provider = typeof settings?.defaultProvider === "string" ? settings.defaultProvider.trim() : "";
+  const model = typeof settings?.defaultModel === "string" ? settings.defaultModel.trim() : "";
+  return provider && model ? ["--provider", provider, "--model", model] : [];
+}
+
 async function sessionFile(profile: string, id: string): Promise<{ file: string; cwd: string } | undefined> {
   const directory = join(root(), profile === "default" ? "sessions" : join("profiles", profile, "sessions"));
   const visit = async (path: string): Promise<string | undefined> => { for (const entry of await readdir(path, { withFileTypes: true }).catch(() => [])) { const candidate = join(path, entry.name); if (entry.isDirectory()) { const match = await visit(candidate); if (match) return match; } else if (entry.isFile() && entry.name.endsWith(`_${id}.jsonl`)) return candidate; } };
@@ -49,8 +57,14 @@ async function executePulse(store: PulseStore, pulse: Awaited<ReturnType<PulseSt
     const message = `[Pulse: ${pulse.pulse.name}]\n${pulse.pulse.prompt}${handoff ? `\n\nPrevious heartbeat state (private):\n${handoff}` : ""}`;
     const target = pulse.pulse.thread_session_id ? await sessionFile(pulse.pulse.profile, pulse.pulse.thread_session_id) : undefined;
     if (pulse.pulse.thread_session_id && !target) throw new Error(`Thread session '${pulse.pulse.thread_session_id}' was not found for profile '${pulse.pulse.profile}'.`);
+    const modelArgs = await profileModelArgs(pulse.pulse.profile);
+    // A pulse always follows its profile's configured model, never the model
+    // persisted in the conversation it is attached to. If a profile has no
+    // configured default, avoid resuming the session so Pi can select its
+    // normal startup fallback rather than restoring that session's model.
+    const sessionArgs = modelArgs.length ? (target ? ["--session", target.file] : ["--no-session"]) : ["--no-session"];
     const result = await new Promise<string>((resolve, reject) => {
-      const child = spawn(process.execPath, [process.argv[1], "profile", pulse.pulse.profile, ...(target ? ["--session", target.file] : ["--no-session"]), "--print", message], { cwd: target?.cwd ?? process.cwd(), env: { ...process.env, PI_PULSE_TICK: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(process.execPath, [process.argv[1], "profile", pulse.pulse.profile, ...sessionArgs, ...modelArgs, "--print", message], { cwd: target?.cwd ?? process.cwd(), env: { ...process.env, PI_PULSE_TICK: "1" }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "", error = "";
       child.stdout.on("data", (data) => output += String(data)); child.stderr.on("data", (data) => error += String(data));
       child.once("exit", (code) => code === 0 ? resolve(output.trim()) : reject(new Error(error.trim() || `Pi exited with ${code}`)));

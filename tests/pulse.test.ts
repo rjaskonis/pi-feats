@@ -1,15 +1,27 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { PulseStore } from "../extensions/pulse/store.ts";
+import { profileModelArgs } from "../extensions/pulse/index.ts";
 
 async function withStore(run: (path: string, store: PulseStore) => void | Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "pi-pulse-")), path = join(directory, "pulse.db");
   try { await run(path, new PulseStore(path)); } finally { await rm(directory, { recursive: true, force: true }); }
 }
+
+test("resolves the configured model from the pulse profile", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-pulse-model-"));
+  try {
+    await writeFile(join(directory, "settings.json"), JSON.stringify({ defaultProvider: "openai", defaultModel: "gpt-5" }));
+    await mkdir(join(directory, "profiles", "support"), { recursive: true });
+    await writeFile(join(directory, "profiles", "support", "settings.json"), JSON.stringify({ defaultProvider: "anthropic", defaultModel: "claude-sonnet" }));
+    assert.deepEqual(await profileModelArgs("default", directory), ["--provider", "openai", "--model", "gpt-5"]);
+    assert.deepEqual(await profileModelArgs("support", directory), ["--provider", "anthropic", "--model", "claude-sonnet"]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test("claims a due pulse once until its execution completes", async () => {
   await withStore((path, store) => {
