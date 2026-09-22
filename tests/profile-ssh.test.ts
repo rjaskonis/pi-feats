@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { profileSshConfigBlock } from "../extensions/profile-ssh.ts";
+import { profileSshConfigBlock, profileSshVerificationArgs } from "../extensions/profile-ssh.ts";
 
 test("writes a profile SSH config block for alias, hostname, and IP", () => {
   const block = profileSshConfigBlock(
@@ -18,6 +18,18 @@ Host banco-prod db.internal 10.1.1.1
   UserKnownHostsFile /root/.pi/agent/profiles/financeiro/.ssh/known_hosts
   StrictHostKeyChecking yes
 `);
+});
+
+test("validates a profile host with password authentication disabled", () => {
+  assert.deepEqual(profileSshVerificationArgs("/profile/.ssh/config.check", "docs"), [
+    "-F", "/profile/.ssh/config.check",
+    "-o", "BatchMode=yes",
+    "-o", "PasswordAuthentication=no",
+    "-o", "KbdInteractiveAuthentication=no",
+    "-o", "ConnectTimeout=15",
+    "docs",
+    "true",
+  ]);
 });
 
 test("uses a hostname as the connection target when no IP was supplied", () => {

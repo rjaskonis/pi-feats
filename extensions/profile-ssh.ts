@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { isIP } from "node:net";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -33,33 +33,24 @@ async function ask(label: string, defaultValue?: string): Promise<string> {
   finally { prompt.close(); }
 }
 
-async function askPassword(): Promise<string> {
-  if (!process.stdin.isTTY) return ask("Remote password (leave empty if key is already authorized)");
-  process.stdout.write("Remote password (leave empty if key is already authorized): ");
+async function interactiveCommand(command: string, args: string[]): Promise<number> {
   return await new Promise((resolve, reject) => {
-    let value = "";
-    const input = process.stdin;
-    const restore = () => { input.off("data", onData); input.setRawMode?.(false); input.pause(); };
-    const done = (error?: Error) => { restore(); process.stdout.write("\n"); error ? reject(error) : resolve(value); };
-    const onData = (chunk: Buffer) => {
-      const key = String(chunk);
-      if (key === "\u0003") return done(new Error("cancelled"));
-      if (key === "\r" || key === "\n") return done();
-      if (key === "\u007f" || key === "\b") { value = value.slice(0, -1); return; }
-      if (key >= " ") value += key;
-    };
-    input.setRawMode?.(true); input.resume(); input.on("data", onData);
+    const child = spawn(command, args, { stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code) => resolve(code ?? 1));
   });
 }
 
-async function askpass(password: string): Promise<{ env: NodeJS.ProcessEnv; cleanup: () => Promise<void> }> {
-  const directory = await mkdtemp(join(tmpdir(), "pi-profile-ssh-"));
-  const path = join(directory, "askpass");
-  await writeFile(path, "#!/bin/sh\nprintf '%s' \"$PI_PROFILE_SSH_PASSWORD\"\n", { mode: 0o700 });
-  return {
-    env: { ...process.env, SSH_ASKPASS: path, SSH_ASKPASS_REQUIRE: "force", DISPLAY: "pi-profile-ssh", PI_PROFILE_SSH_PASSWORD: password },
-    cleanup: async () => { await rm(directory, { recursive: true, force: true }); },
-  };
+export function profileSshVerificationArgs(config: string, alias: string): string[] {
+  return [
+    "-F", config,
+    "-o", "BatchMode=yes",
+    "-o", "PasswordAuthentication=no",
+    "-o", "KbdInteractiveAuthentication=no",
+    "-o", "ConnectTimeout=15",
+    alias,
+    "true",
+  ];
 }
 
 function hostTokens(host: Pick<SshHost, "alias" | "hostname" | "ip">): string[] {
@@ -134,8 +125,6 @@ export async function addProfileSshHost(alias: string): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Port must be an integer between 1 and 65535.");
   const user = await ask("Remote user");
   if (!validUser(user)) throw new Error("Invalid remote user.");
-  const password = await askPassword();
-
   const host: SshHost = { alias, ...(hostname ? { hostname } : {}), ...(ip ? { ip } : {}), port, user };
   const directory = join(profileDirectory(), ".ssh"), config = join(directory, "config"), knownHosts = join(directory, "known_hosts");
   await mkdir(directory, { recursive: true, mode: 0o700 }); await chmod(directory, 0o700);
@@ -152,20 +141,17 @@ export async function addProfileSshHost(alias: string): Promise<void> {
   const temporaryConfig = join(directory, `config.${process.pid}.check`);
   await writeKnownHosts(temporaryKnownHosts, fingerprint.key);
   await writeFile(temporaryConfig, block, { mode: 0o600 });
-  const credentials = await askpass(password);
   try {
-    if (password) {
-      process.stdout.write("Installing the profile public key with ssh-copy-id...\n");
-      const copied = await command("ssh-copy-id", ["-i", publicKey, "-p", String(port), "-o", `UserKnownHostsFile=${temporaryKnownHosts}`, "-o", "StrictHostKeyChecking=yes", `${user}@${host.ip ?? host.hostname}`], { env: credentials.env });
-      if (copied.code !== 0) throw new Error(`ssh-copy-id failed: ${copied.stderr.trim() || copied.stdout.trim() || "unknown error"}`);
-    } else {
-      process.stdout.write("No password supplied; validating the profile key already authorized on the host...\n");
+    let verified = await command("ssh", profileSshVerificationArgs(temporaryConfig, alias));
+    if (verified.code !== 0) {
+      if (!process.stdin.isTTY) throw new Error(`Profile key is not authorized and a password cannot be requested without a terminal: ${verified.stderr.trim() || "connection failed"}`);
+      process.stdout.write("The profile key is not authorized yet. ssh-copy-id will request the remote password once.\n");
+      const copied = await interactiveCommand("ssh-copy-id", ["-i", publicKey, "-F", temporaryConfig, alias]);
+      if (copied !== 0) throw new Error("ssh-copy-id failed.");
+      verified = await command("ssh", profileSshVerificationArgs(temporaryConfig, alias));
     }
-
-    const verified = await command("ssh", ["-F", temporaryConfig, alias, "true"]);
     if (verified.code !== 0) throw new Error(`SSH key validation failed: ${verified.stderr.trim() || "connection failed"}`);
   } finally {
-    await credentials.cleanup();
     await rm(temporaryConfig, { force: true });
     await rm(temporaryKnownHosts, { force: true });
   }
