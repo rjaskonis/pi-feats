@@ -39,7 +39,7 @@ pi profile <profile> ssh add <alias>
 pi profile <profile> add <alias>
 ```
 
-The setup asks for hostname/IP, port, remote user, and an optional password. It shows the server fingerprint for confirmation, creates or reuses the profile's Ed25519 key, installs the public key when a password is supplied, and validates key-based access before saving the host.
+The setup uses the alias as the default hostname, then asks for the IP address, port, remote user, and an optional password. It shows the server fingerprint for confirmation, creates or reuses the profile's Ed25519 key, installs the public key when a password is supplied, and validates key-based access before saving the host.
 
 List profile-managed hosts with:
 

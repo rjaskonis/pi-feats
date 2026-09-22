@@ -126,11 +126,10 @@ async function listProfileSshHosts(): Promise<void> {
 
 export async function addProfileSshHost(alias: string): Promise<void> {
   if (!validAlias(alias)) throw new Error("Invalid host name. Use letters, numbers, hyphens, or underscores (max. 64 characters).");
-  const hostname = await ask("Hostname (optional)");
-  if (hostname && !validHostname(hostname)) throw new Error("Invalid hostname.");
-  const ip = await ask("IP address (optional)");
-  if (ip && !isIP(ip)) throw new Error("Invalid IP address.");
-  if (!hostname && !ip) throw new Error("Provide a hostname, an IP address, or both.");
+  const hostname = await ask("Hostname", alias);
+  if (!validHostname(hostname)) throw new Error("Invalid hostname.");
+  const ip = await ask("IP address");
+  if (!isIP(ip)) throw new Error("Invalid IP address.");
   const portText = await ask("Port", "22"), port = Number(portText);
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Port must be an integer between 1 and 65535.");
   const user = await ask("Remote user");
