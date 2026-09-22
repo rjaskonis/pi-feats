@@ -27,7 +27,7 @@ const profilesDir = () => join(rootAgentDir(), "profiles");
 const profileDir = (name: string) => join(profilesDir(), name);
 const validProfileName = (name: string) => /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name);
 const reservedProfileNames = new Set([
-  "add", "create", "delete", "disable", "enable", "extensions", "guardrails", "list", "open", "packages", "profile", "pulse", "remove", "rename", "resume", "sessions", "skills", "tools", "validate",
+  "add", "create", "delete", "disable", "enable", "extensions", "guardrails", "list", "open", "packages", "profile", "pulse", "remove", "rename", "resume", "sessions", "skills", "ssh", "tools", "validate",
   ...REMOTE_COMMAND_NAMES,
 ]);
 
@@ -284,6 +284,9 @@ async function handleProfileCommand(args: string[]) {
   // Accept the natural profile-first forms too. This is particularly useful
   // for remote operation, where a session ID is copied from `sessions list`.
   if (action && !reservedProfileNames.has(action.toLowerCase())) {
+    // Profile-first shorthand for SSH registration. Keep the explicit
+    // `pi profile <name> ssh add <alias>` form as the canonical spelling.
+    if (args[2] === "add" && args.length === 4) return reexecWithProfile(action, ["ssh", "add", args[3]]);
     if (args[2] === "resume" && args.length === 3) return reexecWithProfile(action, ["--resume"]);
     if ((args[2] === "resume" || args[2] === "open") && args.length === 4) return reexecWithProfile(action, ["--session", args[3]]);
     return reexecWithProfile(action, args.slice(2));

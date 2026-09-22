@@ -2,8 +2,9 @@ import { existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { ensureProfileSandbox } from "../lib/profile-sandbox.ts";
+import { BUILTIN_TOOLS, activeBuiltinTools, updatedBuiltinTools } from "../lib/builtin-tools.ts";
 
-export const BUILTIN_TOOLS = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"];
+export { BUILTIN_TOOLS } from "../lib/builtin-tools.ts";
 export const RESOURCE_KINDS = ["tools", "skills", "extensions"] as const;
 export type ResourceKind = typeof RESOURCE_KINDS[number];
 type PolicyKey = "enabledTools" | "enabledSkills" | "enabledProfileSkills" | "enabledExtensions";
@@ -30,7 +31,7 @@ export class ProfileStore {
 
   registerExtensionTools(profile: string, names: Iterable<string>): void {
     const tools = this.extensionTools.get(profile) ?? new Set<string>();
-    for (const name of names) if (name && !BUILTIN_TOOLS.includes(name)) tools.add(name);
+    for (const name of names) if (name && !(BUILTIN_TOOLS as readonly string[]).includes(name)) tools.add(name);
     this.extensionTools.set(profile, tools);
   }
 
@@ -115,6 +116,7 @@ export class ProfileStore {
   private enabled(settings: ProfileSettings, kind: ResourceKind, name: string, path?: string): boolean {
     const values = settings.profile?.[policyKey[kind]];
     if (values) return values.includes("*") || values.includes(name);
+    if (kind === "tools" && (BUILTIN_TOOLS as readonly string[]).includes(name)) return activeBuiltinTools(settings).includes(name);
     const configured = settings[kind];
     const exclusions = Array.isArray(configured) ? configured.filter((value): value is string => typeof value === "string" && value.startsWith("!")) : [];
     return !path || !exclusions.includes(`!${path}`);
@@ -192,8 +194,8 @@ export class ProfileStore {
     const sources = new Map<string, string>(), tools = [...names];
     for (const extension of await this.packageExtensions(settings)) try {
       const source = await readFile(extension.path, "utf8");
-      for (const tool of tools) if (source.includes(`"${tool}"`) || source.includes(`'${tool}'`) || source.includes(`\`${tool}\``)) sources.set(tool, extension.package);
-      for (const block of source.matchAll(/TOOL_NAMES[^=]*=\s*\{([\s\S]*?)\}/g)) for (const name of block[1].matchAll(/:\s*["']([A-Za-z][A-Za-z0-9_-]{0,63})["']/g)) sources.set(name[1], extension.package);
+      for (const tool of tools) if (!(BUILTIN_TOOLS as readonly string[]).includes(tool) && (source.includes(`"${tool}"`) || source.includes(`'${tool}'`) || source.includes(`\`${tool}\``))) sources.set(tool, extension.package);
+      for (const block of source.matchAll(/TOOL_NAMES[^=]*=\s*\{([\s\S]*?)\}/g)) for (const name of block[1].matchAll(/:\s*["']([A-Za-z][A-Za-z0-9_-]{0,63})["']/g)) if (!(BUILTIN_TOOLS as readonly string[]).includes(name[1])) sources.set(name[1], extension.package);
     } catch {}
     return sources;
   }
@@ -285,6 +287,19 @@ export class ProfileStore {
   async setResource(profile: string, kind: ResourceKind, name: string, enabled: boolean, source?: SkillResourceSource): Promise<Resource> {
     const current = await this.resource(profile, kind, name, source);
     if (current.protected && !enabled) throw Object.assign(new Error("This extension is required and cannot be disabled."), { status: 422 });
+    // The default profile uses Pi's defaultTools setting for native tool state
+    // unless it already has a legacy explicit enabledTools policy. Named profiles
+    // retain their explicit enabledTools policy.
+    if (kind === "tools" && current.source === "builtin" && profile === "default") {
+      const settings = await this.readSettings(profile);
+      if (!settings.profile?.enabledTools) {
+        const tools = updatedBuiltinTools(settings, name, enabled);
+        if (tools) settings.defaultTools = tools;
+        else delete settings.defaultTools;
+        await this.writeSettings(profile, settings);
+        return this.resource(profile, kind, name, source);
+      }
+    }
     // Extensions are shared runtime resources, so toggling one always updates
     // the default runtime rather than materializing it in a profile workspace.
     const settingsProfile = kind === "extensions" ? "default" : profile;

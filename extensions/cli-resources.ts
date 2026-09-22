@@ -5,6 +5,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { BUILTIN_TOOLS, activeBuiltinTools, updatedBuiltinTools } from "./lib/builtin-tools.ts";
 
 type ListKind = "tools" | "skills" | "extensions";
 type Row = [string, string, string];
@@ -18,8 +19,6 @@ const kindFromArgs = (args: string[]): ListKind | undefined => {
   }
   return undefined;
 };
-
-const BUILTIN_TOOLS = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"] as const;
 
 type Action = "disable" | "enable";
 
@@ -434,20 +433,16 @@ async function applyAction(action: ParsedAction) {
     if (!(BUILTIN_TOOLS as readonly string[]).includes(action.target)) {
       throw new Error(`\"${action.target}\" não é uma tool nativa. Desabilite a extension que fornece essa tool.`);
     }
-    const configured = Array.isArray(settings.defaultTools)
-      ? settings.defaultTools.filter((entry): entry is string => typeof entry === "string")
-      : [...BUILTIN_TOOLS];
-    const updatedTools = enable
-      ? [...new Set([...configured, action.target])]
-      : configured.filter((tool) => tool !== action.target);
-    if (configured.length === updatedTools.length && configured.every((tool, index) => tool === updatedTools[index])) {
+    const configured = activeBuiltinTools(settings);
+    const updatedTools = updatedBuiltinTools(settings, action.target, enable);
+    const effectiveUpdatedTools = updatedTools ?? activeBuiltinTools({});
+    if (configured.length === effectiveUpdatedTools.length && configured.every((tool, index) => tool === effectiveUpdatedTools[index])) {
       console.log(`Tool \"${action.target}\" já está ${enable ? "habilitada" : "desabilitada"}.`);
       return;
     }
-    const updatedSettings: Record<string, unknown> = { ...settings, defaultTools: updatedTools };
-    if (updatedTools.length === BUILTIN_TOOLS.length && BUILTIN_TOOLS.every((tool) => updatedTools.includes(tool))) {
-      delete updatedSettings.defaultTools;
-    }
+    const updatedSettings: Record<string, unknown> = { ...settings };
+    if (updatedTools) updatedSettings.defaultTools = updatedTools;
+    else delete updatedSettings.defaultTools;
     await writeFile(settingsPath, `${JSON.stringify(updatedSettings, null, 2)}\n`, "utf8");
     console.log(`Tool \"${action.target}\" ${enable ? "habilitada" : "desabilitada"} em ${settingsPath}. Use /reload para aplicar.`);
     return;
@@ -556,9 +551,9 @@ export default async function (pi: ExtensionAPI) {
     } else if (kind === "tools") {
       const active = new Set(pi.getActiveTools());
       const { resourceRoot, runtimeSettings } = await readSettings();
-      const sources = await packageToolSources(resourceRoot, runtimeSettings, pi.getAllTools().map((tool) => tool.name));
+      const sources = await packageToolSources(resourceRoot, runtimeSettings, pi.getAllTools().map((tool) => tool.name).filter((name) => !(BUILTIN_TOOLS as readonly string[]).includes(name)));
       const rows: SourceRow[] = pi.getAllTools()
-        .map((tool) => [tool.name, active.has(tool.name) ? "enabled" : "disabled", sources.has(tool.name) ? `npm: ${sources.get(tool.name)}` : (BUILTIN_TOOLS as readonly string[]).includes(tool.name) ? "Built-in" : "Extension", tool.description] as SourceRow)
+        .map((tool) => [tool.name, active.has(tool.name) ? "enabled" : "disabled", (BUILTIN_TOOLS as readonly string[]).includes(tool.name) ? "Built-in" : sources.has(tool.name) ? `npm: ${sources.get(tool.name)}` : "Extension", tool.description] as SourceRow)
         .sort((a, b) => a[0].localeCompare(b[0]));
       await renderAndClose(React.createElement(SourceTable, { title: "TOOLS", detailHeader: "DESCRIPTION", rows }));
     } else {

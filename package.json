@@ -96,6 +96,7 @@
       "./extensions/guardrails",
       "./extensions/pi-console-webui",
       "./extensions/profiles.ts",
+      "./extensions/profile-ssh.ts",
       "./extensions/pulse",
       "./extensions/sequential-workflow.ts",
       "./extensions/skill-sources"
