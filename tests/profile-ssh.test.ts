@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { profileSshConfigBlock, profileSshVerificationArgs, removeProfileSshConfigBlock } from "../extensions/profile-ssh.ts";
+import { profileSshConfigBlock, profileSshKeyTypeForBanner, profileSshVerificationArgs, removeProfileSshConfigBlock } from "../extensions/profile-ssh.ts";
 
 test("writes a profile SSH config block for alias, hostname, and IP", () => {
   const block = profileSshConfigBlock(
@@ -18,6 +18,24 @@ Host banco-prod db.internal 10.1.1.1
   UserKnownHostsFile /root/.pi/agent/profiles/financeiro/.ssh/known_hosts
   StrictHostKeyChecking yes
 `);
+});
+
+test("selects RSA for OpenSSH versions that predate Ed25519 support", () => {
+  assert.equal(profileSshKeyTypeForBanner("# host SSH-2.0-OpenSSH_5.3"), "rsa");
+  assert.equal(profileSshKeyTypeForBanner("SSH-2.0-OpenSSH_6.4"), "rsa");
+  assert.equal(profileSshKeyTypeForBanner("SSH-2.0-OpenSSH_6.5"), "ed25519");
+  assert.equal(profileSshKeyTypeForBanner("SSH-2.0-OpenSSH_9.6"), "ed25519");
+  assert.equal(profileSshKeyTypeForBanner("SSH-2.0-OtherSSH_1.0"), "ed25519");
+});
+
+test("adds legacy RSA client compatibility to an RSA profile host", () => {
+  const block = profileSshConfigBlock(
+    { alias: "legacy", hostname: "legacy", ip: "10.1.2.3", port: 22, user: "root", keyType: "rsa" },
+    "/profile/.ssh/id_rsa",
+    "/profile/.ssh/known_hosts",
+  );
+  assert.match(block, /IdentityFile \/profile\/.ssh\/id_rsa/);
+  assert.match(block, /PubkeyAcceptedAlgorithms \+ssh-rsa/);
 });
 
 test("removes only the selected Pi-managed SSH config block", () => {

@@ -15,7 +15,15 @@ const validHostname = (value: string) => /^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-
 const validUser = (value: string) => /^[A-Za-z_][A-Za-z0-9_.-]*$/.test(value);
 
 type CommandResult = { code: number; stdout: string; stderr: string };
-type SshHost = { alias: string; hostname?: string; ip?: string; port: number; user: string };
+export type ProfileSshKeyType = "ed25519" | "rsa";
+type SshHost = { alias: string; hostname?: string; ip?: string; port: number; user: string; keyType?: ProfileSshKeyType };
+
+export function profileSshKeyTypeForBanner(banner: string): ProfileSshKeyType {
+  const version = banner.match(/OpenSSH_(\d+)\.(\d+)/i);
+  if (!version) return "ed25519";
+  const major = Number(version[1]), minor = Number(version[2]);
+  return major < 6 || (major === 6 && minor < 5) ? "rsa" : "ed25519";
+}
 
 async function command(command: string, args: string[], options: { env?: NodeJS.ProcessEnv; input?: string } = {}): Promise<CommandResult> {
   return await new Promise((resolve, reject) => {
@@ -62,26 +70,29 @@ function hostTokens(host: Pick<SshHost, "alias" | "hostname" | "ip">): string[] 
 export function profileSshConfigBlock(host: SshHost, privateKey: string, knownHosts: string): string {
   const target = host.ip ?? host.hostname;
   if (!target) throw new Error("SSH host requires a hostname or IP address.");
-  return `# pi-profile-ssh: ${host.alias}\nHost ${hostTokens(host).join(" ")}\n  HostName ${target}\n  User ${host.user}\n  Port ${host.port}\n  IdentityFile ${privateKey}\n  IdentitiesOnly yes\n  UserKnownHostsFile ${knownHosts}\n  StrictHostKeyChecking yes\n`;
+  const keyType = host.keyType ?? "ed25519";
+  return `# pi-profile-ssh: ${host.alias}\nHost ${hostTokens(host).join(" ")}\n  HostName ${target}\n  User ${host.user}\n  Port ${host.port}\n  IdentityFile ${privateKey}\n  IdentitiesOnly yes\n${keyType === "rsa" ? "  PubkeyAcceptedAlgorithms +ssh-rsa\n" : ""}  UserKnownHostsFile ${knownHosts}\n  StrictHostKeyChecking yes\n`;
 }
 
-async function ensureKey(directory: string): Promise<{ privateKey: string; publicKey: string }> {
-  const privateKey = join(directory, "id_ed25519"), publicKey = `${privateKey}.pub`;
-  if (existsSync(privateKey) !== existsSync(publicKey)) throw new Error("The profile SSH key pair is incomplete. Restore it or remove both files before retrying.");
+async function ensureKey(directory: string, keyType: ProfileSshKeyType): Promise<{ privateKey: string; publicKey: string }> {
+  const privateKey = join(directory, keyType === "rsa" ? "id_rsa" : "id_ed25519"), publicKey = `${privateKey}.pub`;
+  if (existsSync(privateKey) !== existsSync(publicKey)) throw new Error(`The profile ${keyType} SSH key pair is incomplete. Restore it or remove both files before retrying.`);
   if (!existsSync(privateKey)) {
-    const generated = await command("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-f", privateKey, "-C", `pi-profile@${profileDirectory()}`]);
+    const generated = await command("ssh-keygen", keyType === "rsa"
+      ? ["-q", "-t", "rsa", "-b", "4096", "-N", "", "-f", privateKey, "-C", `pi-profile@${profileDirectory()}`]
+      : ["-q", "-t", "ed25519", "-N", "", "-f", privateKey, "-C", `pi-profile@${profileDirectory()}`]);
     if (generated.code !== 0) throw new Error(`ssh-keygen failed: ${generated.stderr.trim() || "unknown error"}`);
   }
   await chmod(privateKey, 0o600); await chmod(publicKey, 0o644);
   return { privateKey, publicKey };
 }
 
-async function hostFingerprint(host: string, port: number): Promise<{ key: string; fingerprint: string }> {
+async function hostFingerprint(host: string, port: number): Promise<{ key: string; fingerprint: string; banner: string }> {
   const scanned = await command("ssh-keyscan", ["-p", String(port), "-T", "10", host]);
   if (!scanned.stdout.trim()) throw new Error(`Could not retrieve an SSH host key: ${scanned.stderr.trim() || "connection failed"}`);
   const fingerprint = await command("ssh-keygen", ["-lf", "-"], { input: scanned.stdout });
   if (fingerprint.code !== 0) throw new Error(`Could not read the SSH host fingerprint: ${fingerprint.stderr.trim() || "invalid key"}`);
-  return { key: scanned.stdout, fingerprint: fingerprint.stdout.trim() };
+  return { key: scanned.stdout, fingerprint: fingerprint.stdout.trim(), banner: scanned.stderr };
 }
 
 function configuredHostTokens(source: string): Set<string> {
@@ -111,13 +122,13 @@ async function writeKnownHosts(path: string, key: string): Promise<void> {
   await chmod(path, 0o644);
 }
 
-type SshHostRow = { alias: string; hosts: string; user: string; port: string };
+type SshHostRow = { alias: string; hosts: string; user: string; port: string; keyType: ProfileSshKeyType };
 
 function SshHostTable({ hosts }: { hosts: SshHostRow[] }) {
-  const width = Math.max(80, process.stdout.columns ?? 80);
-  const available = width - 13;
-  const columns: Array<[string, number]> = [["ALIAS", Math.max(14, Math.floor(available * 0.2))], ["HOSTS", 0], ["USER", Math.max(12, Math.floor(available * 0.18))], ["PORT", 6]];
-  columns[1][1] = Math.max(16, available - columns[0][1] - columns[2][1] - columns[3][1]);
+  const width = Math.max(88, process.stdout.columns ?? 88);
+  const available = width - 16;
+  const columns: Array<[string, number]> = [["ALIAS", Math.max(14, Math.floor(available * 0.18))], ["HOSTS", 0], ["USER", Math.max(12, Math.floor(available * 0.16))], ["PORT", 6], ["KEY TYPE", 10]];
+  columns[1][1] = Math.max(16, available - columns[0][1] - columns[2][1] - columns[3][1] - columns[4][1]);
   const clip = (value: string, columnWidth: number) => value.length <= columnWidth ? value : `${value.slice(0, Math.max(0, columnWidth - 1))}…`;
   const cell = (value: string, columnWidth: number) => clip(value, columnWidth).padEnd(columnWidth);
   const line = `┼${columns.map(([, columnWidth]) => "─".repeat(columnWidth + 2)).join("┼")}┼`;
@@ -130,8 +141,8 @@ function SshHostTable({ hosts }: { hosts: SshHostRow[] }) {
     React.createElement(Text, { color: "cyan", bold: true }, row(columns.map(([name]) => name))),
     React.createElement(Text, { color: "gray" }, line),
     ...(hosts.length
-      ? hosts.map((host) => React.createElement(Text, { color: "white", key: host.alias }, row([host.alias, host.hosts, host.user, host.port])))
-      : [React.createElement(Text, { color: "gray", key: "empty" }, row(["—", "No Pi-managed SSH hosts configured", "—", "—"]))]),
+      ? hosts.map((host) => React.createElement(Text, { color: "white", key: host.alias }, row([host.alias, host.hosts, host.user, host.port, host.keyType])))
+      : [React.createElement(Text, { color: "gray", key: "empty" }, row(["—", "No Pi-managed SSH hosts configured", "—", "—", "—"]))]),
     React.createElement(Text, { color: "gray" }, bottom),
   );
 }
@@ -162,8 +173,8 @@ async function deleteProfileSshHost(alias: string): Promise<void> {
 async function listProfileSshHosts(): Promise<void> {
   const path = join(profileDirectory(), ".ssh", "config");
   const config = existsSync(path) ? await readFile(path, "utf8") : "";
-  const hosts = [...config.matchAll(/^# pi-profile-ssh: ([^\r\n]+)\r?\nHost ([^\r\n]+)[\s\S]*?^  User ([^\r\n]+)\r?\n  Port (\d+)$/gim)]
-    .map((match) => ({ alias: match[1], hosts: match[2], user: match[3], port: match[4] }));
+  const hosts = [...config.matchAll(/^# pi-profile-ssh: ([^\r\n]+)\r?\nHost ([^\r\n]+)[\s\S]*?^  User ([^\r\n]+)\r?\n  Port (\d+)\r?\n  IdentityFile ([^\r\n]+)$/gim)]
+    .map((match) => ({ alias: match[1], hosts: match[2], user: match[3], port: match[4], keyType: match[5].endsWith("id_rsa") ? "rsa" as const : "ed25519" as const }));
   const app = render(React.createElement(SshHostTable, { hosts }), { stdout: process.stdout, stdin: process.stdin, exitOnCtrlC: false, patchConsole: false });
   await new Promise((resolveRender) => setTimeout(resolveRender, 25));
   app.unmount();
@@ -179,14 +190,16 @@ export async function addProfileSshHost(alias: string): Promise<void> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Port must be an integer between 1 and 65535.");
   const user = await ask("Remote user");
   if (!validUser(user)) throw new Error("Invalid remote user.");
-  const host: SshHost = { alias, ...(hostname ? { hostname } : {}), ...(ip ? { ip } : {}), port, user };
+  const connection = { alias, hostname, ip, port, user };
   const directory = join(profileDirectory(), ".ssh"), config = join(directory, "config"), knownHosts = join(directory, "known_hosts");
   await mkdir(directory, { recursive: true, mode: 0o700 }); await chmod(directory, 0o700);
   const currentConfig = existsSync(config) ? await readFile(config, "utf8") : "";
-  assertHostTokensAvailable(currentConfig, hostTokens(host));
-  const { privateKey, publicKey } = await ensureKey(directory);
-  const fingerprint = await hostFingerprint(host.ip ?? host.hostname!, port);
-  process.stdout.write(`\nSSH host fingerprint:\n${fingerprint.fingerprint}\n`);
+  assertHostTokensAvailable(currentConfig, hostTokens(connection));
+  const fingerprint = await hostFingerprint(ip, port);
+  const keyType = profileSshKeyTypeForBanner(fingerprint.banner);
+  const host: SshHost = { ...connection, keyType };
+  const { privateKey, publicKey } = await ensureKey(directory, keyType);
+  process.stdout.write(`\nSSH host fingerprint:\n${fingerprint.fingerprint}\nUsing profile ${keyType === "rsa" ? "RSA-4096 (legacy server compatibility)" : "Ed25519"} key.\n`);
   const confirmation = await ask("Trust this host key? [y/N]", "N");
   if (!/^(y|yes)$/i.test(confirmation)) throw new Error("SSH host key was not trusted.");
 
