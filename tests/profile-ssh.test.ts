@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { profileSshConfigBlock, profileSshVerificationArgs } from "../extensions/profile-ssh.ts";
+import { profileSshConfigBlock, profileSshVerificationArgs, removeProfileSshConfigBlock } from "../extensions/profile-ssh.ts";
 
 test("writes a profile SSH config block for alias, hostname, and IP", () => {
   const block = profileSshConfigBlock(
@@ -18,6 +18,23 @@ Host banco-prod db.internal 10.1.1.1
   UserKnownHostsFile /root/.pi/agent/profiles/financeiro/.ssh/known_hosts
   StrictHostKeyChecking yes
 `);
+});
+
+test("removes only the selected Pi-managed SSH config block", () => {
+  const test1 = profileSshConfigBlock(
+    { alias: "test1", hostname: "test1", ip: "10.1.2.3", port: 22, user: "root" },
+    "/profile/.ssh/id_ed25519",
+    "/profile/.ssh/known_hosts",
+  );
+  const test2 = profileSshConfigBlock(
+    { alias: "test2", hostname: "test2", ip: "10.1.2.4", port: 22, user: "root" },
+    "/profile/.ssh/id_ed25519",
+    "/profile/.ssh/known_hosts",
+  );
+  const removed = removeProfileSshConfigBlock(`${test1}\n${test2}`, "test1");
+  assert.equal(removed.hostName, "10.1.2.3");
+  assert.doesNotMatch(removed.config, /test1/);
+  assert.match(removed.config, /# pi-profile-ssh: test2/);
 });
 
 test("validates a profile host with password authentication disabled", () => {

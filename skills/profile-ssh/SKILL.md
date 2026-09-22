@@ -41,11 +41,13 @@ pi profile <profile> add <alias>
 
 The setup uses the alias as the default hostname, then asks for the IP address, port, and remote user. It shows the server fingerprint for confirmation, creates or reuses the profile's Ed25519 key, and first tests that key without password fallback. If authorization is needed, `ssh-copy-id` prompts for the remote password once; the setup only saves the host after the same key-only validation succeeds.
 
-List profile-managed hosts with:
+List or remove profile-managed hosts with:
 
 ```bash
 pi ssh list
 pi profile <profile> ssh list
+pi ssh delete <alias>
+pi profile <profile> ssh delete <alias>
 ```
 
 ## Safe connection checks

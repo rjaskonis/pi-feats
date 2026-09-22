@@ -1,4 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Box, render, Text } from "ink";
+import React from "react";
 import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -92,11 +94,15 @@ function assertHostTokensAvailable(source: string, tokens: string[]) {
   if (conflict) throw new Error(`SSH host '${conflict}' already exists in the profile SSH config.`);
 }
 
+async function replaceConfig(path: string, content: string): Promise<void> {
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(temporary, content, { mode: 0o600 });
+  await rename(temporary, path); await chmod(path, 0o600);
+}
+
 async function appendConfig(path: string, block: string): Promise<void> {
   const current = existsSync(path) ? await readFile(path, "utf8") : "";
-  const temporary = `${path}.${process.pid}.tmp`;
-  await writeFile(temporary, `${current.trimEnd()}${current.trim() ? "\n\n" : ""}${block}`, { mode: 0o600 });
-  await rename(temporary, path); await chmod(path, 0o600);
+  await replaceConfig(path, `${current.trimEnd()}${current.trim() ? "\n\n" : ""}${block}`);
 }
 
 async function writeKnownHosts(path: string, key: string): Promise<void> {
@@ -105,14 +111,62 @@ async function writeKnownHosts(path: string, key: string): Promise<void> {
   await chmod(path, 0o644);
 }
 
+type SshHostRow = { alias: string; hosts: string; user: string; port: string };
+
+function SshHostTable({ hosts }: { hosts: SshHostRow[] }) {
+  const width = Math.max(80, process.stdout.columns ?? 80);
+  const available = width - 13;
+  const columns: Array<[string, number]> = [["ALIAS", Math.max(14, Math.floor(available * 0.2))], ["HOSTS", 0], ["USER", Math.max(12, Math.floor(available * 0.18))], ["PORT", 6]];
+  columns[1][1] = Math.max(16, available - columns[0][1] - columns[2][1] - columns[3][1]);
+  const clip = (value: string, columnWidth: number) => value.length <= columnWidth ? value : `${value.slice(0, Math.max(0, columnWidth - 1))}…`;
+  const cell = (value: string, columnWidth: number) => clip(value, columnWidth).padEnd(columnWidth);
+  const line = `┼${columns.map(([, columnWidth]) => "─".repeat(columnWidth + 2)).join("┼")}┼`;
+  const top = line.replaceAll("┼", "┬").replace(/^┬/, "┌").replace(/┬$/, "┐");
+  const bottom = line.replaceAll("┼", "┴").replace(/^┴/, "└").replace(/┴$/, "┘");
+  const row = (values: string[]) => `│ ${values.map((value, index) => cell(value, columns[index][1])).join(" │ ")} │`;
+  return React.createElement(Box, { flexDirection: "column" },
+    React.createElement(Text, { color: "cyan", bold: true }, "PROFILE SSH HOSTS"),
+    React.createElement(Text, { color: "gray" }, top),
+    React.createElement(Text, { color: "cyan", bold: true }, row(columns.map(([name]) => name))),
+    React.createElement(Text, { color: "gray" }, line),
+    ...(hosts.length
+      ? hosts.map((host) => React.createElement(Text, { color: "white", key: host.alias }, row([host.alias, host.hosts, host.user, host.port])))
+      : [React.createElement(Text, { color: "gray", key: "empty" }, row(["—", "No Pi-managed SSH hosts configured", "—", "—"]))]),
+    React.createElement(Text, { color: "gray" }, bottom),
+  );
+}
+
+export function removeProfileSshConfigBlock(config: string, alias: string): { config: string; hostName: string } {
+  const lines = config.split(/\r?\n/);
+  const marker = `# pi-profile-ssh: ${alias}`;
+  const start = lines.findIndex((line) => line === marker);
+  if (start < 0) throw new Error(`Pi-managed SSH host '${alias}' was not found.`);
+  const end = lines.findIndex((line, index) => index > start && line === "  StrictHostKeyChecking yes");
+  if (end < 0) throw new Error(`Pi-managed SSH host '${alias}' has an incomplete config block.`);
+  const hostLine = lines.slice(start, end + 1).find((line) => line.startsWith("  HostName "));
+  if (!hostLine) throw new Error(`Pi-managed SSH host '${alias}' has no HostName.`);
+  const remaining = [...lines.slice(0, start), ...lines.slice(end + 1)].join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  return { config: remaining ? `${remaining}\n` : "", hostName: hostLine.slice("  HostName ".length) };
+}
+
+async function deleteProfileSshHost(alias: string): Promise<void> {
+  if (!validAlias(alias)) throw new Error("Invalid host name. Use letters, numbers, hyphens, or underscores (max. 64 characters).");
+  const directory = join(profileDirectory(), ".ssh"), configPath = join(directory, "config"), knownHosts = join(directory, "known_hosts");
+  if (!existsSync(configPath)) throw new Error(`Pi-managed SSH host '${alias}' was not found.`);
+  const removed = removeProfileSshConfigBlock(await readFile(configPath, "utf8"), alias);
+  await replaceConfig(configPath, removed.config);
+  if (existsSync(knownHosts)) await command("ssh-keygen", ["-R", removed.hostName, "-f", knownHosts]);
+  process.stdout.write(`SSH host '${alias}' deleted from ${configPath}.\n`);
+}
+
 async function listProfileSshHosts(): Promise<void> {
   const path = join(profileDirectory(), ".ssh", "config");
-  if (!existsSync(path)) { process.stdout.write("No SSH hosts configured for this profile.\n"); return; }
-  const config = await readFile(path, "utf8");
-  const rows = [...config.matchAll(/^# pi-profile-ssh: ([^\r\n]+)\r?\nHost ([^\r\n]+)[\s\S]*?^  User ([^\r\n]+)\r?\n  Port (\d+)$/gim)]
+  const config = existsSync(path) ? await readFile(path, "utf8") : "";
+  const hosts = [...config.matchAll(/^# pi-profile-ssh: ([^\r\n]+)\r?\nHost ([^\r\n]+)[\s\S]*?^  User ([^\r\n]+)\r?\n  Port (\d+)$/gim)]
     .map((match) => ({ alias: match[1], hosts: match[2], user: match[3], port: match[4] }));
-  if (!rows.length) { process.stdout.write("No Pi-managed SSH hosts configured for this profile.\n"); return; }
-  for (const row of rows) process.stdout.write(`${row.alias}\t${row.hosts}\t${row.user}\t${row.port}\n`);
+  const app = render(React.createElement(SshHostTable, { hosts }), { stdout: process.stdout, stdin: process.stdin, exitOnCtrlC: false, patchConsole: false });
+  await new Promise((resolveRender) => setTimeout(resolveRender, 25));
+  app.unmount();
 }
 
 export async function addProfileSshHost(alias: string): Promise<void> {
@@ -173,7 +227,12 @@ export async function handleProfileSshCli(args: string[]): Promise<boolean> {
     catch (error) { process.stderr.write(`SSH setup failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; }
     return true;
   }
-  process.stderr.write("Usage: pi ssh add <host-name> | pi ssh list\n"); process.exitCode = 1;
+  if ((args[1] === "delete" || args[1] === "remove") && args[2] && !args[3]) {
+    try { await deleteProfileSshHost(args[2]); }
+    catch (error) { process.stderr.write(`SSH setup failed: ${error instanceof Error ? error.message : String(error)}\n`); process.exitCode = 1; }
+    return true;
+  }
+  process.stderr.write("Usage: pi ssh add <host-name> | pi ssh list | pi ssh delete <host-name>\n"); process.exitCode = 1;
   return true;
 }
 
