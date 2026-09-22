@@ -99,13 +99,35 @@ async function readJson(path: string): Promise<ProfileSettings> {
   }
 }
 
-function sharedResources(root: string, policy: ProfilePolicy = {}, localSkillsDir?: string) {
-  // Extensions are loaded through Pi package settings. Do not materialize paths
-  // from the native extensions directory: a Git package lives outside it.
+async function packageSkillRoots(root: string): Promise<string[]> {
+  let settings: ProfileSettings = {};
+  try { settings = await readJson(join(root, "settings.json")); } catch { return []; }
+  const roots: string[] = [];
+  if (!Array.isArray(settings.packages)) return roots;
+  for (const entry of settings.packages) {
+    const source = typeof entry === "object" && entry !== null ? (entry as { source?: unknown }).source : entry;
+    if (typeof source !== "string") continue;
+    const packagePath = packageInstallPath(root, source);
+    if (!packagePath) continue;
+    try {
+      const manifest = JSON.parse(await readFile(join(packagePath, "package.json"), "utf8")) as { pi?: { skills?: unknown } };
+      if (Array.isArray(manifest.pi?.skills)) for (const skill of manifest.pi.skills) if (typeof skill === "string" && existsSync(join(packagePath, skill))) roots.push(join(packagePath, skill));
+    } catch {}
+  }
+  return roots;
+}
+
+export async function sharedResources(root: string, policy: ProfilePolicy = {}, localSkillsDir?: string) {
+  // Extensions are loaded through Pi package settings. Named profiles need
+  // package Skill paths materialized explicitly because their settings omit
+  // packages and Pi otherwise only discovers workspace-local skills.
+  const selectedSharedSkills = !policy.enabledSkills || policy.enabledSkills.includes("*");
+  const packageSkills = policy.skillSources?.shared === false ? [] : (await packageSkillRoots(root)).flatMap((skillRoot) => selectedSharedSkills ? [skillRoot] : policy.enabledSkills!.map((name) => join(skillRoot, name)).filter(existsSync));
   return {
     skills: [
       ...(policy.skillSources?.profile === true && localSkillsDir ? (!policy.enabledProfileSkills || policy.enabledProfileSkills.includes("*") ? [localSkillsDir] : policy.enabledProfileSkills.map((name) => join(localSkillsDir, name)).filter(existsSync)) : []),
-      ...(policy.skillSources?.shared !== false ? (!policy.enabledSkills || policy.enabledSkills.includes("*") ? [join(root, "skills")] : policy.enabledSkills.map((name) => join(root, "skills", name)).filter(existsSync)) : []),
+      ...(policy.skillSources?.shared !== false ? (selectedSharedSkills ? [join(root, "skills")] : policy.enabledSkills!.map((name) => join(root, "skills", name)).filter(existsSync)) : []),
+      ...packageSkills,
     ],
     prompts: [join(root, "prompts")],
     themes: [join(root, "themes")],
@@ -167,11 +189,11 @@ export async function rootRuntimeSources(root: string, base: ProfileSettings): P
   return [...sources];
 }
 
-function profileSettings(root: string, base: ProfileSettings, localSkillsDir: string): ProfileSettings {
+async function profileSettings(root: string, base: ProfileSettings, localSkillsDir: string): Promise<ProfileSettings> {
   const { packages: _packages, extensions: _extensions, ...profileBase } = base;
   return {
     ...profileBase,
-    ...sharedResources(root, { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], skillSources: { shared: true, profile: false } }, localSkillsDir),
+    ...await sharedResources(root, { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], skillSources: { shared: true, profile: false } }, localSkillsDir),
     defaultTools: ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"],
     profile: {
       enabledTools: ["*"],
@@ -250,7 +272,7 @@ async function createProfile(name: string) {
   await mkdir(join(destination, "sessions"), { recursive: true });
   const baseSettingsPath = join(root, "settings.json");
   const base = existsSync(baseSettingsPath) ? await readJson(baseSettingsPath) : {};
-  await writeFile(join(destination, "settings.json"), `${JSON.stringify({ ...profileSettings(root, base, join(destination, "skills")), sandbox: true }, null, 2)}\n`);
+  await writeFile(join(destination, "settings.json"), `${JSON.stringify({ ...await profileSettings(root, base, join(destination, "skills")), sandbox: true }, null, 2)}\n`);
   await ensureProfileSandbox(destination, resolve(process.argv[1]));
   await writeFile(join(destination, "SOUL.md"), "");
   await writeFile(join(destination, "guardrails.json"), "{\n  \"guardrails\": []\n}\n");
@@ -346,7 +368,7 @@ async function syncProfileResources(name: string) {
   delete settings.packages;
   delete settings.extensions;
   if (settings.profile) delete settings.profile.enabledExtensions;
-  Object.assign(settings, sharedResources(root, settings.profile, join(profileDir(name), "skills")));
+  Object.assign(settings, await sharedResources(root, settings.profile, join(profileDir(name), "skills")));
   await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
   await removeProfileRuntimeArtifacts(profileDir(name));
   await linkSharedModels(root, profileDir(name));

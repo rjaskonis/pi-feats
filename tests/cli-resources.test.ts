@@ -6,7 +6,7 @@ import test from "node:test";
 import { activeBuiltinTools, updatedBuiltinTools } from "../extensions/lib/builtin-tools.ts";
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
 import { skillRows } from "../extensions/cli-resources.ts";
-import { rootRuntimeSources } from "../extensions/profiles.ts";
+import { rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
 
 test("profile Skills use enabledProfileSkills when listed", async () => {
   const root = await mkdtemp(join(tmpdir(), "cli-resources-test-"));
@@ -73,6 +73,22 @@ test("profile tool resources never attribute builtins from a package tool catalo
     assert.equal(resources.filter((tool) => tool.name === "ls").length, 1);
     assert.equal(resources.find((tool) => tool.name === "ls")?.source, "builtin");
     assert.equal(resources.find((tool) => tool.name === "test_tool")?.package, "test-tools");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("named profiles materialize skills declared by enabled packages", async () => {
+  const root = await mkdtemp(join(tmpdir(), "profile-package-skills-test-"));
+  try {
+    const packageDir = join(root, "npm", "node_modules", "test-skills");
+    await mkdir(join(packageDir, "skills", "profile-ssh"), { recursive: true });
+    await writeFile(join(root, "settings.json"), JSON.stringify({ packages: ["npm:test-skills"] }));
+    await writeFile(join(packageDir, "package.json"), JSON.stringify({ name: "test-skills", pi: { skills: ["./skills"] } }));
+    await writeFile(join(packageDir, "skills", "profile-ssh", "SKILL.md"), "---\nname: profile-ssh\ndescription: Test skill\n---\n");
+
+    const resources = await sharedResources(root, { enabledSkills: ["*"], skillSources: { shared: true } });
+    assert.ok(resources.skills.includes(join(packageDir, "skills")));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
