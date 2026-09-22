@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { profileSshConfigBlock, profileSshKeyTypeForBanner, profileSshVerificationArgs, removeProfileSshConfigBlock } from "../extensions/profile-ssh.ts";
+import { profileSshCommandArgs, profileSshConfigBlock, profileSshKeyTypeForBanner, profileSshVerificationArgs, removeProfileSshConfigBlock } from "../extensions/profile-ssh.ts";
 
 test("writes a profile SSH config block for alias, hostname, and IP", () => {
   const block = profileSshConfigBlock(
@@ -18,6 +18,15 @@ Host banco-prod db.internal 10.1.1.1
   UserKnownHostsFile /root/.pi/agent/profiles/financeiro/.ssh/known_hosts
   StrictHostKeyChecking yes
 `);
+});
+
+test("recognizes SSH commands after named-profile runtime flags", () => {
+  assert.deepEqual(profileSshCommandArgs([
+    "--extension", "/root/extensions/profiles.ts",
+    "--extension=/root/extensions/profile-ssh.ts",
+    "--session-dir", "/root/profiles/ops/sessions",
+    "ssh", "add", "clinion-sl-fs",
+  ]), ["ssh", "add", "clinion-sl-fs"]);
 });
 
 test("selects RSA for OpenSSH versions that predate Ed25519 support", () => {

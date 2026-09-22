@@ -228,6 +228,19 @@ export async function addProfileSshHost(alias: string): Promise<void> {
   process.stdout.write(`SSH host '${alias}' added to ${config}.\n`);
 }
 
+// Named profiles are re-executed with runtime-only extension/session flags
+// before the actual command. Strip those pairs before dispatching SSH actions.
+export function profileSshCommandArgs(raw: string[]): string[] {
+  const args: string[] = [];
+  for (let index = 0; index < raw.length; index += 1) {
+    const value = raw[index];
+    if (value === "--extension" || value === "--session-dir") { index += 1; continue; }
+    if (value.startsWith("--extension=") || value.startsWith("--session-dir=")) continue;
+    args.push(value);
+  }
+  return args;
+}
+
 export async function handleProfileSshCli(args: string[]): Promise<boolean> {
   if (args[0] !== "ssh") return false;
   if (args[1] === "add" && args[2] && !args[3]) {
@@ -250,5 +263,5 @@ export async function handleProfileSshCli(args: string[]): Promise<boolean> {
 }
 
 export default async function (_pi: ExtensionAPI) {
-  if (await handleProfileSshCli(process.argv.slice(2))) process.exit();
+  if (await handleProfileSshCli(profileSshCommandArgs(process.argv.slice(2)))) process.exit();
 }
