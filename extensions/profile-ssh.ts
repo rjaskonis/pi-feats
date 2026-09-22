@@ -43,12 +43,19 @@ async function ask(label: string, defaultValue?: string): Promise<string> {
   finally { prompt.close(); }
 }
 
-async function interactiveCommand(command: string, args: string[]): Promise<number> {
+async function interactiveCommand(command: string, args: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
   return await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: "inherit" });
+    const child = spawn(command, args, { stdio: "inherit", env });
     child.once("error", reject);
     child.once("exit", (code) => resolve(code ?? 1));
   });
+}
+
+export function profileSshCopyEnvironment(profileDir: string, base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  // ssh-copy-id creates temporary files below ~/.ssh. Named-profile sandboxes
+  // may read but cannot write the host user's home directory, so keep those
+  // files in the profile workspace alongside the profile key/config instead.
+  return { ...base, HOME: profileDir };
 }
 
 export function profileSshVerificationArgs(config: string, alias: string): string[] {
@@ -213,7 +220,7 @@ export async function addProfileSshHost(alias: string): Promise<void> {
     if (verified.code !== 0) {
       if (!process.stdin.isTTY) throw new Error(`Profile key is not authorized and a password cannot be requested without a terminal: ${verified.stderr.trim() || "connection failed"}`);
       process.stdout.write("The profile key is not authorized yet. ssh-copy-id will request the remote password once.\n");
-      const copied = await interactiveCommand("ssh-copy-id", ["-i", publicKey, "-F", temporaryConfig, alias]);
+      const copied = await interactiveCommand("ssh-copy-id", ["-i", publicKey, "-F", temporaryConfig, alias], profileSshCopyEnvironment(profileDirectory()));
       if (copied !== 0) throw new Error("ssh-copy-id failed.");
       verified = await command("ssh", profileSshVerificationArgs(temporaryConfig, alias));
     }

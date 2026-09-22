@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { profileSshCommandArgs, profileSshConfigBlock, profileSshKeyTypeForBanner, profileSshVerificationArgs, removeProfileSshConfigBlock } from "../extensions/profile-ssh.ts";
+import { profileSshCommandArgs, profileSshConfigBlock, profileSshCopyEnvironment, profileSshKeyTypeForBanner, profileSshVerificationArgs, removeProfileSshConfigBlock } from "../extensions/profile-ssh.ts";
 
 test("writes a profile SSH config block for alias, hostname, and IP", () => {
   const block = profileSshConfigBlock(
@@ -18,6 +18,12 @@ Host banco-prod db.internal 10.1.1.1
   UserKnownHostsFile /root/.pi/agent/profiles/financeiro/.ssh/known_hosts
   StrictHostKeyChecking yes
 `);
+});
+
+test("runs ssh-copy-id with the profile home instead of the host home", () => {
+  const environment = profileSshCopyEnvironment("/home/rj/.pi/agent/profiles/ops", { HOME: "/home/rj", PATH: "/usr/bin" });
+  assert.equal(environment.HOME, "/home/rj/.pi/agent/profiles/ops");
+  assert.equal(environment.PATH, "/usr/bin");
 });
 
 test("recognizes SSH commands after named-profile runtime flags", () => {
