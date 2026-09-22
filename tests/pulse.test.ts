@@ -53,6 +53,20 @@ test("claims a due pulse once until its execution completes", async () => {
   });
 });
 
+test("claims different due Pulses independently while keeping each Pulse exclusive", async () => {
+  await withStore((path, store) => {
+    const first = store.create({ name: "first-report", description: "First", schedule: "* * * * *", prompt: "Run", profile: "support", thread_session_id: "session" });
+    const second = store.create({ name: "second-report", description: "Second", schedule: "* * * * *", prompt: "Run", profile: "support", thread_session_id: "session" });
+    const db = new DatabaseSync(path);
+    for (const pulse of [first, second]) db.prepare("UPDATE pulse_control SET next_run_at=? WHERE pulse_id=?").run("2020-01-01T00:00:00.000Z", pulse.id);
+
+    const claimed = store.claimDue("2026-01-01T00:00:00.000Z", "tick-a");
+    assert.equal(claimed.length, 2);
+    assert.deepEqual(new Set(claimed.map((item) => item.pulse.name)), new Set(["first-report", "second-report"]));
+    assert.equal(store.claimDue("2026-01-01T00:00:01.000Z", "tick-b").length, 0);
+  });
+});
+
 test("database rejects a second active run even from a legacy writer", async () => {
   await withStore((path, store) => {
     const pulse = store.create({ name: "exclusive-report", description: "Report", schedule: "* * * * *", prompt: "Run", profile: "support", thread_session_id: "session" });
@@ -80,6 +94,20 @@ test("only one tick daemon can hold the SQLite lease", async () => {
     assert.equal(new PulseStore(_path).claimTickLease("tick-b"), false);
     store.releaseTickLease("tick-a");
     assert.equal(new PulseStore(_path).claimTickLease("tick-b"), true);
+  });
+});
+
+test("operator recovery releases expired claims without allowing automatic duplicate work", async () => {
+  await withStore((path, store) => {
+    const pulse = store.create({ name: "stale-report", description: "Report", schedule: "* * * * *", prompt: "Run", profile: "support", thread_session_id: "session" });
+    new DatabaseSync(path).prepare("UPDATE pulse_control SET next_run_at=? WHERE pulse_id=?").run("2020-01-01T00:00:00.000Z", pulse.id);
+    const [claimed] = store.claimDue("2026-01-01T00:00:00.000Z", "tick-a", 1);
+    assert.equal(store.expiredClaims("support", "2026-01-01T00:01:00.000Z"), 1);
+    assert.equal(store.claimDue("2026-01-01T00:01:00.000Z", "tick-b").length, 0);
+    assert.equal(store.recoverExpiredClaims("support", "2026-01-01T00:01:00.000Z"), 1);
+    assert.equal(store.runs("support", "stale-report", "2019-01-01T00:00:00.000Z", "2030-01-01T00:00:00.000Z")[0].status, "error");
+    assert.equal(store.due("2030-01-01T00:00:00.000Z").length, 1);
+    void claimed;
   });
 });
 

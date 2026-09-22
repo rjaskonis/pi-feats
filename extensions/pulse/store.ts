@@ -137,11 +137,26 @@ export class PulseStore {
   }
   setRunSession(runId: string, sessionId: string): void { this.db.prepare("UPDATE pulse_runs SET session_id=? WHERE id=? AND status='running'").run(sessionId, runId); }
   renewClaim(pulseId: string, runId: string, owner: string, leaseMs = 15 * 60_000): boolean { return Boolean(this.db.prepare("UPDATE pulse_control SET lease_expires_at=?,updated_at=? WHERE pulse_id=? AND active_run_id=? AND claim_owner=?").run(new Date(Date.now() + leaseMs).toISOString(), iso(), pulseId, runId, owner).changes); }
-  recoverExpiredClaims(now = iso()): number {
-    // An expired lease proves the scheduler stopped renewing it, not that its
-    // child Pi process is dead. Keep the active run intact: safety wins over
-    // automatic retry, and no tick may duplicate an ambiguous execution.
-    return Number((this.db.prepare("SELECT COUNT(*) AS count FROM pulse_control WHERE active_run_id IS NOT NULL AND lease_expires_at IS NOT NULL AND lease_expires_at<=?").get(now) as Row).count);
+  expiredClaims(profile?: string, now = iso()): number {
+    const filter = profile ? " AND c.profile=?" : "";
+    return Number((this.db.prepare(`SELECT COUNT(*) AS count FROM pulse_control c WHERE c.active_run_id IS NOT NULL AND c.lease_expires_at IS NOT NULL AND c.lease_expires_at<=?${filter}`).get(now, ...(profile ? [profile] : [])) as Row).count);
+  }
+  recoverExpiredClaims(profile?: string, now = iso()): number {
+    // Recovery is deliberately operator-triggered. A lease expiring alone does
+    // not prove that a child process is dead, so automatic recovery could run
+    // the same work twice. An operator can use this after confirming the old
+    // scheduler/worker is gone (for example, after a container restart).
+    const filter = profile ? " AND c.profile=?" : "";
+    const rows = this.db.prepare(`SELECT p.*, c.profile, c.active_run_id FROM pulses p JOIN pulse_control c ON c.pulse_id=p.id WHERE c.active_run_id IS NOT NULL AND c.lease_expires_at IS NOT NULL AND c.lease_expires_at<=?${filter}`).all(now, ...(profile ? [profile] : [])) as Row[];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of rows) {
+        const pulse = this.pulse(row), runId = String(row.active_run_id), retry = nextRun(pulse.schedule, new Date(Date.now() + 60_000))?.toISOString() ?? null;
+        this.db.prepare("UPDATE pulse_runs SET finished_at=?,status='error',error=? WHERE id=? AND status='running'").run(now, "Recovered expired Pulse claim by operator.", runId);
+        this.db.prepare("UPDATE pulse_control SET next_run_at=?,claimed_at=NULL,active_run_id=NULL,claim_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE pulse_id=? AND active_run_id=?").run(retry, now, pulse.id, runId);
+      }
+      this.db.exec("COMMIT"); return rows.length;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
   complete(pulse: Pulse, runId: string, response: string, handoff?: string, owner = "unknown"): void {
     const now = iso(), next = nextRun(pulse.schedule)?.toISOString() ?? null;

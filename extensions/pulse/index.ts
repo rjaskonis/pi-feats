@@ -20,16 +20,16 @@ async function json<T>(path: string): Promise<T | undefined> { try { return JSON
 async function write(path: string, value: unknown, exclusive = false) { await mkdir(root(), { recursive: true }); await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: exclusive ? "wx" : "w" }); }
 
 /** The SQLite lease is the singleton authority; the state file is diagnostic only. */
-async function acquireTickLock(store: PulseStore): Promise<(() => Promise<void>) | undefined> {
+async function acquireTickLock(store: PulseStore): Promise<{ owner: string; release: () => Promise<void> } | undefined> {
   const owner = randomUUID();
   if (!store.claimTickLease(owner)) return undefined;
   const state: State = { pid: process.pid, owner, startedAt: new Date().toISOString() };
   await write(statePath(), state);
-  return async () => {
+  return { owner, release: async () => {
     store.releaseTickLease(owner);
     const current = await json<State>(statePath());
     if (current?.owner === owner) await unlink(statePath()).catch(() => {});
-  };
+  } };
 }
 
 export async function profileModelArgs(profile: string, agentDir = root()): Promise<string[]> {
@@ -110,24 +110,35 @@ async function executePulse(store: PulseStore, pulse: Awaited<ReturnType<PulseSt
 }
 async function tick() {
   const store = new PulseStore(dbPath());
-  const release = await acquireTickLock(store);
-  if (!release) return console.log("Pulse tick is already running.");
-  const owner = (await json<State>(statePath()))?.owner;
-  if (!owner) { await release(); throw new Error("Pulse tick lease owner was not persisted."); }
-  const expiredClaims = store.recoverExpiredClaims();
-  if (expiredClaims) console.error(`Pulse tick found ${expiredClaims} expired active claim(s); leaving them locked to prevent duplicate execution.`);
+  const lock = await acquireTickLock(store);
+  if (!lock) return console.log("Pulse tick is already running.");
+  const { owner, release } = lock;
+  const expiredClaims = store.expiredClaims();
+  if (expiredClaims) console.error(`Pulse tick found ${expiredClaims} expired active claim(s). Run 'pi pulse recover' only after confirming their workers are gone.`);
   let stopped = false, wake: (() => void) | undefined;
+  const active = new Set<Promise<void>>();
+  const launch = (pulse: Awaited<ReturnType<PulseStore["claimDue"]>>[number]) => {
+    let task: Promise<void>;
+    task = executePulse(store, pulse, owner).catch((error) => console.error(`Unexpected failure in Pulse '${pulse.pulse.name}': ${error instanceof Error ? error.message : String(error)}`)).finally(() => active.delete(task));
+    active.add(task);
+  };
   const close = () => { stopped = true; wake?.(); };
   process.once("SIGTERM", close); process.once("SIGINT", close);
   try {
     while (!stopped) {
       if (!store.claimTickLease(owner)) { console.error("Pulse tick lost its SQLite lease; stopping."); break; }
-      for (const pulse of store.claimDue(undefined, owner)) { if (stopped) break; await executePulse(store, pulse, owner); }
+      // Claiming is atomic and exclusive per Pulse. Workers are intentionally
+      // launched independently so unrelated scheduled work can overlap.
+      for (const pulse of store.claimDue(undefined, owner)) { if (stopped) break; launch(pulse); }
       await new Promise<void>((resolve) => { wake = resolve; setTimeout(resolve, TICK_INTERVAL_MS); }); wake = undefined;
     }
-  } finally { await release(); }
+  } finally {
+    // Do not release the scheduler lease while this tick still owns work.
+    await Promise.allSettled([...active]);
+    await release();
+  }
 }
-export async function handlePulseCli(args: string[], selectedProfile?: string): Promise<boolean> { if (args[0] !== "pulse") return false; const profileIndex = args.indexOf("--profile"); const profile = selectedProfile ?? (profileIndex >= 0 ? args[profileIndex + 1] : undefined); if (args[1] === "tick" && process.env.PI_PULSE_TICK === "1") { await tick(); return true; } switch (args[1]) { case "start": await start(); break; case "stop": await stop(); break; case "restart": await restart(); break; case "status": await status(); break; case "list": table(profile); break; case "enable": case "disable": { const name = args[2]; if (!name) throw new Error("Usage: pi pulse enable|disable <name>"); new PulseStore(dbPath()).setEnabled(name, args[1] === "enable", profile); console.log(`Pulse '${name}' ${args[1]}d.`); break; } default: console.error("Usage: pi pulse start | stop | restart | status | list | enable <name> | disable <name>"); process.exitCode = 1; } return true; }
+export async function handlePulseCli(args: string[], selectedProfile?: string): Promise<boolean> { if (args[0] !== "pulse") return false; const profileIndex = args.indexOf("--profile"); const profile = selectedProfile ?? (profileIndex >= 0 ? args[profileIndex + 1] : undefined); if (args[1] === "tick" && process.env.PI_PULSE_TICK === "1") { await tick(); return true; } switch (args[1]) { case "start": await start(); break; case "stop": await stop(); break; case "restart": await restart(); break; case "status": await status(); break; case "list": table(profile); break; case "recover": { const recovered = new PulseStore(dbPath()).recoverExpiredClaims(profile); console.log(`Recovered ${recovered} expired Pulse claim(s).`); break; } case "enable": case "disable": { const name = args[2]; if (!name) throw new Error("Usage: pi pulse enable|disable <name>"); new PulseStore(dbPath()).setEnabled(name, args[1] === "enable", profile); console.log(`Pulse '${name}' ${args[1]}d.`); break; } default: console.error("Usage: pi pulse start | stop | restart | status | list | recover | enable <name> | disable <name>"); process.exitCode = 1; } return true; }
 export default async function (pi: ExtensionAPI) {
   if (await handlePulseCli(process.argv.slice(2))) process.exit();
   pi.on("before_agent_start", async (event) => ({ systemPrompt: `${event.systemPrompt}\n\nWhen the user asks to schedule, automate, remind, run future work, or manage an existing schedule, use the schedule tool. Do not ask for a thread or session ID: creation binds the schedule to this conversation automatically.` }));

@@ -282,6 +282,8 @@ Refreshing synchronizes the source and atomically replaces the complete installe
   pi pulse start
   pi pulse status
   pi pulse list
+  # After confirming an interrupted worker is no longer running:
+  pi pulse recover
   ```
 
 ### CLI resource management
