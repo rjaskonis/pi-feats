@@ -99,6 +99,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             { role: "system", content: "Determine whether the supplied context requires creating a persisted Sequential Workflow. Return only JSON with boolean requiresSequentialWorkflow and non-empty reasoning. Do not propose a template, tasks, or actions." },
             { role: "user", content: JSON.stringify({ origin, evidence, recentUserMessages: ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").slice(-4).map((entry: any) => entry.message.content) }) },
         ];
+        ctx.ui.setStatus("sequential-workflow-evaluation", "Evaluating whether Sequential Workflow is required…");
         try {
             const response: any = await (ctx.modelRegistry as any).completeSimple(ctx.model, messages, { signal: ctx.signal });
             const content = typeof response?.content === "string" ? response.content : (response?.content ?? []).map((part: any) => part.text ?? "").join("");
@@ -109,6 +110,9 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         }
         catch (error) {
             return { requiresSequentialWorkflow: true, reasoning: `Classifier failed closed: ${error instanceof Error ? error.message : String(error)}` };
+        }
+        finally {
+            ctx.ui.setStatus("sequential-workflow-evaluation", undefined);
         }
     };
     let namedFailure = false;
