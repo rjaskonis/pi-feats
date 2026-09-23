@@ -214,6 +214,36 @@ test("missing named template fails closed without creating a replacement", async
 });
 
 
+test("detected Sequential Workflow requirement creates a pending workflow that blocks work until hydrated", async () => {
+    const h = await setup();
+    try {
+        await h.hook("input", { text: "This skill requires a Sequential Workflow before work begins.", source: "interactive" });
+        const pending = (await h.call("status", {})).details.workflows[0];
+        assert.equal(pending.status, "pending_definition");
+        await h.hook("turn_start");
+        assert.equal((await h.hook("tool_call", { toolName: "bash", input: {} })).block, true);
+        const hydrated = ids(await h.call("create", definition()));
+        assert.equal(hydrated.workflowId, pending.id);
+        assert.equal((await h.call("status", hydrated)).details.workflow.status, "running");
+    }
+    finally {
+        await h.close();
+    }
+});
+test("only an explicit user override dismisses a pending workflow requirement", async () => {
+    const h = await setup();
+    try {
+        await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });
+        const pending = (await h.call("status", {})).details.workflows[0];
+        await h.hook("input", { text: "Don't create it; continue manually.", source: "interactive" });
+        assert.equal((await h.call("status", { workflowId: pending.id })).details.workflow.status, "cancelled");
+        assert.equal((await h.hook("context", { messages: [] })).messages.length, 0);
+    }
+    finally {
+        await h.close();
+    }
+});
+
 test("legacy migration preserves unowned executions without injecting or exposing them", async () => {
     const h = await setup(true);
     try {

@@ -9,7 +9,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import { createHash } from "node:crypto";
 type TaskType = "action" | "collect" | "evaluate" | "workflow";
 type TaskStatus = "pending" | "running" | "awaiting_user" | "waiting_subworkflow" | "evaluating" | "accepted" | "rejected" | "failed";
-type WorkflowStatus = "running" | "awaiting_user" | "evaluating" | "completed" | "cancelled" | "failed";
+type WorkflowStatus = "pending_definition" | "running" | "awaiting_user" | "evaluating" | "completed" | "cancelled" | "failed";
 type Task = {
     id: number;
     workflow_id: number;
@@ -136,7 +136,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
     const many = <T>(sql: string, ...params: SQLInputValue[]) => db.prepare(sql).all(...params) as T[];
     const event = (workflowId: number, taskId: number | null, phase: string, payload: unknown) => db.prepare("INSERT INTO workflow_events (workflow_id, task_id, phase, payload) VALUES (?, ?, ?, ?)").run(workflowId, taskId, phase, JSON.stringify(payload));
     const workflow = (id: number) => one<Workflow>("SELECT id, title, source, status, parent_workflow_id FROM workflows WHERE id = ?", id);
-    const isActive = (item: Workflow) => ["running", "awaiting_user", "evaluating"].includes(item.status);
+    const isActive = (item: Workflow) => ["pending_definition", "running", "awaiting_user", "evaluating"].includes(item.status);
     const currentTask = (workflowId: number) => one<Task>("SELECT id, workflow_id, position, type, instruction, criteria, status, attempts, result, evaluation, child_workflow_id FROM workflow_tasks WHERE workflow_id = ? AND status NOT IN ('accepted', 'failed') ORDER BY position LIMIT 1", workflowId);
     const taskSummary = (task: Task) => ({ id: task.id, position: task.position, type: task.type, instruction: task.instruction, criteria: task.criteria, status: task.status, attempts: task.attempts, childWorkflowId: task.child_workflow_id });
     const requireActiveWorkflow = (id: number) => { const item = workflow(id); if (!item)
@@ -210,11 +210,16 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
         else if (parentWorkflowId !== undefined && !workflow(parentWorkflowId))
             throw new Error(`Workflow pai #${parentWorkflowId} não existe.`);
         {
-            const inserted = db.prepare("INSERT INTO workflows (title, source, status, parent_workflow_id, session_id) VALUES (?, ?, 'running', ?, ?)").run(definition.title, definition.source, parentWorkflowId ?? null, harness.session());
-            const workflowId = Number(inserted.lastInsertRowid);
+            const pendingWorkflowId = parentTask ? undefined : harness.pendingWorkflow();
+            const workflowId = pendingWorkflowId ?? Number(db.prepare("INSERT INTO workflows (title, source, status, parent_workflow_id, session_id) VALUES (?, ?, 'running', ?, ?)").run(definition.title, definition.source, parentWorkflowId ?? null, harness.session()).lastInsertRowid);
+            if (pendingWorkflowId) {
+                db.prepare("UPDATE workflows SET title=?, source=?, status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(definition.title, definition.source, workflowId);
+                event(workflowId, null, "definition_supplied", { title: definition.title, taskCount: definition.tasks.length });
+            }
             const insertTask = db.prepare("INSERT INTO workflow_tasks (workflow_id, position, type, instruction, criteria, status) VALUES (?, ?, ?, ?, ?, 'pending')");
             definition.tasks.forEach((task, index) => insertTask.run(workflowId, index + 1, task.type, task.instruction, task.criteria ?? null));
-            event(workflowId, null, "created", { title: definition.title, taskCount: definition.tasks.length, parentWorkflowId: parentWorkflowId ?? null });
+            if (!pendingWorkflowId)
+                event(workflowId, null, "created", { title: definition.title, taskCount: definition.tasks.length, parentWorkflowId: parentWorkflowId ?? null });
             if (parentTask) {
                 db.prepare("UPDATE workflow_tasks SET child_workflow_id = ?, status = 'waiting_subworkflow', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(workflowId, parentTask.id);
                 event(parentTask.workflow_id, parentTask.id, "child_linked", { childWorkflowId: workflowId });
@@ -224,7 +229,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             return { content: [{ type: "text" as const, text: next.completed ? `Workflow #${workflowId} criado e concluído${suffix}` : `Workflow #${workflowId} criado${suffix} Execute somente a task #${next.task!.position}: ${next.task!.instruction}` }], details: { workflowId, parentWorkflowId: parentWorkflowId ?? null, parentTaskId: parentTask?.id ?? null, next } };
         }
     };
-    pi.registerTool({ name: "sequential_workflow_create", label: "Create Sequential Workflow", description: "Persiste um workflow e ativa sua primeira task, sem bloquear outros workflows.", promptSnippet: "Create a persisted sequential workflow", promptGuidelines: ["Use sequential_workflow_create only after the user explicitly names Sequential Workflow, sequential-workflow, workflow sequencial, or fluxo de trabalho sequencial and asks to create or execute it.", "A Collect task passed to sequential_workflow_create must include acceptance criteria."], parameters: Type.Object({ title: Type.String({ minLength: 1 }), source: Type.String({ minLength: 1 }), parentWorkflowId: Type.Optional(Type.Integer({ minimum: 1 })), parentTaskId: Type.Optional(Type.Integer({ minimum: 1 })), tasks: Type.Array(Type.Object({ type: taskType, instruction: Type.String({ minLength: 1 }), criteria: Type.Optional(Type.String({ minLength: 1 })) }), { minItems: 1 }) }), async execute(_id, params): Promise<{
+    pi.registerTool({ name: "sequential_workflow_create", label: "Create Sequential Workflow", description: "Persiste um workflow e ativa sua primeira task, sem bloquear outros workflows.", promptSnippet: "Create a persisted sequential workflow", promptGuidelines: ["Use sequential_workflow_create after the user explicitly requests Sequential Workflow or when the harness has focused a pending workflow definition that requires creation.", "A Collect task passed to sequential_workflow_create must include acceptance criteria."], parameters: Type.Object({ title: Type.String({ minLength: 1 }), source: Type.String({ minLength: 1 }), parentWorkflowId: Type.Optional(Type.Integer({ minimum: 1 })), parentTaskId: Type.Optional(Type.Integer({ minimum: 1 })), tasks: Type.Array(Type.Object({ type: taskType, instruction: Type.String({ minLength: 1 }), criteria: Type.Optional(Type.String({ minLength: 1 })) }), { minItems: 1 }) }), async execute(_id, params): Promise<{
             content: {
                 type: "text";
                 text: string;
@@ -239,7 +244,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             }[];
             details: Record<string, unknown>;
         }> { const loaded = await loadTemplate(params.path); return { content: [{ type: "text", text: `Template válido: ${loaded.path} (${loaded.template.tasks.length} tasks, SHA-256: ${loaded.hash}).` }], details: loaded }; } });
-    pi.registerTool({ name: "sequential_workflow_create_from_template", label: "Create Sequential Workflow from Template", description: "Lê um template JSON validado e cria um workflow.", promptSnippet: "Create and start a persisted Sequential Workflow from a validated JSON template", promptGuidelines: ["Use sequential_workflow_create_from_template only when the user explicitly names Sequential Workflow and asks to execute a JSON template."], parameters: Type.Object({ path: Type.String({ minLength: 1 }), parentWorkflowId: Type.Optional(Type.Integer({ minimum: 1 })), parentTaskId: Type.Optional(Type.Integer({ minimum: 1 })) }), async execute(_id, params): Promise<{
+    pi.registerTool({ name: "sequential_workflow_create_from_template", label: "Create Sequential Workflow from Template", description: "Lê um template JSON validado e cria um workflow.", promptSnippet: "Create and start a persisted Sequential Workflow from a validated JSON template", promptGuidelines: ["Use sequential_workflow_create_from_template when the user explicitly requests Sequential Workflow or when the harness has focused a pending workflow definition that requires creation."], parameters: Type.Object({ path: Type.String({ minLength: 1 }), parentWorkflowId: Type.Optional(Type.Integer({ minimum: 1 })), parentTaskId: Type.Optional(Type.Integer({ minimum: 1 })) }), async execute(_id, params): Promise<{
             content: {
                 type: "text";
                 text: string;
@@ -318,7 +323,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             details: Record<string, unknown>;
         }> {
             if (params.workflowId === undefined) {
-                const items = many<Workflow>("SELECT id, title, source, status, parent_workflow_id FROM workflows WHERE session_id = ? AND status IN ('running', 'awaiting_user', 'evaluating') ORDER BY id DESC", harness.session());
+                const items = many<Workflow>("SELECT id, title, source, status, parent_workflow_id FROM workflows WHERE session_id = ? AND status IN ('pending_definition', 'running', 'awaiting_user', 'evaluating') ORDER BY id DESC", harness.session());
                 return { content: [{ type: "text", text: items.length ? items.map((item) => `#${item.id} ${item.title} (${item.status})${item.parent_workflow_id ? `, pai #${item.parent_workflow_id}` : ""}; task #${currentTask(item.id)?.position ?? "nenhuma"}.`).join("\n") : "Não há workflows ativos." }], details: { workflows: items.map((item) => ({ ...item, currentTask: currentTask(item.id) })) } };
             }
             const item = workflow(params.workflowId);
