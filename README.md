@@ -10,6 +10,7 @@
 
 - [Glossary](#glossary)
 - [Features](#features)
+- [Context Memory](#context-memory)
 - [Command cookbook](#command-cookbook)
 - [Included extensions](#included-extensions)
 - [Installation](#installation)
@@ -28,6 +29,7 @@
 | **Identity Key mapping** | A rule that maps an external identity to an Application profile and session strategy. A single `*` mapping can be an explicit fallback. |
 | **Handoff** | Private context retained when an Application rolls a conversation into a replacement session. |
 | **Guardrail** | An ordered policy instruction executed at an input, tool, or output lifecycle stage. |
+| **Context Memory** | Bounded persistent operational and personal context loaded when a new session starts. |
 | **Shared Skill** | A Skill stored in the main Pi agent directory and selectively exposed to profiles. |
 | **Profile Skill** | A Skill stored in one profile directory and unavailable to other profiles unless explicitly copied or imported. |
 | **Skill Source** | A Git-backed staging catalog. Synchronizing it discovers Skills but does not activate them. |
@@ -56,6 +58,21 @@ Pi Coding Agent intentionally keeps its core lightweight and extensible. Pi Feat
 - Limit profile tools, shared Skills, and profile Skills through profile policy.
 - Keep extensions and packages in the default runtime; named profiles load those shared resources read-only and never clone or install them.
 - Load a profile-specific `SOUL.md` into every agent turn.
+- Select the default provider and model for each profile from the Console. After changing it, administrators can roll over active Application sessions so subsequent conversations use the new model.
+
+### Profile SSH
+
+Profile SSH is an optional, isolated host-registration mechanism. It complements normal SSH rather than replacing a user's global `~/.ssh/config`, agent, or keys.
+
+- Register, list, and delete SSH hosts for the active profile with `pi ssh add|list|delete <alias>`, or target a named profile with `pi profile <profile> ssh ...`.
+- Store aliases, keys, and known-host entries under `<PI_CODING_AGENT_DIR>/.ssh/`, keeping profile credentials separate from the host user's SSH configuration.
+- Require a hostname and IP address, display the scanned server fingerprint for explicit confirmation, and keep strict host-key verification enabled.
+- Generate Ed25519 keys for modern servers and RSA-4096 keys with legacy compatibility settings for older OpenSSH servers. The setup validates key-based access before saving; when needed, it invokes `ssh-copy-id` interactively once with a profile-isolated home directory.
+- Connect to a registered host explicitly through its profile configuration:
+
+  ```bash
+  ssh -F "$PI_CODING_AGENT_DIR/.ssh/config" <alias>
+  ```
 
 ### Remote Hosts
 
@@ -109,7 +126,7 @@ Applications are the integration boundary between Pi and external systems. Use o
   ```
 
 - Normalize provider-specific payloads in an inbound handler, enrich or redact data through transforms, and shape integration responses in an outbound handler.
-- Route each external identity to a profile and session strategy through explicit Identity Key mappings. Mappings may use automatic sessions or fixed prefixes; one `*` wildcard can serve as a deliberate fallback.
+- Route each external identity to a profile and session strategy through explicit Identity Key mappings. Mappings may use automatic sessions or fixed prefixes, or intentionally ignore an identity (`None` in the Console) after inbound handling without calling Pi. Exact mappings take precedence, so an ignore mapping can exclude an identity even when a single `*` wildcard fallback exists.
 - Choose acknowledgement mode for asynchronous webhook-style work or result mode when an integration needs the completed response.
 - Inspect active sessions, roll over a conversation, preserve private handoff context, test handlers with a JSON payload, and stream or clear application logs from the Console or API.
 - Include an Evolution API adapter implementation while keeping Applications structurally independent from adapters.
@@ -163,7 +180,7 @@ curl \
 What the API exposes:
 
 - Persistent chat and streaming chat sessions, including profile-specific sessions.
-- Profile lifecycle, settings, `SOUL.md`, environment variables, Guardrails, tools, Skills, and sessions.
+- Profile lifecycle, settings, default model selection, `SOUL.md`, environment variables, Guardrails, Context Memory, tools, Skills, and sessions.
 - Runtime-wide extension and package inventory and configuration.
 - Pulse schedules and execution history.
 - Git-backed Skill Sources, document preview, synchronization, and explicit profile imports.
@@ -189,8 +206,9 @@ pi console stop
 
 The console provides dedicated workspaces for:
 
-- **Profiles:** settings, environment, `SOUL.md`, Guardrails, tools, Skills, and sessions. Extensions and packages are shown and managed as shared runtime resources.
-- **Applications:** configuration, identity mappings, active sessions, handler editor, transform testing, rollover, handoff, and live logs.
+- **Profiles:** settings, default model selection, environment, `SOUL.md`, Guardrails, tools, Skills, and sessions. Extensions and packages are shown and managed as shared runtime resources.
+- **Context Memory:** personal-context source selection, persistent Markdown memory editing, and Application handler creation and testing.
+- **Applications:** configuration, identity mappings (including `None`/ignore rules), active sessions, handler editor, transform testing, rollover, handoff, and live logs.
 - **Skill Sources:** source registration, Git synchronization, Skill preview, and deliberate import into a profile.
 - **Pulse:** schedules, enablement, run history, and profile/session association.
 - **Operations:** API Server and Console configuration, service controls, and resource visibility.
@@ -239,7 +257,7 @@ Skills remain explicit resources rather than hidden package behavior. A profile 
 ~/.pi/agent/profiles/<profile>/skills/<skill>/SKILL.md
 ```
 
-- **Shared Skills** are centrally maintained under `~/.pi/agent/skills/` and can be selectively exposed to each profile.
+- **Shared Skills** are centrally maintained under `~/.pi/agent/skills/` and can be selectively exposed to each profile. Skills declared by installed shared-runtime packages are also discovered for named profiles and follow the same shared-Skill policy and allowlist.
 - **Profile Skills** live under `~/.pi/agent/profiles/<profile>/skills/` and remain isolated from other profiles.
 - Profile policy controls whether shared and profile-local sources are available and can allow all Skills or a named allowlist.
 - List and enable or disable Skills from the CLI and Console without editing settings by hand.
@@ -275,6 +293,7 @@ Refreshing synchronizes the source and atomically replaces the complete installe
 
 - Create and manage persistent scheduled prompts, reminders, cron jobs, one-time jobs, and heartbeat jobs.
 - Bind scheduled work to the active profile and conversation session.
+- Set `insertIntoApiSession: true` when a Pulse result should also be recorded in every active Application session for the same profile. This adds context only: it does not invoke an outbound handler or send a message through an Application channel.
 - Persist schedules and execution history in SQLite with WAL support.
 - Start and inspect the scheduler:
 
@@ -285,6 +304,17 @@ Refreshing synchronizes the source and atomically replaces the complete installe
   # After confirming an interrupted worker is no longer running:
   pi pulse recover
   ```
+
+### Context Memory
+
+Context Memory keeps compact, durable facts separate from a session transcript and injects them when a new session starts. It is intended for stable operational context and personal context, not an unbounded conversation archive.
+
+- Each profile can maintain shared operational context in `context-memory/OPERATIONAL.md` (maximum 2,750 characters).
+- Personal context is configurable as a profile-wide `context-memory/PROFILE.md`, an Application-identity-specific `applications/<application>/context-memory/identities/<identity>/USER.md`, or a TypeScript Application handler that resolves it dynamically. Profile and identity memory are limited to 1,375 characters.
+- Identity memory is available only in an Application session and is isolated by Application and Identity Key.
+- The `context_memory` tool supports `read`, `insert`, `update`, `remove`, and `replace` actions against `operational` or `personal` memory without exposing file paths to the agent. Personal memory writes to the configured profile or identity target; storing sensitive values requires explicit confirmation.
+- Dynamic handlers must return Markdown, run only for Application sessions, have a three-second timeout, and can be created, edited, and tested from the Console. Handler execution is recorded in Application logs.
+- Stored memory is presented to the model as data rather than instructions. Changes apply to newly started sessions.
 
 ### CLI resource management
 
@@ -331,6 +361,11 @@ pi profile support tools disable bash
 pi profile support extensions list
 pi profile support sessions list
 pi profile support packages list
+
+# Register, list, or delete hosts scoped to this profile
+pi profile support ssh add production-db
+pi profile support ssh list
+pi profile support ssh delete production-db
 
 # Resume the latest session or open a specific one
 pi profile resume support
@@ -425,6 +460,7 @@ The `remote:<name>` form forwards the rest of the command to the selected remote
 | API Server | HTTP API, Applications, profile administration, sessions, logs, and terminal tickets. |
 | Browser Harness | Steel Profile-scoped CDP browser automation for active Pi Profiles. |
 | CLI Resources | Resource, package, session, and profile commands. |
+| Context Memory | Persistent operational and personal context for new sessions. |
 | Guardrails | Input, tool, and output policy stages. |
 | Pi Console WebUI | Browser-based operations console and terminal client. |
 | Profiles | Profile lifecycle, policy, sandbox, and remote routing. |
