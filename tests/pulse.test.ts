@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { PulseStore } from "../extensions/pulse/store.ts";
+import { PulseStore, pulseId } from "../extensions/pulse/store.ts";
 import { profileModelArgs, pulseSessionId } from "../extensions/pulse/index.ts";
 
 async function withStore(run: (path: string, store: PulseStore) => void | Promise<void>) {
@@ -23,15 +23,18 @@ test("resolves the configured model from the pulse profile", async () => {
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test("names Pulse execution sessions with their type and UTC minute", () => {
+test("names Pulse records and execution sessions with their type and UTC minute", () => {
   const timestamp = new Date("2026-09-18T01:01:59.999Z");
+  assert.equal(pulseId("cron", timestamp), "pulse-cron_2026-09-18-01-01");
+  assert.equal(pulseId("heartbeat", timestamp), "pulse-heartbeat_2026-09-18-01-01");
   assert.equal(pulseSessionId("cron", timestamp), "pulse-cron_2026-09-18-01-01");
   assert.equal(pulseSessionId("heartbeat", timestamp), "pulse-heartbeat_2026-09-18-01-01");
 });
 
-test("persists API session insertion preference", async () => {
+test("records Pulse results in active API sessions by default unless disabled explicitly", async () => {
   await withStore((_path, store) => {
-    const pulse = store.create({ name: "api-report", description: "Report", schedule: "0 9 * * *", prompt: "Run", profile: "support", thread_session_id: "session", insertIntoApiSession: true });
+    const pulse = store.create({ name: "api-report", description: "Report", schedule: "0 9 * * *", prompt: "Run", profile: "support", thread_session_id: "session" });
+    assert.match(pulse.id, /^pulse-cron_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}$/);
     assert.equal(pulse.insertIntoApiSession, true);
     assert.equal(store.update("api-report", "support", { description: "Report", schedule: "0 9 * * *", prompt: "Run", thread_session_id: "session", insertIntoApiSession: false }).insertIntoApiSession, false);
   });

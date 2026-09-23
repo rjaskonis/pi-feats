@@ -14,7 +14,7 @@ type HistoryPulse = Pulse & { startedAt: string; finishedAt: string | null; stat
 type PulseRun = { id: string; startedAt: string; finishedAt: string | null; status: "running" | "success" | "error"; response: string | null; error: string | null };
 type Session = { id: string; name?: string | null };
 type Form = { name: string; description: string; schedule: string; prompt: string; thread_session_id: string; insertIntoApiSession: boolean; enabled: boolean };
-const blank = (): Form => ({ name: "", description: "", schedule: "*/15 * * * *", prompt: "", thread_session_id: "", insertIntoApiSession: false, enabled: true });
+const blank = (): Form => ({ name: "", description: "", schedule: "*/15 * * * *", prompt: "", thread_session_id: "", insertIntoApiSession: true, enabled: true });
 function localDateTime(value: Date): string { const pad = (part: number) => String(part).padStart(2, "0"); return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`; }
 function scheduleDescription(schedule: string): { type: Pulse["type"]; text: string } {
   if (schedule.startsWith("@once:")) return { type: "cron", text: `Runs once at ${schedule.slice(6)}.` };

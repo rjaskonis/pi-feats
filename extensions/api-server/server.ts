@@ -835,7 +835,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       for (const field of fields) if (typeof body[field] !== "string" || !String(body[field]).trim()) throw Object.assign(new Error(`The '${field}' field must be a non-empty string.`), { status: 400 });
       const sessionId = typeof body.thread_session_id === "string" ? body.thread_session_id : "";
       if (sessionId && !(await api.listSessions(profileName(request))).some((session) => session.id === sessionId)) throw Object.assign(new Error("The thread_session_id session was not found."), { status: 404 });
-      try { return reply.code(201).send({ pulse: api.pulses.create({ name: body.name as string, description: body.description as string, schedule: body.schedule as string, prompt: body.prompt as string, thread_session_id: sessionId, insertIntoApiSession: body.insertIntoApiSession === true, profile: profileName(request) }) }); }
+      try { return reply.code(201).send({ pulse: api.pulses.create({ name: body.name as string, description: body.description as string, schedule: body.schedule as string, prompt: body.prompt as string, thread_session_id: sessionId, insertIntoApiSession: body.insertIntoApiSession !== false, profile: profileName(request) }) }); }
       catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 400 }); }
     });
     server.patch<{ Params: { profile: string; name: string } }>("/api/profiles/:profile/pulses/:name", async (request, reply) => {
@@ -849,7 +849,11 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       for (const field of fields) if (typeof body[field] !== "string" || !String(body[field]).trim()) throw Object.assign(new Error(`The '${field}' field must be a non-empty string.`), { status: 400 });
       const sessionId = typeof body.thread_session_id === "string" ? body.thread_session_id : "";
       if (sessionId && !(await api.listSessions(profileName(request))).some((session) => session.id === sessionId)) throw Object.assign(new Error("The thread_session_id session was not found."), { status: 404 });
-      try { return { pulse: api.pulses.update(request.params.name, profileName(request), { description: body.description as string, schedule: body.schedule as string, prompt: body.prompt as string, thread_session_id: sessionId, insertIntoApiSession: body.insertIntoApiSession === true }) }; }
+      try {
+        const profile = profileName(request), current = api.pulses.get(request.params.name, profile);
+        if (!current) throw new Error("Pulse not found.");
+        return { pulse: api.pulses.update(request.params.name, profile, { description: body.description as string, schedule: body.schedule as string, prompt: body.prompt as string, thread_session_id: sessionId, insertIntoApiSession: typeof body.insertIntoApiSession === "boolean" ? body.insertIntoApiSession : current.insertIntoApiSession }) };
+      }
       catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 400 }); }
     });
     server.delete<{ Params: { profile: string; name: string } }>("/api/profiles/:profile/pulses/:name", async (request, reply) => {

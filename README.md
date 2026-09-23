@@ -293,7 +293,7 @@ Refreshing synchronizes the source and atomically replaces the complete installe
 
 - Create and manage persistent scheduled prompts, reminders, cron jobs, one-time jobs, and heartbeat jobs.
 - Bind scheduled work to the active profile and conversation session.
-- Set `insertIntoApiSession: true` when a Pulse result should also be recorded in every active Application session for the same profile. This adds context only: it does not invoke an outbound handler or send a message through an Application channel.
+- Pulse results are recorded in every active Application session for the same profile by default. Set `insertIntoApiSession: false` only when that recording is not wanted. This adds context only: it does not invoke an outbound handler or send a message through an Application channel.
 - Persist schedules and execution history in SQLite with WAL support.
 - Start and inspect the scheduler:
 

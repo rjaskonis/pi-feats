@@ -10,6 +10,7 @@ export type PulseRun = { id: string; sessionId: string | null; startedAt: string
 export type ClaimedPulse = { pulse: Pulse; runId: string };
 type Row = Record<string, unknown>;
 const iso = (date = new Date()) => date.toISOString();
+export const pulseId = (type: PulseType, date = new Date()): string => `pulse-${type}_${date.toISOString().slice(0, 16).replace("T", "-").replace(":", "-")}`;
 
 function fieldMatches(field: string, value: number, min: number, max: number): boolean {
   return field.split(",").some((part) => {
@@ -59,7 +60,7 @@ export class PulseStore {
   private db: DatabaseSync;
   constructor(path: string) {
     mkdirSync(dirname(path), { recursive: true }); this.db = new DatabaseSync(path); this.db.exec("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
-    this.db.exec(`CREATE TABLE IF NOT EXISTS pulses (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('cron','heartbeat')), schedule TEXT NOT NULL, prompt TEXT NOT NULL, thread_session_id TEXT NOT NULL, insert_into_api_session INTEGER NOT NULL DEFAULT 0, result TEXT);
+    this.db.exec(`CREATE TABLE IF NOT EXISTS pulses (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, description TEXT NOT NULL, type TEXT NOT NULL CHECK(type IN ('cron','heartbeat')), schedule TEXT NOT NULL, prompt TEXT NOT NULL, thread_session_id TEXT NOT NULL, insert_into_api_session INTEGER NOT NULL DEFAULT 1, result TEXT);
       CREATE TABLE IF NOT EXISTS pulse_control (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, profile TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, next_run_at TEXT, last_run_at TEXT, claimed_at TEXT, active_run_id TEXT, claim_owner TEXT, lease_expires_at TEXT, updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pulse_state (pulse_id TEXT PRIMARY KEY REFERENCES pulses(id) ON DELETE CASCADE, handoff TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS pulse_runs (id TEXT PRIMARY KEY, pulse_id TEXT NOT NULL REFERENCES pulses(id) ON DELETE CASCADE, session_id TEXT, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, response TEXT, error TEXT);
@@ -68,7 +69,7 @@ export class PulseStore {
     // Migrate databases created before the denormalized latest result column.
     const columns = this.db.prepare("PRAGMA table_info(pulses)").all() as Row[];
     if (!columns.some((column) => column.name === "result")) this.db.exec("ALTER TABLE pulses ADD COLUMN result TEXT");
-    if (!columns.some((column) => column.name === "insert_into_api_session")) this.db.exec("ALTER TABLE pulses ADD COLUMN insert_into_api_session INTEGER NOT NULL DEFAULT 0");
+    if (!columns.some((column) => column.name === "insert_into_api_session")) this.db.exec("ALTER TABLE pulses ADD COLUMN insert_into_api_session INTEGER NOT NULL DEFAULT 1");
     const runColumns = this.db.prepare("PRAGMA table_info(pulse_runs)").all() as Row[];
     if (!runColumns.some((column) => column.name === "session_id")) this.db.exec("ALTER TABLE pulse_runs ADD COLUMN session_id TEXT");
     const controlColumns = this.db.prepare("PRAGMA table_info(pulse_control)").all() as Row[];
@@ -97,8 +98,10 @@ export class PulseStore {
   create(input: Omit<Pulse, "id" | "enabled" | "nextRunAt" | "lastRunAt" | "type" | "result" | "insertIntoApiSession"> & { insertIntoApiSession?: boolean }): Pulse {
     if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(input.name)) throw new Error("Invalid pulse name.");
     if (!validSchedule(input.schedule)) throw new Error("Invalid schedule. Use a five-field UTC cron expression or @once:<ISO-8601>.");
-    const type = pulseType(input.schedule), id = randomUUID(), next = nextRun(input.schedule)?.toISOString() ?? null;
-    this.db.prepare("INSERT INTO pulses (id, name, description, type, schedule, prompt, thread_session_id, insert_into_api_session, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)").run(id, input.name, input.description, type, input.schedule, input.prompt, input.thread_session_id, input.insertIntoApiSession ? 1 : 0);
+    const type = pulseType(input.schedule), baseId = pulseId(type); let id = baseId, suffix = 2;
+    while (this.db.prepare("SELECT 1 FROM pulses WHERE id=?").get(id)) id = `${baseId}-${String(suffix++).padStart(2, "0")}`;
+    const next = nextRun(input.schedule)?.toISOString() ?? null;
+    this.db.prepare("INSERT INTO pulses (id, name, description, type, schedule, prompt, thread_session_id, insert_into_api_session, result) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)").run(id, input.name, input.description, type, input.schedule, input.prompt, input.thread_session_id, input.insertIntoApiSession !== false ? 1 : 0);
     this.db.prepare("INSERT INTO pulse_control (pulse_id, profile, enabled, next_run_at, last_run_at, claimed_at, updated_at) VALUES (?, ?, 1, ?, NULL, NULL, ?)").run(id, input.profile, next, iso());
     if (type === "heartbeat") this.db.prepare("INSERT INTO pulse_state VALUES (?, '', ?)").run(id, iso());
     return this.get(input.name, input.profile)!;

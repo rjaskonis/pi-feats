@@ -145,14 +145,14 @@ export default async function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "schedule",
     label: "Manage schedule",
-    description: "Create, list, edit, enable, disable, or delete cron jobs, heartbeats, reminders, and future schedules. Use this whenever the user asks to schedule or manage scheduled work. When the user asks to notify or deliver the result through an Application channel such as WhatsApp, set insertIntoApiSession=true; this only records the result in active Application sessions, while sending remains the Pulse prompt/Skill's responsibility.",
+    description: "Create, list, edit, enable, disable, or delete cron jobs, heartbeats, reminders, and future schedules. Use this whenever the user asks to schedule or manage scheduled work. Results are recorded in active Application sessions by default; set insertIntoApiSession=false only when the user explicitly requests not to record them. This adds context only and does not send through an outbound handler.",
     parameters: Type.Object({
       action: Type.Union([Type.Literal("create"), Type.Literal("list"), Type.Literal("update"), Type.Literal("enable"), Type.Literal("disable"), Type.Literal("delete")]),
       name: Type.Optional(Type.String({ description: "Schedule name. Required except when listing." })),
       description: Type.Optional(Type.String({ description: "Human-readable purpose, required for create." })),
       schedule: Type.Optional(Type.String({ description: "Five-field UTC cron expression or @once:<ISO-8601>. Required for create." })),
       prompt: Type.Optional(Type.String({ description: "Markdown instructions, required for create." })),
-      insertIntoApiSession: Type.Optional(Type.Boolean({ description: "Set true when the Pulse result should also be inserted into every active Application session for this profile. This records context only; it does not send through an outbound handler." })),
+      insertIntoApiSession: Type.Optional(Type.Boolean({ description: "Defaults to true. Set false only when the user explicitly asks not to record the Pulse result in every active Application session for this profile. This records context only; it does not send through an outbound handler." })),
     }),
     async execute(_id, params, _signal, _update, ctx) {
       try {
@@ -162,7 +162,7 @@ export default async function (pi: ExtensionAPI) {
         if (params.action === "create") {
           if (!params.description || !params.schedule || !params.prompt) throw new Error("Create requires name, description, schedule, and prompt.");
           const threadSessionId = ctx.sessionManager.getSessionId(); if (!threadSessionId) throw new Error("A persistent conversation session is required to create a schedule.");
-          const pulse = store.create({ name: params.name, description: params.description, schedule: params.schedule, prompt: params.prompt, insertIntoApiSession: params.insertIntoApiSession === true, profile, thread_session_id: threadSessionId }); await start();
+          const pulse = store.create({ name: params.name, description: params.description, schedule: params.schedule, prompt: params.prompt, insertIntoApiSession: params.insertIntoApiSession !== false, profile, thread_session_id: threadSessionId }); await start();
           return { content: [{ type: "text", text: JSON.stringify(pulse) }], details: pulse };
         }
         if (params.action === "enable" || params.action === "disable") { const pulse = store.setEnabled(params.name, params.action === "enable", profile); return { content: [{ type: "text", text: JSON.stringify(pulse) }], details: pulse }; }
