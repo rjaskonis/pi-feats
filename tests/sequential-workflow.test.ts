@@ -226,7 +226,7 @@ test("agent loop requests bounded continuation instead of accepting premature co
         await h.call("create", definition());
         for (let i = 0; i < 5; i++)
             await h.hook("agent_end", { messages: [] });
-        assert.equal(h.messages.length, 2);
+        assert.equal(h.messages.filter((message) => message[0].customType === "sequential-workflow-state").length, 2);
         assert.ok(h.notices.length > 0);
     }
     finally {
@@ -373,8 +373,7 @@ test("a required Skill starts definition mode without executing its read", async
         const skillDir = join(h.root, "required-skill");
         await mkdir(skillDir);
         const skillPath = join(skillDir, "SKILL.md");
-        await writeFile(skillPath, "This operation requires a Sequential Workflow.");
-        h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "The Skill explicitly requires it." });
+        await writeFile(skillPath, "---\nrequires_sequential_workflow: true\n---\nThis operation requires a Sequential Workflow.");
         await h.hook("turn_start");
         const result = await h.hook("tool_call", { toolName: "read", input: { path: skillPath } });
         assert.deepEqual(result, { block: true, terminate: true, reason: "Sequential Workflow definition mode has started from the required Skill." });
@@ -382,6 +381,27 @@ test("a required Skill starts definition mode without executing its read", async
         const context = await h.hook("context_with_system", { messages: [] });
         assert.match(context.messages[0].content, /Required Skill/);
         assert.match(context.messages[0].content, /requires a Sequential Workflow/);
+        const audit = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string }>;
+        assert.deepEqual(audit.map((event) => event.phase), ["requirement_check_started", "requirement_classified_required", "requirement_detected", "requirement_classified_required", "definition_mode_started"]);
+        assert.deepEqual(h.messages.map((message) => message[0].content), ["Checking whether Sequential Workflow is required…", "Sequential Workflow is required by the Skill metadata.", "Sequential Workflow definition mode started for workflow #1."]);
+    }
+    finally {
+        await h.close();
+    }
+});
+
+test("an unavailable Skill classifier is visible and auditable", async () => {
+    const h = await setup();
+    try {
+        const skillDir = join(h.root, "ambiguous-skill");
+        await mkdir(skillDir);
+        const skillPath = join(skillDir, "SKILL.md");
+        await writeFile(skillPath, "This operation mentions a Sequential Workflow without deterministic metadata.");
+        await h.hook("turn_start");
+        assert.equal(await h.hook("tool_call", { toolName: "read", input: { path: skillPath } }), undefined);
+        assert.deepEqual(h.messages.map((message) => message[0].content), ["Checking whether Sequential Workflow is required…", "Sequential Workflow requirement could not be classified."]);
+        const audit = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string }>;
+        assert.deepEqual(audit.map((event) => event.phase), ["requirement_check_started", "requirement_classified_unavailable"]);
     }
     finally {
         await h.close();

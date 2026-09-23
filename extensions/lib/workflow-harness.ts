@@ -12,7 +12,16 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     }
     db.exec(`CREATE INDEX IF NOT EXISTS workflow_session_idx ON workflows(session_id);
     CREATE TABLE IF NOT EXISTS workflow_focus (session_id TEXT PRIMARY KEY, stack TEXT NOT NULL);
-    CREATE TABLE IF NOT EXISTS workflow_collect_checkpoint (task_id INTEGER PRIMARY KEY REFERENCES workflow_tasks(id), user_entry_id TEXT);`);
+    CREATE TABLE IF NOT EXISTS workflow_collect_checkpoint (task_id INTEGER PRIMARY KEY REFERENCES workflow_tasks(id), user_entry_id TEXT);
+    CREATE TABLE IF NOT EXISTS workflow_harness_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      workflow_id INTEGER REFERENCES workflows(id),
+      phase TEXT NOT NULL,
+      origin TEXT,
+      payload TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`);
     const context = new AsyncLocalStorage<ExtensionContext>();
     const session = () => {
         const id = context.getStore()?.sessionManager.getSessionId();
@@ -48,7 +57,14 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         return w;
     };
     const userEntry = () => context.getStore()!.sessionManager.getBranch().filter((e: any) => e.type === "message" && e.message.role === "user").at(-1)?.id ?? null;
-    const addEvent = (workflowId: number, phase: string, payload: unknown) => db.prepare("INSERT INTO workflow_events(workflow_id, phase, payload) VALUES (?, ?, ?)").run(workflowId, phase, JSON.stringify(payload));
+    const addEvent = (workflowId: number, phase: string, payload: unknown) => db.prepare("INSERT INTO workflow_events(workflow_id, phase, payload) VALUES (?, ?, ?) ").run(workflowId, phase, JSON.stringify(payload));
+    const audit = (phase: string, payload: unknown, origin?: "user_input" | "skill", workflowId?: number, display = false) => {
+        db.prepare("INSERT INTO workflow_harness_events(session_id, workflow_id, phase, origin, payload) VALUES (?, ?, ?, ?, ?)").run(session(), workflowId ?? null, phase, origin ?? null, JSON.stringify(payload));
+        if (workflowId)
+            addEvent(workflowId, `harness_${phase}`, payload);
+        if (display)
+            host.sendMessage({ customType: "sequential-workflow-harness", display: true, content: (payload as any).message ?? phase, details: { phase, origin, workflowId, ...(payload as any) } });
+    };
     type DefinitionActivation = "definition" | "template";
     const definitionTools = (activation: DefinitionActivation) => [activation === "template" ? "sequential_workflow_create_from_template" : "sequential_workflow_create"];
     const definitionMode = (workflowId = pendingWorkflow()) => {
@@ -91,8 +107,8 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return existing;
         const inserted = db.prepare("INSERT INTO workflows(title, source, status, session_id) VALUES (?, ?, 'pending_definition', ?)").run("Pending workflow definition", `Sequential Workflow requirement detected from ${origin}.`, session());
         const workflowId = Number(inserted.lastInsertRowid);
-        addEvent(workflowId, "requirement_detected", { origin, evidence });
-        addEvent(workflowId, "requirement_classified", { requiresSequentialWorkflow: true, reasoning });
+        audit("requirement_detected", { origin, evidence, message: `Sequential Workflow requirement detected from ${origin === "skill" ? "a required Skill" : "the user request"}.` }, origin, workflowId);
+        audit("requirement_classified_required", { requiresSequentialWorkflow: true, reasoning, message: "Sequential Workflow is required for this request." }, origin, workflowId);
         save([...stack(), workflowId]);
         return workflowId;
     };
@@ -132,9 +148,10 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         queue = next.catch(() => undefined);
         return next;
     };
-    const classifyRequirement = async (ctx: ExtensionContext, origin: "user_input" | "skill", evidence: string, userRequest: string) => {
+    const deterministicSkillRequirement = (content: string) => /^---\r?\n[\s\S]*?^requires_sequential_workflow:\s*true\s*$/mi.test(content);
+    const classifyRequirement = async (ctx: ExtensionContext, origin: "user_input" | "skill", evidence: string, userRequest: string): Promise<{ status: "required" | "not_required" | "unavailable" | "invalid_response" | "error"; reasoning: string; activation?: DefinitionActivation; templatePath?: string }> => {
         if (!ctx.model)
-            return { requiresSequentialWorkflow: false, reasoning: "No classifier model is available; explicit intent cannot be confirmed." };
+            return { status: "unavailable", reasoning: "No classifier model is available." };
         const policy = origin === "user_input"
             ? "Return true only when the current user request explicitly asks to create, start, run, continue, inspect, or cancel a persisted Sequential Workflow. Mentions of Sequential Workflow, templates, Skills, code, prompts, bugs, documentation, or behavior are not requests. If and only if the user explicitly names a template path to activate, return activation 'template' and that exact path; otherwise return activation 'definition'. Never infer or invent a template name. Never infer intent from relevance, multiple steps, or prior discussion. When uncertain return false."
             : "Return true only when this Skill explicitly requires a persisted Sequential Workflow for the current user request. References to workflow templates, implementation, or documentation are not requirements. Set activation to 'definition'. When uncertain return false.";
@@ -149,15 +166,16 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             if (typeof parsed?.requiresSequentialWorkflow !== "boolean" || typeof parsed.reasoning !== "string" || !parsed.reasoning.trim())
                 throw new Error("Invalid classifier response.");
             if (!parsed.requiresSequentialWorkflow)
-                return { requiresSequentialWorkflow: false, reasoning: parsed.reasoning };
+                return { status: "not_required", reasoning: parsed.reasoning };
             const activation: DefinitionActivation = parsed.activation === "template" ? "template" : "definition";
             const templatePath = typeof parsed.templatePath === "string" && parsed.templatePath.trim() ? parsed.templatePath.trim() : undefined;
             if (activation === "template" && (!templatePath || !evidence.includes(templatePath)))
-                throw new Error("Template activation requires an explicitly supplied template path.");
-            return { requiresSequentialWorkflow: true, reasoning: parsed.reasoning, activation, templatePath };
+                return { status: "invalid_response", reasoning: "Template activation did not include an explicitly supplied template path." };
+            return { status: "required", reasoning: parsed.reasoning, activation, templatePath };
         }
         catch (error) {
-            return { requiresSequentialWorkflow: false, reasoning: `Classifier could not confirm explicit intent: ${error instanceof Error ? error.message : String(error)}` };
+            const reasoning = error instanceof Error ? error.message : String(error);
+            return { status: reasoning === "Invalid classifier response." ? "invalid_response" : "error", reasoning };
         }
         finally {
             // Classification runs before Pi starts streaming, so a working indicator
@@ -209,6 +227,11 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         box.addChild(new Text(`${theme.fg("muted", "Planning Sequential Workflow")}${workflowId ? ` #${workflowId}` : ""}\n${theme.fg("dim", String(message.content))}`, 0, 0));
         return box;
     });
+    host.registerMessageRenderer("sequential-workflow-harness", (message, { outputPad }, theme) => {
+        const box = new Box(outputPad, 0);
+        box.addChild(new Text(`${theme.fg("muted", "Sequential Workflow")}: ${theme.fg("dim", String(message.content))}`, 0, 0));
+        return box;
+    });
     const tools = new Map<string, any>();
     const api = new Proxy(host, { get(target, key) {
             if (key !== "registerTool")
@@ -224,7 +247,14 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                                 if (pendingBefore === workflowId)
                                     restoreDefinitionTools(workflowId);
                                 save([...new Set([...stack(), workflowId])]);
+                                audit("workflow_hydrated", { message: `Workflow #${workflowId} created and ready for its current task.` }, undefined, workflowId, true);
                             }
+                            if (definition.name === "sequential_workflow_evaluate" && result.details?.failed) {
+                                const phase = result.details.terminal ? "task_terminal_failed" : "failed_attempt_limit";
+                                audit(phase, { taskId: params.taskId, message: result.details.terminal ? `Task #${params.taskId} ended with a terminal failure; workflow failed.` : `Task #${params.taskId} reached its retry limit; workflow failed.` }, undefined, params.workflowId, true);
+                            }
+                            else if (definition.name === "sequential_workflow_evaluate" && (params.outcome === "retry" || params.accepted === false))
+                                audit("task_retry", { taskId: params.taskId, message: `Task #${params.taskId} will be retried.` }, undefined, params.workflowId, true);
                             return result;
                         });
                     } };
@@ -334,14 +364,25 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             try {
                 const path = resolve(ctx.cwd, event.input.path);
                 const content = await readFile(path, "utf8");
-                if (hasSequentialTerm(content)) {
+                const deterministic = deterministicSkillRequirement(content);
+                if (hasSequentialTerm(content) || deterministic) {
                     const userRequest = latestUserRequest(ctx);
-                    const decision = await classifyRequirement(ctx, "skill", content, userRequest);
-                    if (decision.requiresSequentialWorkflow) {
+                    audit("requirement_check_started", { path, message: "Checking whether Sequential Workflow is required…" }, "skill", undefined, true);
+                    let decision: Awaited<ReturnType<typeof classifyRequirement>>;
+                    if (deterministic) {
+                        decision = { status: "required", reasoning: "The Skill declares requires_sequential_workflow: true." };
+                        audit("requirement_classified_required", { path, requiresSequentialWorkflow: true, reasoning: decision.reasoning, message: "Sequential Workflow is required by the Skill metadata." }, "skill", undefined, true);
+                    }
+                    else {
+                        decision = await classifyRequirement(ctx, "skill", content, userRequest);
+                        audit(`requirement_classified_${decision.status}`, { path, requiresSequentialWorkflow: decision.status === "required", reasoning: decision.reasoning, message: decision.status === "required" ? "Sequential Workflow is required for this request." : decision.status === "not_required" ? "Sequential Workflow is not required." : "Sequential Workflow requirement could not be classified." }, "skill", undefined, true);
+                    }
+                    if (decision.status === "required") {
                         await transaction(ctx, () => {
                             if (focus() === undefined) {
                                 const workflowId = createPendingWorkflow("skill", path, decision.reasoning);
                                 startDefinitionMode(workflowId, "skill", userRequest, "definition", undefined, path, content);
+                                audit("definition_mode_started", { path, message: `Sequential Workflow definition mode started for workflow #${workflowId}.` }, "skill", workflowId, true);
                             }
                         });
                         definitionCutover = true;
