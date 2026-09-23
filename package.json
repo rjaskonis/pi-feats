@@ -1,6 +1,6 @@
 {
   "name": "pi-feats",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A modular Pi package for profiles, sandboxing, remote access, applications, guardrails, skills, session management, observability, and web-based operations.",
   "keywords": [
     "pi-package",
