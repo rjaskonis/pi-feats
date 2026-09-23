@@ -101,6 +101,33 @@ test("stale task IDs and parallel preflight cannot advance future tasks", async 
         await h.close();
     }
 });
+test("Action criteria fail the workflow after five rejected attempts", async () => {
+    const h = await setup();
+    try {
+        const created = ids(await h.call("create", definition([{ type: "action", instruction: "Verify the action", criteria: "The verification passes." }])));
+        for (let attempt = 1; attempt <= 5; attempt++) {
+            await h.call("record_result", { workflowId: created.workflowId, taskId: created.taskId, phase: "action", result: `Attempt ${attempt} failed verification.` });
+            const evaluation = await h.call("evaluate", { workflowId: created.workflowId, taskId: created.taskId, accepted: false, reasoning: `Attempt ${attempt} did not meet the criteria.` });
+            if (attempt < 5) {
+                assert.equal(evaluation.details.failed, undefined);
+                assert.equal((await h.call("status", { workflowId: created.workflowId })).details.workflow.status, "running");
+            }
+            else {
+                assert.equal(evaluation.details.failed, true);
+                assert.equal(evaluation.details.attempts, 5);
+                assert.match(evaluation.content[0].text, /workflow failed/);
+            }
+        }
+        const status = await h.call("status", { workflowId: created.workflowId });
+        assert.equal(status.details.workflow.status, "failed");
+        assert.equal(status.details.tasks[0].status, "failed");
+        assert.equal(status.details.tasks[0].attempts, 5);
+    }
+    finally {
+        await h.close();
+    }
+});
+
 test("Collect blocks external tools and fabricated response before a new user entry", async () => {
     const h = await setup();
     try {

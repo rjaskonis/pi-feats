@@ -48,6 +48,7 @@ const templateMaxTasks = 1000;
 const templateMaxTitleLength = 1000;
 const templateMaxSourceLength = 2000;
 const templateMaxTextLength = 10000;
+const maxActionAttempts = 5;
 const taskType = StringEnum(["action", "collect", "evaluate", "workflow"] as const);
 const phaseType = StringEnum(["action", "collect"] as const);
 const workflowRoot = () => process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
@@ -236,7 +237,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
         return workflowResult(workflowId, parentTask);
     };
     const definitionParameters = { title: Type.String({ minLength: 1 }), source: Type.String({ minLength: 1 }), tasks: Type.Array(Type.Object({ type: taskType, instruction: Type.String({ minLength: 1 }), criteria: Type.Optional(Type.String({ minLength: 1 })) }), { minItems: 1 }) };
-    pi.registerTool({ name: "sequential_workflow_create", label: "Create Sequential Workflow", description: "Creates a root workflow or defines the focused pending workflow.", promptSnippet: "Create or define a root Sequential Workflow", promptGuidelines: ["Use sequential_workflow_create to create a root workflow or define the focused pending workflow from an ordinary user request. It never creates a subworkflow.", "Do not use a template unless the user explicitly requested a named template; use sequential_workflow_create_from_template only for that case.", "A Collect task passed to sequential_workflow_create must include acceptance criteria."], parameters: Type.Object(definitionParameters), async execute(_id, params): Promise<{
+    pi.registerTool({ name: "sequential_workflow_create", label: "Create Sequential Workflow", description: "Creates a root workflow or defines the focused pending workflow.", promptSnippet: "Create or define a root Sequential Workflow", promptGuidelines: ["Use sequential_workflow_create to create a root workflow or define the focused pending workflow from an ordinary user request. It never creates a subworkflow.", "Do not use a template unless the user explicitly requested a named template; use sequential_workflow_create_from_template only for that case.", "A Collect task passed to sequential_workflow_create must include acceptance criteria.", "An Action task with criteria fails its workflow after five rejected attempts."], parameters: Type.Object(definitionParameters), async execute(_id, params): Promise<{
             content: {
                 type: "text";
                 text: string;
@@ -309,6 +310,13 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
                 event(item.id, task.id, "accepted", { reasoning: params.reasoning });
                 const next = activateNext(item);
                 return { content: [{ type: "text", text: next.completed ? "Evaluation accepted; workflow completed." : `Evaluation accepted. Execute only task #${next.task!.position}: ${next.task!.instruction}` }], details: { accepted: true, next } };
+            }
+            if (task.type === "action" && task.attempts + 1 >= maxActionAttempts) {
+                db.prepare("UPDATE workflow_tasks SET status = 'failed', attempts = attempts + 1, evaluation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(params.reasoning, task.id);
+                db.prepare("UPDATE workflows SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.id);
+                event(item.id, task.id, "failed_attempt_limit", { reasoning: params.reasoning, attempts: task.attempts + 1, maxAttempts: maxActionAttempts });
+                resolveParentAfterChild(workflow(item.id)!);
+                return { content: [{ type: "text", text: `Task #${task.position} failed after ${maxActionAttempts} rejected attempts; workflow failed.` }], details: { accepted: false, failed: true, attempts: task.attempts + 1, maxAttempts: maxActionAttempts } };
             }
             if (task.type === "workflow") {
                 event(item.id, task.id, "child_detached", { childWorkflowId: task.child_workflow_id });
