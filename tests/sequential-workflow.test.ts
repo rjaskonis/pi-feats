@@ -128,6 +128,27 @@ test("Action criteria fail the workflow after five rejected attempts", async () 
     }
 });
 
+test("Terminal evaluation fails a workflow without retrying or advancing", async () => {
+    const h = await setup();
+    try {
+        const id = ids(await h.call("create", definition([{ type: "action", instruction: "Perform a guarded action", criteria: "The action must succeed." }, action])));
+        await assert.rejects(h.call("evaluate", { ...id, outcome: "fail", reasoning: "No result has been recorded." }), /Record the task result/);
+        await h.call("record_result", { ...id, phase: "action", result: "The dependency is in a terminal state." });
+        const evaluation = await h.call("evaluate", { ...id, outcome: "fail", reasoning: "Retrying cannot safely change the terminal state." });
+        assert.equal(evaluation.details.terminal, true);
+        assert.match(evaluation.content[0].text, /terminal evaluation/);
+        const status = await h.call("status", { workflowId: id.workflowId });
+        assert.equal(status.details.workflow.status, "failed");
+        assert.equal(status.details.tasks[0].status, "failed");
+        assert.equal(status.details.tasks[0].attempts, 0);
+        assert.equal(status.details.tasks[1].status, "pending");
+        await assert.rejects(h.call("record_result", { ...id, phase: "action", result: "must not run" }), /focused workflow/);
+    }
+    finally {
+        await h.close();
+    }
+});
+
 test("Collect blocks external tools and fabricated response before a new user entry", async () => {
     const h = await setup();
     try {

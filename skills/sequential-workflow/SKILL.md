@@ -63,7 +63,8 @@ Do not inspect, resume, or otherwise select a persisted workflow merely because 
 - For an `action`, perform the action and call `sequential_workflow_record_result` with `phase: "action"` and a verifiable result summary.
 - For a `collect`, request the required information from the user. After receiving it, call `sequential_workflow_record_result` with `phase: "collect"` and the received response.
 - For a `workflow` task, call `sequential_workflow_create_subworkflow` with both `parentWorkflowId` and `parentTaskId` for that current task. The parent task waits automatically; do not record a result for it.
-- If a task has `criteria`, call `sequential_workflow_evaluate` to record whether the criterion was accepted. Do not advance before acceptance.
+- If a task has `criteria`, call `sequential_workflow_evaluate` with `outcome: "accept"`, `"retry"`, or `"fail"`. Do not advance before acceptance.
+- Use `retry` only when another execution could change the outcome. After recording evidence, use `fail` when the task cannot safely progress; this ends the workflow without advancing or consuming retry attempts.
 - For an `evaluate`, assess the available information according to the instruction and call `sequential_workflow_evaluate`.
 - If an evaluation rejects an `action`, correct or repeat the current action. If it rejects a `collect`, explain what is missing and request the information again. A rejected `workflow` task becomes runnable again and may create a replacement child.
 

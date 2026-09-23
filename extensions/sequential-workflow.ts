@@ -51,6 +51,7 @@ const templateMaxTextLength = 10000;
 const maxActionAttempts = 5;
 const taskType = StringEnum(["action", "collect", "evaluate", "workflow"] as const);
 const phaseType = StringEnum(["action", "collect"] as const);
+const evaluationOutcome = StringEnum(["accept", "retry", "fail"] as const);
 const workflowRoot = () => process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const workflowDatabase = () => join(workflowRoot(), "sequential-workflow.db");
 const templateDirectory = () => join(workflowRoot(), "sequential_workflow_templates");
@@ -292,7 +293,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             const next = activateNext(item);
             return { content: [{ type: "text", text: next.completed ? "Task accepted; workflow completed." : `Task accepted. Execute task #${next.task!.position}: ${next.task!.instruction}` }], details: { next } };
         } });
-    pi.registerTool({ name: "sequential_workflow_evaluate", label: "Evaluate Workflow Task", description: "Records acceptance or rejection of the current task in an identified workflow.", promptSnippet: "Accept or reject the active workflow task after evaluation", promptGuidelines: ["Use sequential_workflow_evaluate after every task with criteria and for every Evaluate task; never advance a rejected task."], parameters: Type.Object({ workflowId: Type.Integer({ minimum: 1 }), taskId: Type.Integer({ minimum: 1 }), accepted: Type.Boolean(), reasoning: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
+    pi.registerTool({ name: "sequential_workflow_evaluate", label: "Evaluate Workflow Task", description: "Records acceptance, retry, or terminal failure of the current task in an identified workflow.", promptSnippet: "Evaluate the active workflow task", promptGuidelines: ["Use sequential_workflow_evaluate after every task with criteria and for every Evaluate task.", "Use outcome 'retry' only when repeating the task could produce a different result. Use outcome 'fail' after recording evidence when the task cannot safely progress; it ends the workflow without advancing or retrying.", "The legacy accepted boolean remains supported: true means accept and false means retry."], parameters: Type.Object({ workflowId: Type.Integer({ minimum: 1 }), taskId: Type.Integer({ minimum: 1 }), outcome: Type.Optional(evaluationOutcome), accepted: Type.Optional(Type.Boolean()), reasoning: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
             content: {
                 type: "text";
                 text: string;
@@ -305,7 +306,19 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
                 throw new Error("There is no pending task.");
             if (task.type !== "evaluate" && task.status !== "evaluating")
                 throw new Error("Record the task result before evaluating it.");
-            if (params.accepted) {
+            if (!params.outcome && typeof params.accepted !== "boolean")
+                throw new Error("Provide an evaluation outcome.");
+            if (params.outcome && typeof params.accepted === "boolean")
+                throw new Error("Provide outcome or accepted, not both.");
+            const outcome = params.outcome ?? (params.accepted ? "accept" : "retry");
+            if (outcome === "fail") {
+                db.prepare("UPDATE workflow_tasks SET status = 'failed', evaluation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(params.reasoning, task.id);
+                db.prepare("UPDATE workflows SET status = 'failed', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.id);
+                event(item.id, task.id, "failed_evaluation", { reasoning: params.reasoning, attempts: task.attempts });
+                resolveParentAfterChild(workflow(item.id)!);
+                return { content: [{ type: "text", text: `Task #${task.position} failed by terminal evaluation; workflow failed.` }], details: { accepted: false, failed: true, terminal: true, task: taskSummary(currentTask(item.id) ?? task) } };
+            }
+            if (outcome === "accept") {
                 db.prepare("UPDATE workflow_tasks SET status = 'accepted', evaluation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(params.reasoning, task.id);
                 event(item.id, task.id, "accepted", { reasoning: params.reasoning });
                 const next = activateNext(item);
