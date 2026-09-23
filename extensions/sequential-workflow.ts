@@ -56,35 +56,35 @@ const templateDirectory = () => join(workflowRoot(), "sequential_workflow_templa
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const requiredText = (value: unknown, field: string, maxLength: number) => {
     if (typeof value !== "string" || value.trim().length === 0)
-        throw new Error(`Template inválido: ${field} é obrigatório.`);
+        throw new Error(`Invalid template: ${field} is required.`);
     if (value.length > maxLength)
-        throw new Error(`Template inválido: ${field} excede ${maxLength} caracteres.`);
+        throw new Error(`Invalid template: ${field} exceeds ${maxLength} characters.`);
     return value;
 };
 const onlyProperties = (value: Record<string, unknown>, allowed: string[], field: string) => {
     const unexpected = Object.keys(value).find((key) => !allowed.includes(key));
     if (unexpected)
-        throw new Error(`Template inválido: ${field} contém a propriedade não permitida ${unexpected}.`);
+        throw new Error(`Invalid template: ${field} contains unsupported property ${unexpected}.`);
 };
 const validateTemplate = (value: unknown): WorkflowTemplate => {
     if (!isRecord(value))
-        throw new Error("Template inválido: a raiz deve ser um objeto JSON.");
+        throw new Error("Invalid template: root must be a JSON object.");
     onlyProperties(value, ["version", "title", "source", "tasks"], "raiz");
     if (value.version !== 1)
-        throw new Error("Template inválido: version deve ser 1.");
+        throw new Error("Invalid template: version must be 1.");
     if (!Array.isArray(value.tasks) || value.tasks.length === 0)
-        throw new Error("Template inválido: tasks deve conter ao menos uma task.");
+        throw new Error("Invalid template: tasks must contain at least one task.");
     if (value.tasks.length > templateMaxTasks)
-        throw new Error(`Template inválido: tasks não pode exceder ${templateMaxTasks} itens.`);
+        throw new Error(`Invalid template: tasks cannot exceed ${templateMaxTasks} items.`);
     const tasks = value.tasks.map((item, index) => {
         if (!isRecord(item))
-            throw new Error(`Template inválido: tasks[${index}] deve ser um objeto.`);
+            throw new Error(`Invalid template: tasks[${index}] must be an object.`);
         onlyProperties(item, ["type", "instruction", "criteria"], `tasks[${index}]`);
         if (item.type !== "action" && item.type !== "collect" && item.type !== "evaluate" && item.type !== "workflow")
-            throw new Error(`Template inválido: tasks[${index}].type deve ser action, collect, evaluate ou workflow.`);
+            throw new Error(`Invalid template: tasks[${index}].type must be action, collect, evaluate, or workflow.`);
         const criteria = item.criteria === undefined ? undefined : requiredText(item.criteria, `tasks[${index}].criteria`, templateMaxTextLength);
         if (item.type === "collect" && !criteria)
-            throw new Error(`Template inválido: tasks[${index}] é Collect e exige criteria.`);
+            throw new Error(`Invalid template: tasks[${index}] is Collect and requires criteria.`);
         return { type: item.type as TaskType, instruction: requiredText(item.instruction, `tasks[${index}].instruction`, templateMaxTextLength), criteria };
     });
     return { version: 1, title: requiredText(value.title, "title", templateMaxTitleLength), source: requiredText(value.source, "source", templateMaxSourceLength), tasks };
@@ -99,20 +99,20 @@ const loadTemplate = async (inputPath: string) => {
     try {
         const info = await stat(path);
         if (!info.isFile())
-            throw new Error("não é um arquivo regular");
+            throw new Error("not a regular file");
         if (info.size > templateMaxBytes)
             throw new Error(`excede o limite de ${templateMaxBytes} bytes`);
         content = await readFile(path, "utf8");
     }
     catch (error) {
-        throw new Error(`Não foi possível ler o template ${path}: ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`Could not read template ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
     let document: unknown;
     try {
         document = JSON.parse(content);
     }
     catch (error) {
-        throw new Error(`Template inválido: JSON malformado em ${path}: ${error instanceof Error ? error.message : String(error)}`);
+        throw new Error(`Invalid template: malformed JSON in ${path}: ${error instanceof Error ? error.message : String(error)}`);
     }
     return { path, hash: createHash("sha256").update(content).digest("hex"), template: validateTemplate(document) };
 };
@@ -140,8 +140,8 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
     const currentTask = (workflowId: number) => one<Task>("SELECT id, workflow_id, position, type, instruction, criteria, status, attempts, result, evaluation, child_workflow_id FROM workflow_tasks WHERE workflow_id = ? AND status NOT IN ('accepted', 'failed') ORDER BY position LIMIT 1", workflowId);
     const taskSummary = (task: Task) => ({ id: task.id, position: task.position, type: task.type, instruction: task.instruction, criteria: task.criteria, status: task.status, attempts: task.attempts, childWorkflowId: task.child_workflow_id });
     const requireActiveWorkflow = (id: number) => { const item = workflow(id); if (!item)
-        throw new Error(`Workflow #${id} não existe.`); if (!isActive(item))
-        throw new Error(`Workflow #${id} está ${item.status} e não pode ser alterado.`); return item; };
+        throw new Error(`Workflow #${id} does not exist.`); if (!isActive(item))
+        throw new Error(`Workflow #${id} is ${item.status} and cannot be changed.`); return item; };
     const resolveParentAfterChild = (child: Workflow) => {
         const parentTask = one<Task>("SELECT id, workflow_id, position, type, instruction, criteria, status, attempts, result, evaluation, child_workflow_id FROM workflow_tasks WHERE child_workflow_id = ? AND status = 'waiting_subworkflow'", child.id);
         if (!parentTask)
@@ -149,7 +149,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
         const parent = workflow(parentTask.workflow_id);
         if (!parent || !isActive(parent))
             return;
-        const result = `Subworkflow #${child.id} (${child.title}) terminou com status ${child.status}.`;
+        const result = `Subworkflow #${child.id} (${child.title}) finished with status ${child.status}.`;
         if (child.status === "completed" && !parentTask.criteria) {
             db.prepare("UPDATE workflow_tasks SET result = ?, status = 'accepted', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(result, parentTask.id);
             event(parent.id, parentTask.id, "subworkflow_completed", { childWorkflowId: child.id, accepted: true });
@@ -168,7 +168,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
         if (!next) {
             db.prepare("UPDATE workflows SET status = 'completed', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.id);
             const completed = workflow(item.id)!;
-            event(item.id, null, "completed", { message: "Todas as tasks foram aceitas." });
+            event(item.id, null, "completed", { message: "All tasks were accepted." });
             resolveParentAfterChild(completed);
             return { completed: true };
         }
@@ -185,12 +185,12 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
         db.prepare("UPDATE workflows SET status='cancelled', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(item.id);
         event(item.id, null, "cancelled", { by: "user", sessionId: harness.session() });
         resolveParentAfterChild(workflow(item.id)!);
-        return { content: [{ type: "text" as const, text: `Workflow #${item.id} cancelado.` }], details: { workflowId: item.id, status: "cancelled" } };
+        return { content: [{ type: "text" as const, text: `Workflow #${item.id} cancelled.` }], details: { workflowId: item.id, status: "cancelled" } };
     };
     const validateDefinition = (definition: WorkflowDefinition) => {
         for (const [index, task] of definition.tasks.entries())
             if (task.type === "collect" && !task.criteria)
-                throw new Error(`Task ${index + 1} é Collect e exige criteria.`);
+                throw new Error(`Task ${index + 1} is Collect and requires criteria.`);
     };
     const insertTasks = (workflowId: number, definition: WorkflowDefinition) => {
         const insertTask = db.prepare("INSERT INTO workflow_tasks (workflow_id, position, type, instruction, criteria, status) VALUES (?, ?, ?, ?, ?, 'pending')");
@@ -198,8 +198,8 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
     };
     const workflowResult = (workflowId: number, parentTask?: Task) => {
         const next = activateNext(workflow(workflowId)!);
-        const suffix = parentTask ? ` vinculado à task pai #${parentTask.id}.` : ".";
-        return { content: [{ type: "text" as const, text: next.completed ? `Workflow #${workflowId} criado e concluído${suffix}` : `Workflow #${workflowId} criado${suffix} Execute somente a task #${next.task!.position}: ${next.task!.instruction}` }], details: { workflowId, parentWorkflowId: parentTask?.workflow_id ?? null, parentTaskId: parentTask?.id ?? null, next } };
+        const suffix = parentTask ? ` linked to parent task #${parentTask.id}.` : ".";
+        return { content: [{ type: "text" as const, text: next.completed ? `Workflow #${workflowId} created and completed${suffix}` : `Workflow #${workflowId} created${suffix} Execute only task #${next.task!.position}: ${next.task!.instruction}` }], details: { workflowId, parentWorkflowId: parentTask?.workflow_id ?? null, parentTaskId: parentTask?.id ?? null, next } };
     };
     const createRootWorkflow = (definition: WorkflowDefinition) => {
         validateDefinition(definition);
@@ -218,15 +218,15 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
         validateDefinition(definition);
         const parentTask = one<Task>("SELECT id, workflow_id, position, type, instruction, criteria, status, attempts, result, evaluation, child_workflow_id FROM workflow_tasks WHERE id = ?", parentTaskId);
         if (!parentTask)
-            throw new Error(`Task pai #${parentTaskId} não existe.`);
+            throw new Error(`Parent task #${parentTaskId} does not exist.`);
         if (parentTask.workflow_id !== parentWorkflowId)
-            throw new Error("parentWorkflowId não corresponde ao workflow da parentTaskId.");
+            throw new Error("parentWorkflowId does not match parentTaskId's workflow.");
         if (parentTask.type !== "workflow")
             throw new Error(`Task pai #${parentTaskId} deve ser do tipo workflow.`);
         if (parentTask.status !== "running")
-            throw new Error(`Task pai #${parentTaskId} não está pronta para iniciar um subworkflow.`);
+            throw new Error(`Parent task #${parentTaskId} is not ready to start a subworkflow.`);
         if (parentTask.child_workflow_id !== null)
-            throw new Error(`Task pai #${parentTaskId} já possui um subworkflow vinculado.`);
+            throw new Error(`Parent task #${parentTaskId} already has a linked subworkflow.`);
         requireActiveWorkflow(parentWorkflowId);
         const workflowId = Number(db.prepare("INSERT INTO workflows (title, source, status, parent_workflow_id, session_id) VALUES (?, ?, 'running', ?, ?)").run(definition.title, definition.source, parentWorkflowId, harness.session()).lastInsertRowid);
         event(workflowId, null, "created", { title: definition.title, taskCount: definition.tasks.length, parentWorkflowId });
@@ -250,14 +250,14 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             }[];
             details: Record<string, unknown>;
         }> { return createSubworkflow(params, params.parentWorkflowId, params.parentTaskId); } });
-    pi.registerTool({ name: "sequential_workflow_prepare_template_directory", label: "Prepare Sequential Workflow Template Directory", description: "Cria, quando necessário, e informa o diretório padrão de templates JSON de Sequential Workflow do profile ativo.", promptSnippet: "Prepare the active profile's default Sequential Workflow template directory", promptGuidelines: ["Use sequential_workflow_prepare_template_directory only when the user explicitly names Sequential Workflow and asks to create or edit its JSON template without specifying an output directory."], parameters: Type.Object({}), async execute() { const path = templateDirectory(); await mkdir(path, { recursive: true }); return { content: [{ type: "text", text: `Diretório de templates pronto: ${path}` }], details: { path } }; } });
-    pi.registerTool({ name: "sequential_workflow_validate_template", label: "Validate Sequential Workflow Template", description: "Lê e valida um arquivo JSON de template de Sequential Workflow sem criar ou executar um workflow.", promptSnippet: "Validate a Sequential Workflow JSON template before it is used", promptGuidelines: ["Use sequential_workflow_validate_template only when the user explicitly names Sequential Workflow and asks to create, edit, or validate its JSON template."], parameters: Type.Object({ path: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
+    pi.registerTool({ name: "sequential_workflow_prepare_template_directory", label: "Prepare Sequential Workflow Template Directory", description: "Creates when needed and reports the active profile's default Sequential Workflow JSON template directory.", promptSnippet: "Prepare the active profile's default Sequential Workflow template directory", promptGuidelines: ["Use sequential_workflow_prepare_template_directory only when the user explicitly names Sequential Workflow and asks to create or edit its JSON template without specifying an output directory."], parameters: Type.Object({}), async execute() { const path = templateDirectory(); await mkdir(path, { recursive: true }); return { content: [{ type: "text", text: `Template directory is ready: ${path}` }], details: { path } }; } });
+    pi.registerTool({ name: "sequential_workflow_validate_template", label: "Validate Sequential Workflow Template", description: "Reads and validates a Sequential Workflow JSON template without creating or executing a workflow.", promptSnippet: "Validate a Sequential Workflow JSON template before it is used", promptGuidelines: ["Use sequential_workflow_validate_template only when the user explicitly names Sequential Workflow and asks to create, edit, or validate its JSON template."], parameters: Type.Object({ path: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
             content: {
                 type: "text";
                 text: string;
             }[];
             details: Record<string, unknown>;
-        }> { const loaded = await loadTemplate(params.path); return { content: [{ type: "text", text: `Template válido: ${loaded.path} (${loaded.template.tasks.length} tasks, SHA-256: ${loaded.hash}).` }], details: loaded }; } });
+        }> { const loaded = await loadTemplate(params.path); return { content: [{ type: "text", text: `Valid template: ${loaded.path} (${loaded.template.tasks.length} tasks, SHA-256: ${loaded.hash}).` }], details: loaded }; } });
     pi.registerTool({ name: "sequential_workflow_create_from_template", label: "Create Sequential Workflow from Template", description: "Loads an explicitly named reusable template to create a root workflow or hydrate a template-mode pending workflow.", promptSnippet: "Create a root Sequential Workflow from an explicitly named template", promptGuidelines: ["Use sequential_workflow_create_from_template only when the user explicitly requested activation from a named reusable Sequential Workflow JSON template, or when template-mode definition context supplies that exact path.", "The path must be explicitly supplied by the user or the controlled template-mode context. Never guess, search for, infer, or invent a template name or use this tool as a fallback for an ordinary workflow request.", "This tool never creates a subworkflow."], parameters: Type.Object({ path: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
             content: {
                 type: "text";
@@ -275,23 +275,23 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             const item = requireActiveWorkflow(params.workflowId);
             const task = currentTask(item.id);
             if (!task)
-                throw new Error("Não existe task pendente.");
+                throw new Error("There is no pending task.");
             if (task.type !== params.phase)
-                throw new Error(`A task atual é ${task.type}, não ${params.phase}.`);
+                throw new Error(`The current task is ${task.type}, not ${params.phase}.`);
             if (task.status === "evaluating")
-                throw new Error("O resultado já foi registrado; avalie a task atual.");
+                throw new Error("The result is already recorded; evaluate the current task.");
             if (task.criteria) {
                 db.prepare("UPDATE workflow_tasks SET result = ?, status = 'evaluating', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(params.result, task.id);
                 db.prepare("UPDATE workflows SET status = 'evaluating', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(item.id);
                 event(item.id, task.id, "result_recorded", { phase: params.phase, result: params.result });
-                return { content: [{ type: "text", text: `Resultado registrado. Agora avalie a task #${task.position} contra o critério.` }], details: { taskId: task.id, needsEvaluation: true } };
+                return { content: [{ type: "text", text: `Result recorded. Now evaluate task #${task.position} against its criteria.` }], details: { taskId: task.id, needsEvaluation: true } };
             }
             db.prepare("UPDATE workflow_tasks SET result = ?, status = 'accepted', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(params.result, task.id);
             event(item.id, task.id, "accepted_without_criteria", { result: params.result });
             const next = activateNext(item);
-            return { content: [{ type: "text", text: next.completed ? "Task aceita; workflow concluído." : `Task aceita. Execute a task #${next.task!.position}: ${next.task!.instruction}` }], details: { next } };
+            return { content: [{ type: "text", text: next.completed ? "Task accepted; workflow completed." : `Task accepted. Execute task #${next.task!.position}: ${next.task!.instruction}` }], details: { next } };
         } });
-    pi.registerTool({ name: "sequential_workflow_evaluate", label: "Evaluate Workflow Task", description: "Registra a aceitação ou reprovação da task atual de um workflow identificado.", promptSnippet: "Accept or reject the active workflow task after evaluation", promptGuidelines: ["Use sequential_workflow_evaluate after every task with criteria and for every Evaluate task; never advance a rejected task."], parameters: Type.Object({ workflowId: Type.Integer({ minimum: 1 }), taskId: Type.Integer({ minimum: 1 }), accepted: Type.Boolean(), reasoning: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
+    pi.registerTool({ name: "sequential_workflow_evaluate", label: "Evaluate Workflow Task", description: "Records acceptance or rejection of the current task in an identified workflow.", promptSnippet: "Accept or reject the active workflow task after evaluation", promptGuidelines: ["Use sequential_workflow_evaluate after every task with criteria and for every Evaluate task; never advance a rejected task."], parameters: Type.Object({ workflowId: Type.Integer({ minimum: 1 }), taskId: Type.Integer({ minimum: 1 }), accepted: Type.Boolean(), reasoning: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
             content: {
                 type: "text";
                 text: string;
@@ -301,14 +301,14 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             const item = requireActiveWorkflow(params.workflowId);
             const task = currentTask(item.id);
             if (!task)
-                throw new Error("Não existe task pendente.");
+                throw new Error("There is no pending task.");
             if (task.type !== "evaluate" && task.status !== "evaluating")
-                throw new Error("Registre o resultado da task antes de avaliá-la.");
+                throw new Error("Record the task result before evaluating it.");
             if (params.accepted) {
                 db.prepare("UPDATE workflow_tasks SET status = 'accepted', evaluation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(params.reasoning, task.id);
                 event(item.id, task.id, "accepted", { reasoning: params.reasoning });
                 const next = activateNext(item);
-                return { content: [{ type: "text", text: next.completed ? "Avaliação aceita; workflow concluído." : `Avaliação aceita. Execute somente a task #${next.task!.position}: ${next.task!.instruction}` }], details: { accepted: true, next } };
+                return { content: [{ type: "text", text: next.completed ? "Evaluation accepted; workflow completed." : `Evaluation accepted. Execute only task #${next.task!.position}: ${next.task!.instruction}` }], details: { accepted: true, next } };
             }
             if (task.type === "workflow") {
                 event(item.id, task.id, "child_detached", { childWorkflowId: task.child_workflow_id });
@@ -320,7 +320,7 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             db.prepare("UPDATE workflow_tasks SET status = ?, attempts = attempts + 1, evaluation = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(retryStatus, params.reasoning, task.id);
             db.prepare("UPDATE workflows SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(workflowStatus, item.id);
             event(item.id, task.id, "rejected", { reasoning: params.reasoning });
-            return { content: [{ type: "text", text: task.type === "collect" ? `Critério reprovado. Permaneça na task #${task.position}.` : `Critério reprovado. Permaneça na task #${task.position} e repita a ação.` }], details: { accepted: false, task: taskSummary(currentTask(item.id)!) } };
+            return { content: [{ type: "text", text: task.type === "collect" ? `Criteria rejected. Remain on task #${task.position}.` : `Criteria rejected. Remain on task #${task.position} and repeat the action.` }], details: { accepted: false, task: taskSummary(currentTask(item.id)!) } };
         } });
     pi.registerTool({ name: "sequential_workflow_cancel", label: "Cancel Sequential Workflow", description: "Cancela um workflow ativo deste profile, sem cancelar seus descendentes.", promptSnippet: "Cancel a Sequential Workflow", promptGuidelines: ["Use sequential_workflow_cancel only after the user explicitly asks to cancel a named Sequential Workflow.", "sequential_workflow_cancel can cancel a workflow created in another session of the same profile; do not require adoption first.", "Cancelling a child workflow lets its parent handle the terminal child state; do not cancel descendants automatically."], parameters: Type.Object({ workflowId: Type.Integer({ minimum: 1 }) }), async execute(_id, params): Promise<{
             content: {
@@ -338,11 +338,11 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
         }> {
             if (params.workflowId === undefined) {
                 const items = many<Workflow>("SELECT id, title, source, status, parent_workflow_id FROM workflows WHERE session_id = ? AND status IN ('pending_definition', 'running', 'awaiting_user', 'evaluating') ORDER BY id DESC", harness.session());
-                return { content: [{ type: "text", text: items.length ? items.map((item) => `#${item.id} ${item.title} (${item.status})${item.parent_workflow_id ? `, pai #${item.parent_workflow_id}` : ""}; task #${currentTask(item.id)?.position ?? "nenhuma"}.`).join("\n") : "Não há workflows ativos." }], details: { workflows: items.map((item) => ({ ...item, currentTask: currentTask(item.id) })) } };
+                return { content: [{ type: "text", text: items.length ? items.map((item) => `#${item.id} ${item.title} (${item.status})${item.parent_workflow_id ? `, parent #${item.parent_workflow_id}` : ""}; current task #${currentTask(item.id)?.position ?? "none"}.`).join("\n") : "There are no active workflows." }], details: { workflows: items.map((item) => ({ ...item, currentTask: currentTask(item.id) })) } };
             }
             const item = workflow(params.workflowId);
             if (!item)
-                throw new Error(`Workflow #${params.workflowId} não existe.`);
+                throw new Error(`Workflow #${params.workflowId} does not exist.`);
             const tasks = many<Task>("SELECT id, workflow_id, position, type, instruction, criteria, status, attempts, result, evaluation, child_workflow_id FROM workflow_tasks WHERE workflow_id = ? ORDER BY position", item.id);
             const children = params.includeChildren ? many<Workflow>("SELECT id, title, source, status, parent_workflow_id FROM workflows WHERE parent_workflow_id = ? ORDER BY id", item.id) : [];
             return { content: [{ type: "text", text: `Workflow #${item.id} (${item.status}). Task atual: ${currentTask(item.id)?.position ?? "nenhuma"}.` }], details: { workflow: item, tasks, children } };

@@ -45,11 +45,13 @@ async function setup(legacy = false) {
         session(id: string) { sessionId = id; }, reply(id: string) { userId = id; },
         call: (name: string, params: any) => tools.get(`sequential_workflow_${name}`).execute("call", params, undefined, undefined, ctx),
         command: (name: string, args = "") => commands.get(`workflow-${name}`).handler(args, ctx),
-        hook: async (name: string, args: any = {}) => { let value; for (const h of hooks.get(name) ?? []) {
+        hook: async (name: string, args: any = {}) => { let value; const beforeAgentMessages: any[] = []; for (const h of hooks.get(name) ?? []) {
             const result = await h(args, ctx);
+            if (name === "before_agent_start" && result?.message)
+                beforeAgentMessages.push(result.message);
             if (result !== undefined)
                 value = result;
-        } return value; },
+        } return name === "before_agent_start" && beforeAgentMessages.length ? { messages: beforeAgentMessages } : value; },
         async close() { for (const h of hooks.get("session_shutdown") ?? [])
             h(); if (previous === undefined)
             delete process.env.PI_CODING_AGENT_DIR;
@@ -127,7 +129,7 @@ test("child returns focus to parent; rejection allows replacement and cancellati
         const cancelled = await h.call("cancel", { workflowId: replacement.workflowId });
         assert.equal(cancelled.details.status, "cancelled");
         assert.equal((await h.call("status", replacement)).details.workflow.status, "cancelled");
-        await assert.rejects(h.call("cancel", { workflowId: replacement.workflowId }), /não pode ser alterado/);
+        await assert.rejects(h.call("cancel", { workflowId: replacement.workflowId }), /cannot be changed/);
         assert.equal((await h.call("status", parent)).details.tasks[0].status, "evaluating");
         await h.call("evaluate", { ...parent, accepted: true, reasoning: "Explicitly accept cancellation" });
         assert.equal((await h.call("status", parent)).details.tasks[1].status, "running");
@@ -238,7 +240,7 @@ test("detected Sequential Workflow requirement creates a pending workflow that b
         assert.equal("parentWorkflowId" in childParameters, true);
         assert.equal("parentTaskId" in childParameters, true);
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "The request requires a workflow." });
-        const request = "This skill requires a Sequential Workflow before work begins.";
+        const request = "Use a Sequential Workflow before work begins.";
         await h.hook("input", { text: request, source: "interactive" });
         const startup = await h.hook("before_agent_start", { prompt: request });
         assert.deepEqual(startup.messages.map((message: any) => message.customType), ["sequential-workflow-evaluation", "sequential-workflow-created"]);
