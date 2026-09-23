@@ -1,7 +1,7 @@
 "use client";
 import { createContext, useCallback, useContext, useRef, useState } from "react";
 
-type Profile = { name: string; path: string };
+type Profile = { name: string; path: string; description: string; tags: string[] };
 type ConsoleState = { profiles: Profile[]; health: string; error: string; initialize: () => Promise<void>; refreshProfiles: () => Promise<Profile[]> };
 const StateContext = createContext<ConsoleState | undefined>(undefined);
 

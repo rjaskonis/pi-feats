@@ -618,15 +618,21 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     });
     server.post("/api/profiles", async (request, reply) => {
       if (!guard(request, reply)) return;
-      const name = objectBody(request.body).name;
+      const body = objectBody(request.body), name = body.name;
       if (typeof name !== "string") throw Object.assign(new Error("The 'name' field must be a string."), { status: 400 });
-      const profile = await api.profiles.create(name);
+      const profile = await api.profiles.create(name, { description: body.description, tags: body.tags });
       return reply.code(201).send(profile);
     });
     server.get<{ Params: { profile: string } }>("/api/profiles/:profile", async (request, reply) => {
       if (!guard(request, reply)) return;
       const settings = await api.profiles.readSettings(profileName(request));
       return { name: profileName(request), path: api.profiles.directory(profileName(request)), hasSoul: true, hasRefine: true, policy: settings.profile ?? {} };
+    });
+    server.patch<{ Params: { profile: string } }>("/api/profiles/:profile", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      const body = objectBody(request.body);
+      if (body.description === undefined || body.tags === undefined) throw Object.assign(new Error("description and tags are required."), { status: 400 });
+      return { profile: await api.profiles.updateMetadata(profileName(request), { description: body.description, tags: body.tags }) };
     });
     server.delete<{ Params: { profile: string } }>("/api/profiles/:profile", async (request, reply) => {
       if (!guard(request, reply)) return;

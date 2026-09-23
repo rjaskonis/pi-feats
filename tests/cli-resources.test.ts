@@ -13,6 +13,24 @@ test("profile root uses the remote agent directory when no reexec root is set", 
   assert.equal(resolveRootAgentDir({ PI_CODING_AGENT_DIR: "/home/rj/.pi/agent", PI_PROFILE_ROOT: "/tmp/profile-root" }), "/tmp/profile-root");
 });
 
+test("profile metadata is listed and can be updated without changing policy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "profile-metadata-test-"));
+  try {
+    await mkdir(join(root, "profiles", "support"), { recursive: true });
+    await writeFile(join(root, "profiles", "support", "settings.json"), JSON.stringify({ profile: { enabledTools: ["read"], description: "Customer support", tags: ["Support", "priority"] } }));
+    const store = new ProfileStore(root);
+    const listed = await store.list();
+    assert.deepEqual(listed.find((profile) => profile.name === "support"), { name: "support", path: join(root, "profiles", "support"), description: "Customer support", tags: ["Support", "priority"] });
+    const updated = await store.updateMetadata("support", { description: "Escalation desk", tags: ["Priority", "priority", " on-call "] });
+    assert.deepEqual(updated.tags, ["priority", "on-call"]);
+    const settings = await store.readSettings("support");
+    assert.deepEqual(settings.profile?.enabledTools, ["read"]);
+    assert.equal(settings.profile?.description, "Escalation desk");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("profile Skills use enabledProfileSkills when listed", async () => {
   const root = await mkdtemp(join(tmpdir(), "cli-resources-test-"));
   const sharedSkills = join(root, "skills");

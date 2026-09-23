@@ -10,12 +10,24 @@ export type ResourceKind = typeof RESOURCE_KINDS[number];
 type PolicyKey = "enabledTools" | "enabledSkills" | "enabledProfileSkills" | "enabledExtensions";
 type SkillSources = { shared?: boolean; profile?: boolean };
 type SkillResourceSource = "shared" | "profile" | "package";
-type ProfilePolicy = Partial<Record<PolicyKey, string[]>> & { skillSources?: SkillSources; contextMemory?: { mode: "file"; target: "profile" | "identity" } | { mode: "handler"; handler: string } };
+export type ProfileMetadata = { description: string; tags: string[] };
+type ProfilePolicy = Partial<Record<PolicyKey, string[]>> & Partial<ProfileMetadata> & { skillSources?: SkillSources; contextMemory?: { mode: "file"; target: "profile" | "identity" } | { mode: "handler"; handler: string } };
 export type ProfileSettings = Record<string, unknown> & { profile?: ProfilePolicy; sandbox?: boolean };
 export type Resource = { name: string; kind: ResourceKind; path?: string; source: "builtin" | "shared" | "profile" | "extension" | "package"; package?: string; enabled: boolean; protected?: boolean };
 export type Package = { name: string; version?: string; description?: string; enabled: boolean; installed: boolean };
 
 const validName = (name: string) => /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name);
+const maxProfileDescriptionLength = 500;
+const maxProfileTags = 20;
+const maxProfileTagLength = 50;
+const profileMetadata = (value: unknown): ProfileMetadata => {
+  const input = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  if (input.description !== undefined && (typeof input.description !== "string" || input.description.length > maxProfileDescriptionLength)) throw Object.assign(new Error(`description must be a string of at most ${maxProfileDescriptionLength} characters.`), { status: 400 });
+  if (input.tags !== undefined && (!Array.isArray(input.tags) || input.tags.some((tag) => typeof tag !== "string"))) throw Object.assign(new Error("tags must be an array of strings."), { status: 400 });
+  const tags = [...new Map((input.tags as string[] | undefined ?? []).map((tag) => tag.trim()).filter(Boolean).map((tag) => [tag.toLocaleLowerCase(), tag])).values()];
+  if (tags.length > maxProfileTags || tags.some((tag) => tag.length > maxProfileTagLength)) throw Object.assign(new Error(`Use at most ${maxProfileTags} tags of at most ${maxProfileTagLength} characters.`), { status: 400 });
+  return { description: (input.description as string | undefined ?? "").trim(), tags };
+};
 const policyKey: Record<ResourceKind, PolicyKey> = {
   tools: "enabledTools",
   skills: "enabledSkills",
@@ -80,14 +92,13 @@ export class ProfileStore {
     }
   }
 
-  async list(): Promise<Array<{ name: string; path: string }>> {
-    const profiles = [{ name: "default", path: this.agentDir }];
-    if (!existsSync(this.profilesDir())) return profiles;
-    for (const entry of await readdir(this.profilesDir(), { withFileTypes: true })) {
-      if (entry.isDirectory() && existsSync(join(this.profilesDir(), entry.name, "settings.json"))) {
-        profiles.push({ name: entry.name, path: this.directory(entry.name) });
-      }
-    }
+  async list(): Promise<Array<{ name: string; path: string } & ProfileMetadata>> {
+    const names = ["default"];
+    if (existsSync(this.profilesDir())) for (const entry of await readdir(this.profilesDir(), { withFileTypes: true })) if (entry.isDirectory() && existsSync(join(this.profilesDir(), entry.name, "settings.json"))) names.push(entry.name);
+    const profiles = await Promise.all(names.map(async (name) => {
+      const settings = await this.readSettings(name);
+      return { name, path: this.directory(name), ...profileMetadata(settings.profile) };
+    }));
     return profiles.sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -323,10 +334,11 @@ export class ProfileStore {
     await this.refreshSkills(profile);
   }
 
-  async create(name: string): Promise<{ name: string; path: string }> {
+  async create(name: string, metadata: unknown = {}): Promise<{ name: string; path: string } & ProfileMetadata> {
     if (!validName(name) || name === "default") throw Object.assign(new Error("Invalid profile name"), { status: 400 });
     const destination = this.directory(name);
     if (existsSync(destination)) throw Object.assign(new Error("Profile already exists"), { status: 409 });
+    const details = profileMetadata(metadata);
     await mkdir(join(destination, "sessions"), { recursive: true });
     let base: ProfileSettings = {};
     try { base = await this.readSettings("default"); } catch {}
@@ -335,7 +347,7 @@ export class ProfileStore {
       ...profileBase,
       defaultTools: BUILTIN_TOOLS,
       sandbox: true,
-      profile: { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], skillSources: { shared: true, profile: false } },
+      profile: { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], skillSources: { shared: true, profile: false }, ...details },
     };
     await this.writeSettings(name, settings);
     await ensureProfileSandbox(destination, resolve(process.argv[1]));
@@ -344,7 +356,14 @@ export class ProfileStore {
     const auth = join(this.agentDir, "auth.json");
     if (existsSync(auth)) await copyFile(auth, join(destination, "auth.json"));
     await this.linkSharedModels(name);
-    return { name, path: destination };
+    return { name, path: destination, ...details };
+  }
+
+  async updateMetadata(name: string, metadata: unknown): Promise<{ name: string; path: string } & ProfileMetadata> {
+    const details = profileMetadata(metadata);
+    const settings = await this.readSettings(name);
+    await this.writeSettings(name, { ...settings, profile: { ...(settings.profile ?? {}), ...details } });
+    return { name, path: this.directory(name), ...details };
   }
 
   async delete(name: string): Promise<void> {
