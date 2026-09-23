@@ -257,16 +257,37 @@ test("definition mode constrains the next model context and restores tools after
     try {
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit request." });
         await h.hook("input", { text: "Create a Sequential Workflow for this request.", source: "interactive" });
-        assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create"]);
         const context = await h.hook("context_with_system", { messages: [{ role: "system", content: "old" }, { role: "user", content: "old request" }] });
         assert.equal(context.messages.length, 3);
         assert.equal(context.messages[0].content, "old");
         assert.equal(context.messages[1].content, "old request");
         assert.match(context.messages[2].content, /definition mode is active/);
+        assert.equal(h.messages.length, 0);
+        await h.hook("before_agent_start", {});
         assert.equal(h.messages[0][0].customType, "sequential-workflow-created");
         assert.equal(h.messages[0][0].display, true);
         await h.call("create", definition());
         assert.deepEqual(h.activeTools(), ["read", "bash", "edit", "write"]);
+    }
+    finally {
+        await h.close();
+    }
+});
+
+test("an explicitly named template uses only template activation and announces after input persistence", async () => {
+    const h = await setup();
+    try {
+        h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit template activation.", activation: "template", templatePath: "release.json" });
+        await h.hook("input", { text: "Create a Sequential Workflow from release.json", source: "interactive" });
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create_from_template"]);
+        assert.equal(h.messages.length, 0);
+        await h.hook("before_agent_start", {});
+        assert.match(h.messages[0][0].content, /Preparing workflow/);
+        assert.match(h.messages[0][0].content, /release\.json/);
+        const context = await h.hook("context_with_system", { messages: [] });
+        assert.match(context.messages[0].content, /sequential_workflow_create_from_template/);
+        assert.match(context.messages[0].content, /release\.json/);
     }
     finally {
         await h.close();
@@ -301,7 +322,7 @@ test("a required Skill starts definition mode without executing its read", async
         await h.hook("turn_start");
         const result = await h.hook("tool_call", { toolName: "read", input: { path: skillPath } });
         assert.deepEqual(result, { block: true, terminate: true, reason: "Sequential Workflow definition mode has started from the required Skill." });
-        assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create"]);
         const context = await h.hook("context_with_system", { messages: [] });
         assert.match(context.messages[0].content, /Required Skill/);
         assert.match(context.messages[0].content, /requires a Sequential Workflow/);
