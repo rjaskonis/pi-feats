@@ -46,6 +46,30 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     };
     const userEntry = () => context.getStore()!.sessionManager.getBranch().filter((e: any) => e.type === "message" && e.message.role === "user").at(-1)?.id ?? null;
     const addEvent = (workflowId: number, phase: string, payload: unknown) => db.prepare("INSERT INTO workflow_events(workflow_id, phase, payload) VALUES (?, ?, ?)").run(workflowId, phase, JSON.stringify(payload));
+    const definitionTools = ["sequential_workflow_create", "sequential_workflow_create_from_template"];
+    const definitionMode = (workflowId = pendingWorkflow()) => {
+        if (!workflowId)
+            return undefined;
+        const event = db.prepare("SELECT payload FROM workflow_events WHERE workflow_id = ? AND phase = 'definition_mode_started' ORDER BY id DESC LIMIT 1").get(workflowId) as any;
+        if (!event)
+            return undefined;
+        try {
+            return JSON.parse(event.payload) as { origin: "user_input" | "skill"; userRequest: string; skillPath?: string; skillContent?: string; activeTools: string[] };
+        }
+        catch {
+            return undefined;
+        }
+    };
+    const restoreDefinitionTools = (workflowId: number) => {
+        const mode = definitionMode(workflowId);
+        if (mode?.activeTools?.length)
+            host.setActiveTools(mode.activeTools);
+    };
+    const startDefinitionMode = (workflowId: number, origin: "user_input" | "skill", userRequest: string, skillPath?: string, skillContent?: string) => {
+        const activeTools = host.getActiveTools();
+        addEvent(workflowId, "definition_mode_started", { origin, userRequest, skillPath, skillContent, activeTools });
+        host.setActiveTools(definitionTools);
+    };
     const createPendingWorkflow = (origin: "user_input" | "skill", evidence: string, reasoning: string) => {
         const existing = pendingWorkflow();
         if (existing)
@@ -61,6 +85,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         const id = pendingWorkflow();
         if (!id)
             return false;
+        restoreDefinitionTools(id);
         db.prepare("UPDATE workflows SET status='cancelled', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(id);
         addEvent(id, "cancelled_by_user", { reason });
         save(stack().filter((workflowId) => workflowId !== id));
@@ -92,12 +117,15 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         queue = next.catch(() => undefined);
         return next;
     };
-    const classifyRequirement = async (ctx: ExtensionContext, origin: "user_input" | "skill", evidence: string) => {
+    const classifyRequirement = async (ctx: ExtensionContext, origin: "user_input" | "skill", evidence: string, userRequest: string) => {
         if (!ctx.model)
-            return { requiresSequentialWorkflow: true, reasoning: "No classifier model is available; blocked safely." };
+            return { requiresSequentialWorkflow: false, reasoning: "No classifier model is available; explicit intent cannot be confirmed." };
+        const policy = origin === "user_input"
+            ? "Return true only when the current user request explicitly asks to create, start, run, continue, inspect, or cancel a persisted Sequential Workflow. Mentions of Sequential Workflow, templates, Skills, code, prompts, bugs, documentation, or behavior are not requests. Never infer intent from relevance, multiple steps, or prior discussion. When uncertain return false."
+            : "Return true only when this Skill explicitly requires a persisted Sequential Workflow for the current user request. References to workflow templates, implementation, or documentation are not requirements. When uncertain return false.";
         const messages: any[] = [
-            { role: "system", content: "Determine whether the supplied context requires creating a persisted Sequential Workflow. Return only JSON with boolean requiresSequentialWorkflow and non-empty reasoning. Do not propose a template, tasks, or actions." },
-            { role: "user", content: JSON.stringify({ origin, evidence, recentUserMessages: ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").slice(-4).map((entry: any) => entry.message.content) }) },
+            { role: "system", content: `${policy} Return only JSON with boolean requiresSequentialWorkflow and non-empty reasoning. Do not propose a template, tasks, or actions.` },
+            { role: "user", content: JSON.stringify({ origin, evidence, userRequest, recentUserMessages: ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").slice(-4).map((entry: any) => entry.message.content) }) },
         ];
         ctx.ui.setStatus("sequential-workflow-evaluation", "Evaluating whether Sequential Workflow is required…");
         try {
@@ -109,7 +137,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return parsed as { requiresSequentialWorkflow: boolean; reasoning: string };
         }
         catch (error) {
-            return { requiresSequentialWorkflow: true, reasoning: `Classifier failed closed: ${error instanceof Error ? error.message : String(error)}` };
+            return { requiresSequentialWorkflow: false, reasoning: `Classifier could not confirm explicit intent: ${error instanceof Error ? error.message : String(error)}` };
         }
         finally {
             ctx.ui.setStatus("sequential-workflow-evaluation", undefined);
@@ -153,9 +181,12 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                 const wrapped = { ...definition, async execute(id: string, params: any, signal: any, update: any, ctx: ExtensionContext) {
                         return transaction(ctx, async () => {
                             assertOperation(definition.name, params);
+                            const pendingBefore = pendingWorkflow();
                             const result = await definition.execute(id, params, signal, update, ctx);
                             if (definition.name === "sequential_workflow_create" || definition.name === "sequential_workflow_create_subworkflow" || definition.name.endsWith("create_from_template")) {
                                 const workflowId = result.details.workflowId as number;
+                                if (pendingBefore === workflowId)
+                                    restoreDefinitionTools(workflowId);
                                 save([...new Set([...stack(), workflowId])]);
                             }
                             return result;
@@ -183,11 +214,13 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             await transaction(ctx, () => { cancelPendingWorkflowByUser(event.text); });
         }
         else if (!match && focus() === undefined && hasSequentialTerm(event.text)) {
-            const decision = await classifyRequirement(ctx, "user_input", event.text);
+            const decision = await classifyRequirement(ctx, "user_input", event.text, event.text);
             if (decision.requiresSequentialWorkflow)
                 await transaction(ctx, () => {
-                    if (focus() === undefined)
-                        createPendingWorkflow("user_input", event.text, decision.reasoning);
+                    if (focus() === undefined) {
+                        const workflowId = createPendingWorkflow("user_input", event.text, decision.reasoning);
+                        startDefinitionMode(workflowId, "user_input", event.text);
+                    }
                 });
         }
         if (!match)
@@ -207,12 +240,19 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     let continuations = 0;
     host.on("input", (event) => { if (event.source !== "extension")
         continuations = 0; });
+    host.on("agent_before_settle", (event, ctx) => context.run(ctx, () => {
+        const pending = pendingWorkflow();
+        if (pending && definitionMode(pending) && event.context.canContinue)
+            return { continue: true };
+    }));
     host.on("agent_end", (event, ctx) => context.run(ctx, () => {
         const last = event.messages.filter(m => m.role === "assistant").at(-1);
         if (last?.role === "assistant" && ["aborted", "error"].includes(last.stopReason))
             return;
         const id = focus();
         const pending = pendingWorkflow();
+        if (pending && definitionMode(pending))
+            return;
         const t = id ? task(id) : undefined;
         if (!pending && (!t || t.status === "awaiting_user" || t.status === "waiting_subworkflow"))
             return;
@@ -233,21 +273,28 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     // Pi preflights sibling calls before executing them. Allow only one call per
     // model turn while focused (including a create call that establishes focus).
     let dispatched = false;
-    host.on("turn_start", () => { dispatched = false; });
+    let definitionCutover = false;
+    const latestUserRequest = (ctx: ExtensionContext) => {
+        const content = ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").at(-1)?.message?.content;
+        return typeof content === "string" ? content : Array.isArray(content) ? content.map((part: any) => part.text ?? "").join("") : "";
+    };
+    host.on("turn_start", () => { dispatched = false; definitionCutover = false; });
     host.on("tool_call", async (event, ctx) => context.run(ctx, async () => {
-        let activatedBySkillRead = false;
         if (event.toolName === "read" && typeof event.input?.path === "string" && basename(event.input.path) === "SKILL.md" && focus() === undefined) {
             try {
                 const path = resolve(ctx.cwd, event.input.path);
                 const content = await readFile(path, "utf8");
                 if (hasSequentialTerm(content)) {
-                    const decision = await classifyRequirement(ctx, "skill", content);
+                    const userRequest = latestUserRequest(ctx);
+                    const decision = await classifyRequirement(ctx, "skill", content, userRequest);
                     if (decision.requiresSequentialWorkflow) {
                         await transaction(ctx, () => {
-                            if (focus() === undefined)
-                                createPendingWorkflow("skill", path, decision.reasoning);
+                            if (focus() === undefined) {
+                                const workflowId = createPendingWorkflow("skill", path, decision.reasoning);
+                                startDefinitionMode(workflowId, "skill", userRequest, path, content);
+                            }
                         });
-                        activatedBySkillRead = true;
+                        definitionCutover = true;
                     }
                 }
             }
@@ -255,6 +302,8 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                 // The original read tool reports path and access errors.
             }
         }
+        if (definitionCutover)
+            return { block: true, terminate: true, reason: "Sequential Workflow definition mode has started from the required Skill." };
         const id = focus();
         if (id === undefined && !event.toolName.startsWith("sequential_workflow_create")) {
             dispatched = true;
@@ -264,7 +313,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return { block: true, reason: "Sequential Workflow requires one tool call per model turn." };
         const t = id ? task(id) : undefined;
         const workflowTool = event.toolName.startsWith("sequential_workflow_");
-        if (pendingWorkflow() !== undefined && !workflowTool && !activatedBySkillRead)
+        if (pendingWorkflow() !== undefined && !workflowTool)
             return { block: true, reason: "Sequential Workflow creation is required before external tools may run." };
         if (t && !workflowTool && (t.type !== "action" || t.status !== "running"))
             return { block: true, reason: `Task ${t.id} is ${t.type}/${t.status}; external tools are blocked until the required workflow transition.` };
@@ -276,6 +325,18 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return { block: true, reason: String(error) };
         }
         dispatched = true;
+    }));
+    host.on("context_with_system", (event, ctx) => context.run(ctx, () => {
+        const workflowId = pendingWorkflow();
+        const mode = definitionMode(workflowId);
+        if (!workflowId || !mode)
+            return;
+        const skill = mode.skillContent ? `\n\nRequired Skill (${mode.skillPath ?? "SKILL.md"}):\n${mode.skillContent}` : "";
+        const systemPrompt = `${ctx.getSystemPrompt()}\n\nSequential Workflow definition mode is active. Define the focused pending workflow now. Make exactly one tool call to sequential_workflow_create or sequential_workflow_create_from_template. Do not read files or Skills, perform work, inspect state, create a subworkflow, or call any other tool.`;
+        return { messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: `Original user request:\n${mode.userRequest}${skill}` },
+            ] as any };
     }));
     host.on("context", (event, ctx) => context.run(ctx, () => {
         const messages = event.messages.filter(m => !(m.role === "custom" && m.customType === "sequential-workflow-state"));

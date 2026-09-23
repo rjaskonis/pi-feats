@@ -20,19 +20,23 @@ async function setup(legacy = false) {
     const messages: any[] = [];
     const notices: any[] = [];
     const statuses: any[] = [];
+    let activeTools = ["read", "bash", "edit", "write"];
     let classifierResponse: any;
-    const initialize = () => sequentialWorkflow({ registerTool: (t: any) => tools.set(t.name, t), registerCommand: (n: string, c: any) => commands.set(n, c), on: (n: string, h: any) => hooks.set(n, [...hooks.get(n) ?? [], h]), sendMessage: (...args: any[]) => messages.push(args) } as any);
+    const initialize = () => sequentialWorkflow({ registerTool: (t: any) => tools.set(t.name, t), registerCommand: (n: string, c: any) => commands.set(n, c), on: (n: string, h: any) => hooks.set(n, [...hooks.get(n) ?? [], h]), sendMessage: (...args: any[]) => messages.push(args), getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools = names; } } as any);
     initialize();
     let sessionId = "A";
     let userId = "user-1";
     const ctx: any = {
-        sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ id: userId, type: "message", message: { role: "user" } }] },
+        cwd: root,
+        getSystemPrompt: () => "Base system prompt",
+        sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ id: userId, type: "message", message: { role: "user", content: "Current user request" } }] },
         ui: { notify: (...args: any[]) => notices.push(args), setStatus: (...args: any[]) => statuses.push(args) },
         model: undefined,
         modelRegistry: { streamSimple: (_model: any, context: any) => ({ result: async () => ({ content: [{ type: "text", text: JSON.stringify(classifierResponse) }], context }) }) },
     };
     return {
         root, messages, notices, statuses, tools,
+        activeTools: () => activeTools,
         enableClassifier(response: any) { classifierResponse = response; ctx.model = {}; },
         reload() { for (const h of hooks.get("session_shutdown") ?? [])
             h(); hooks.clear(); tools.clear(); commands.clear(); initialize(); },
@@ -246,9 +250,66 @@ test("detected Sequential Workflow requirement creates a pending workflow that b
         await h.close();
     }
 });
+test("definition mode constrains the next model context and restores tools after hydration", async () => {
+    const h = await setup();
+    try {
+        h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit request." });
+        await h.hook("input", { text: "Create a Sequential Workflow for this request.", source: "interactive" });
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
+        const context = await h.hook("context_with_system", { messages: [{ role: "system", content: "old" }, { role: "user", content: "old request" }] });
+        assert.equal(context.messages.length, 2);
+        assert.match(context.messages[0].content, /definition mode is active/);
+        assert.match(context.messages[1].content, /Original user request/);
+        await h.call("create", definition());
+        assert.deepEqual(h.activeTools(), ["read", "bash", "edit", "write"]);
+    }
+    finally {
+        await h.close();
+    }
+});
+
+test("a discussion of Sequential Workflow after cancellation does not recreate it", async () => {
+    const h = await setup();
+    try {
+        h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit request." });
+        await h.hook("input", { text: "Create a Sequential Workflow.", source: "interactive" });
+        const pending = (await h.call("status", {})).details.workflows[0];
+        await h.hook("input", { text: "Cancel the Sequential Workflow.", source: "interactive" });
+        assert.equal((await h.call("status", { workflowId: pending.id })).details.workflow.status, "cancelled");
+        h.enableClassifier({ requiresSequentialWorkflow: false, reasoning: "This is a discussion, not a request." });
+        await h.hook("input", { text: "The Sequential Workflow template should explain script paths better. What is your analysis?", source: "interactive" });
+        assert.equal((await h.call("status", {})).details.workflows.length, 0);
+    }
+    finally {
+        await h.close();
+    }
+});
+
+test("a required Skill starts definition mode without executing its read", async () => {
+    const h = await setup();
+    try {
+        const skillDir = join(h.root, "required-skill");
+        await mkdir(skillDir);
+        const skillPath = join(skillDir, "SKILL.md");
+        await writeFile(skillPath, "This operation requires a Sequential Workflow.");
+        h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "The Skill explicitly requires it." });
+        await h.hook("turn_start");
+        const result = await h.hook("tool_call", { toolName: "read", input: { path: skillPath } });
+        assert.deepEqual(result, { block: true, terminate: true, reason: "Sequential Workflow definition mode has started from the required Skill." });
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
+        const context = await h.hook("context_with_system", { messages: [] });
+        assert.match(context.messages[1].content, /Required Skill/);
+        assert.match(context.messages[1].content, /requires a Sequential Workflow/);
+    }
+    finally {
+        await h.close();
+    }
+});
+
 test("only an explicit user override dismisses a pending workflow requirement", async () => {
     const h = await setup();
     try {
+        h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit request." });
         await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });
         const pending = (await h.call("status", {})).details.workflows[0];
         await h.hook("input", { text: "Don't create it; continue manually.", source: "interactive" });
