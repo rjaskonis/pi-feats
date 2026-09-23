@@ -22,7 +22,14 @@ type ProfilePolicy = {
 type ProfileSettings = Record<string, unknown> & { profile?: ProfilePolicy };
 
 const defaultAgentDir = join(homedir(), ".pi", "agent");
-const rootAgentDir = () => process.env.PI_PROFILE_ROOT ?? defaultAgentDir;
+
+// PI_CODING_AGENT_DIR is set by the remote launcher before the profiles
+// extension runs. PI_PROFILE_ROOT takes precedence only after a profile reexec.
+export function resolveRootAgentDir(environment: NodeJS.ProcessEnv = process.env) {
+  return environment.PI_PROFILE_ROOT ?? environment.PI_CODING_AGENT_DIR ?? defaultAgentDir;
+}
+
+const rootAgentDir = () => resolveRootAgentDir();
 const profilesDir = () => join(rootAgentDir(), "profiles");
 const profileDir = (name: string) => join(profilesDir(), name);
 const validProfileName = (name: string) => /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name);

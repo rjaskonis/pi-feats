@@ -6,7 +6,12 @@ import test from "node:test";
 import { activeBuiltinTools, updatedBuiltinTools } from "../extensions/lib/builtin-tools.ts";
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
 import { skillRows } from "../extensions/cli-resources.ts";
-import { rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
+import { resolveRootAgentDir, rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
+
+test("profile root uses the remote agent directory when no reexec root is set", () => {
+  assert.equal(resolveRootAgentDir({ PI_CODING_AGENT_DIR: "/home/rj/.pi/agent" }), "/home/rj/.pi/agent");
+  assert.equal(resolveRootAgentDir({ PI_CODING_AGENT_DIR: "/home/rj/.pi/agent", PI_PROFILE_ROOT: "/tmp/profile-root" }), "/tmp/profile-root");
+});
 
 test("profile Skills use enabledProfileSkills when listed", async () => {
   const root = await mkdtemp(join(tmpdir(), "cli-resources-test-"));
