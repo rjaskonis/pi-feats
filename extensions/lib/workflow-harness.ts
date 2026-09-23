@@ -92,6 +92,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         host.setActiveTools(definitionTools(activation));
     };
     const definitionEvaluationSent = (workflowId: number) => Boolean(db.prepare("SELECT 1 FROM workflow_events WHERE workflow_id = ? AND phase = 'definition_mode_evaluated' LIMIT 1").get(workflowId));
+    const harnessEventExists = (workflowId: number, phase: string) => Boolean(db.prepare("SELECT 1 FROM workflow_harness_events WHERE session_id = ? AND (workflow_id = ? OR workflow_id IS NULL) AND phase = ? LIMIT 1").get(session(), workflowId, phase));
     const definitionAnnouncementSent = (workflowId: number) => Boolean(db.prepare("SELECT 1 FROM workflow_events WHERE workflow_id = ? AND phase = 'definition_mode_announced' LIMIT 1").get(workflowId));
     const announceDefinitionMode = (workflowId: number) => {
         const mode = definitionMode(workflowId);
@@ -255,6 +256,8 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                             }
                             else if (definition.name === "sequential_workflow_evaluate" && (params.outcome === "retry" || params.accepted === false))
                                 audit("task_retry", { taskId: params.taskId, message: `Task #${params.taskId} will be retried.` }, undefined, params.workflowId, true);
+                            if ((definition.name === "sequential_workflow_evaluate" || definition.name === "sequential_workflow_record_result") && result.details?.next?.completed)
+                                audit("workflow_completed", { message: `Workflow #${params.workflowId} completed.` }, undefined, params.workflowId, true);
                             return result;
                         });
                     } };
@@ -263,6 +266,14 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             };
         } });
     let namedActivation = false;
+    host.on("before_agent_start", (_event, ctx) => context.run(ctx, () => {
+        const pending = pendingWorkflow();
+        const mode = definitionMode(pending);
+        if (!pending || mode?.origin !== "user_input" || !harnessEventExists(pending, "requirement_check_started") || harnessEventExists(pending, "requirement_check_announced"))
+            return;
+        audit("requirement_check_announced", { message: "Checking whether Sequential Workflow is required…" }, "user_input", pending);
+        return { message: { customType: "sequential-workflow-harness", content: "Checking whether Sequential Workflow is required…", display: true, details: { workflowId: pending, phase: "requirement_check_started", origin: "user_input" } } };
+    }));
     host.on("before_agent_start", (_event, ctx) => context.run(ctx, () => {
         const pending = pendingWorkflow();
         const mode = definitionMode(pending);
@@ -298,8 +309,10 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             const templatePath = explicitTemplatePath(event.text);
             await transaction(ctx, () => {
                 if (focus() === undefined) {
+                    audit("requirement_check_started", { message: "Checking whether Sequential Workflow is required…" }, "user_input");
                     const workflowId = createPendingWorkflow("user_input", event.text, "Explicit Sequential Workflow request.");
                     startDefinitionMode(workflowId, "user_input", event.text, templatePath ? "template" : "definition", templatePath);
+                    audit("definition_mode_started", { message: `Sequential Workflow definition mode started for workflow #${workflowId}.` }, "user_input", workflowId);
                 }
             });
         }
