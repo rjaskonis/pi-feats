@@ -113,11 +113,11 @@ test("child returns focus to parent; rejection allows replacement and cancellati
     const h = await setup();
     try {
         const parent = ids(await h.call("create", definition([{ type: "workflow", instruction: "Child", criteria: "Good result" }, action])));
-        const child = ids(await h.call("create", { ...definition(), parentTaskId: parent.taskId }));
+        const child = ids(await h.call("create_subworkflow", { ...definition(), parentWorkflowId: parent.workflowId, parentTaskId: parent.taskId }));
         await assert.rejects(h.call("evaluate", { ...parent, accepted: true, reasoning: "skip" }), /focused/);
         await h.call("record_result", { ...child, phase: "action", result: "done" });
         await h.call("evaluate", { ...parent, accepted: false, reasoning: "retry" });
-        const replacement = ids(await h.call("create", { ...definition(), parentTaskId: parent.taskId }));
+        const replacement = ids(await h.call("create_subworkflow", { ...definition(), parentWorkflowId: parent.workflowId, parentTaskId: parent.taskId }));
         const cancelled = await h.call("cancel", { workflowId: replacement.workflowId });
         assert.equal(cancelled.details.status, "cancelled");
         assert.equal((await h.call("status", replacement)).details.workflow.status, "cancelled");
@@ -134,7 +134,7 @@ test("cancellation crosses sessions without changing descendant ownership", asyn
     const h = await setup();
     try {
         const parent = ids(await h.call("create", definition([{ type: "workflow", instruction: "Child" }])));
-        const child = ids(await h.call("create", { ...definition(), parentTaskId: parent.taskId }));
+        const child = ids(await h.call("create_subworkflow", { ...definition(), parentWorkflowId: parent.workflowId, parentTaskId: parent.taskId }));
         h.session("B");
         const cancelled = await h.call("cancel", { workflowId: parent.workflowId });
         assert.equal(cancelled.details.status, "cancelled");
@@ -225,6 +225,12 @@ test("missing named template fails closed without creating a replacement", async
 test("detected Sequential Workflow requirement creates a pending workflow that blocks work until hydrated", async () => {
     const h = await setup();
     try {
+        const rootParameters = h.tools.get("sequential_workflow_create").parameters.properties;
+        const childParameters = h.tools.get("sequential_workflow_create_subworkflow").parameters.properties;
+        assert.equal("parentWorkflowId" in rootParameters, false);
+        assert.equal("parentTaskId" in rootParameters, false);
+        assert.equal("parentWorkflowId" in childParameters, true);
+        assert.equal("parentTaskId" in childParameters, true);
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "The request requires a workflow." });
         await h.hook("input", { text: "This skill requires a Sequential Workflow before work begins.", source: "interactive" });
         assert.deepEqual(h.statuses, [["sequential-workflow-evaluation", "Evaluating whether Sequential Workflow is required…"], ["sequential-workflow-evaluation", undefined]]);

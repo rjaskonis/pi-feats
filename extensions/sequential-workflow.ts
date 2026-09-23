@@ -187,55 +187,69 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
         resolveParentAfterChild(workflow(item.id)!);
         return { content: [{ type: "text" as const, text: `Workflow #${item.id} cancelado.` }], details: { workflowId: item.id, status: "cancelled" } };
     };
-    const createWorkflow = (definition: WorkflowDefinition, parentWorkflowId?: number, parentTaskId?: number) => {
+    const validateDefinition = (definition: WorkflowDefinition) => {
         for (const [index, task] of definition.tasks.entries())
             if (task.type === "collect" && !task.criteria)
                 throw new Error(`Task ${index + 1} é Collect e exige criteria.`);
-        let parentTask: Task | undefined;
-        if (parentTaskId !== undefined) {
-            parentTask = one<Task>("SELECT id, workflow_id, position, type, instruction, criteria, status, attempts, result, evaluation, child_workflow_id FROM workflow_tasks WHERE id = ?", parentTaskId);
-            if (!parentTask)
-                throw new Error(`Task pai #${parentTaskId} não existe.`);
-            if (parentTask.type !== "workflow")
-                throw new Error(`Task pai #${parentTaskId} deve ser do tipo workflow.`);
-            if (parentTask.status !== "running")
-                throw new Error(`Task pai #${parentTaskId} não está pronta para iniciar um subworkflow.`);
-            if (parentTask.child_workflow_id !== null)
-                throw new Error(`Task pai #${parentTaskId} já possui um subworkflow vinculado.`);
-            if (parentWorkflowId !== undefined && parentWorkflowId !== parentTask.workflow_id)
-                throw new Error("parentWorkflowId não corresponde ao workflow da parentTaskId.");
-            parentWorkflowId = parentTask.workflow_id;
-            requireActiveWorkflow(parentWorkflowId);
-        }
-        else if (parentWorkflowId !== undefined && !workflow(parentWorkflowId))
-            throw new Error(`Workflow pai #${parentWorkflowId} não existe.`);
-        {
-            const pendingWorkflowId = parentTask ? undefined : harness.pendingWorkflow();
-            const workflowId = pendingWorkflowId ?? Number(db.prepare("INSERT INTO workflows (title, source, status, parent_workflow_id, session_id) VALUES (?, ?, 'running', ?, ?)").run(definition.title, definition.source, parentWorkflowId ?? null, harness.session()).lastInsertRowid);
-            if (pendingWorkflowId) {
-                db.prepare("UPDATE workflows SET title=?, source=?, status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(definition.title, definition.source, workflowId);
-                event(workflowId, null, "definition_supplied", { title: definition.title, taskCount: definition.tasks.length });
-            }
-            const insertTask = db.prepare("INSERT INTO workflow_tasks (workflow_id, position, type, instruction, criteria, status) VALUES (?, ?, ?, ?, ?, 'pending')");
-            definition.tasks.forEach((task, index) => insertTask.run(workflowId, index + 1, task.type, task.instruction, task.criteria ?? null));
-            if (!pendingWorkflowId)
-                event(workflowId, null, "created", { title: definition.title, taskCount: definition.tasks.length, parentWorkflowId: parentWorkflowId ?? null });
-            if (parentTask) {
-                db.prepare("UPDATE workflow_tasks SET child_workflow_id = ?, status = 'waiting_subworkflow', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(workflowId, parentTask.id);
-                event(parentTask.workflow_id, parentTask.id, "child_linked", { childWorkflowId: workflowId });
-            }
-            const next = activateNext(workflow(workflowId)!);
-            const suffix = parentTask ? ` vinculado à task pai #${parentTask.id}.` : ".";
-            return { content: [{ type: "text" as const, text: next.completed ? `Workflow #${workflowId} criado e concluído${suffix}` : `Workflow #${workflowId} criado${suffix} Execute somente a task #${next.task!.position}: ${next.task!.instruction}` }], details: { workflowId, parentWorkflowId: parentWorkflowId ?? null, parentTaskId: parentTask?.id ?? null, next } };
-        }
     };
-    pi.registerTool({ name: "sequential_workflow_create", label: "Create Sequential Workflow", description: "Persiste um workflow e ativa sua primeira task, sem bloquear outros workflows.", promptSnippet: "Create a persisted sequential workflow", promptGuidelines: ["Use sequential_workflow_create after the user explicitly requests Sequential Workflow or when the harness has focused a pending workflow definition that requires creation.", "A Collect task passed to sequential_workflow_create must include acceptance criteria."], parameters: Type.Object({ title: Type.String({ minLength: 1 }), source: Type.String({ minLength: 1 }), parentWorkflowId: Type.Optional(Type.Integer({ minimum: 1 })), parentTaskId: Type.Optional(Type.Integer({ minimum: 1 })), tasks: Type.Array(Type.Object({ type: taskType, instruction: Type.String({ minLength: 1 }), criteria: Type.Optional(Type.String({ minLength: 1 })) }), { minItems: 1 }) }), async execute(_id, params): Promise<{
+    const insertTasks = (workflowId: number, definition: WorkflowDefinition) => {
+        const insertTask = db.prepare("INSERT INTO workflow_tasks (workflow_id, position, type, instruction, criteria, status) VALUES (?, ?, ?, ?, ?, 'pending')");
+        definition.tasks.forEach((task, index) => insertTask.run(workflowId, index + 1, task.type, task.instruction, task.criteria ?? null));
+    };
+    const workflowResult = (workflowId: number, parentTask?: Task) => {
+        const next = activateNext(workflow(workflowId)!);
+        const suffix = parentTask ? ` vinculado à task pai #${parentTask.id}.` : ".";
+        return { content: [{ type: "text" as const, text: next.completed ? `Workflow #${workflowId} criado e concluído${suffix}` : `Workflow #${workflowId} criado${suffix} Execute somente a task #${next.task!.position}: ${next.task!.instruction}` }], details: { workflowId, parentWorkflowId: parentTask?.workflow_id ?? null, parentTaskId: parentTask?.id ?? null, next } };
+    };
+    const createRootWorkflow = (definition: WorkflowDefinition) => {
+        validateDefinition(definition);
+        const pendingWorkflowId = harness.pendingWorkflow();
+        const workflowId = pendingWorkflowId ?? Number(db.prepare("INSERT INTO workflows (title, source, status, session_id) VALUES (?, ?, 'running', ?)").run(definition.title, definition.source, harness.session()).lastInsertRowid);
+        if (pendingWorkflowId) {
+            db.prepare("UPDATE workflows SET title=?, source=?, status='running', updated_at=CURRENT_TIMESTAMP WHERE id=?").run(definition.title, definition.source, workflowId);
+            event(workflowId, null, "definition_supplied", { title: definition.title, taskCount: definition.tasks.length });
+        }
+        else
+            event(workflowId, null, "created", { title: definition.title, taskCount: definition.tasks.length, parentWorkflowId: null });
+        insertTasks(workflowId, definition);
+        return workflowResult(workflowId);
+    };
+    const createSubworkflow = (definition: WorkflowDefinition, parentWorkflowId: number, parentTaskId: number) => {
+        validateDefinition(definition);
+        const parentTask = one<Task>("SELECT id, workflow_id, position, type, instruction, criteria, status, attempts, result, evaluation, child_workflow_id FROM workflow_tasks WHERE id = ?", parentTaskId);
+        if (!parentTask)
+            throw new Error(`Task pai #${parentTaskId} não existe.`);
+        if (parentTask.workflow_id !== parentWorkflowId)
+            throw new Error("parentWorkflowId não corresponde ao workflow da parentTaskId.");
+        if (parentTask.type !== "workflow")
+            throw new Error(`Task pai #${parentTaskId} deve ser do tipo workflow.`);
+        if (parentTask.status !== "running")
+            throw new Error(`Task pai #${parentTaskId} não está pronta para iniciar um subworkflow.`);
+        if (parentTask.child_workflow_id !== null)
+            throw new Error(`Task pai #${parentTaskId} já possui um subworkflow vinculado.`);
+        requireActiveWorkflow(parentWorkflowId);
+        const workflowId = Number(db.prepare("INSERT INTO workflows (title, source, status, parent_workflow_id, session_id) VALUES (?, ?, 'running', ?, ?)").run(definition.title, definition.source, parentWorkflowId, harness.session()).lastInsertRowid);
+        event(workflowId, null, "created", { title: definition.title, taskCount: definition.tasks.length, parentWorkflowId });
+        insertTasks(workflowId, definition);
+        db.prepare("UPDATE workflow_tasks SET child_workflow_id = ?, status = 'waiting_subworkflow', updated_at = CURRENT_TIMESTAMP WHERE id = ?").run(workflowId, parentTask.id);
+        event(parentTask.workflow_id, parentTask.id, "child_linked", { childWorkflowId: workflowId });
+        return workflowResult(workflowId, parentTask);
+    };
+    const definitionParameters = { title: Type.String({ minLength: 1 }), source: Type.String({ minLength: 1 }), tasks: Type.Array(Type.Object({ type: taskType, instruction: Type.String({ minLength: 1 }), criteria: Type.Optional(Type.String({ minLength: 1 })) }), { minItems: 1 }) };
+    pi.registerTool({ name: "sequential_workflow_create", label: "Create Sequential Workflow", description: "Creates a root workflow or defines the focused pending workflow.", promptSnippet: "Create or define a root Sequential Workflow", promptGuidelines: ["Use sequential_workflow_create to create a root workflow or define the focused pending workflow. It never creates a subworkflow.", "A Collect task passed to sequential_workflow_create must include acceptance criteria."], parameters: Type.Object(definitionParameters), async execute(_id, params): Promise<{
             content: {
                 type: "text";
                 text: string;
             }[];
             details: Record<string, unknown>;
-        }> { return createWorkflow(params, params.parentWorkflowId, params.parentTaskId); } });
+        }> { return createRootWorkflow(params); } });
+    pi.registerTool({ name: "sequential_workflow_create_subworkflow", label: "Create Sequential Subworkflow", description: "Creates a child workflow for the focused running workflow task.", promptSnippet: "Create a Sequential Workflow child", promptGuidelines: ["Use only when the focused current task has type workflow and requires a child workflow.", "parentWorkflowId and parentTaskId are required and must identify that focused running task."], parameters: Type.Object({ parentWorkflowId: Type.Integer({ minimum: 1 }), parentTaskId: Type.Integer({ minimum: 1 }), ...definitionParameters }), async execute(_id, params): Promise<{
+            content: {
+                type: "text";
+                text: string;
+            }[];
+            details: Record<string, unknown>;
+        }> { return createSubworkflow(params, params.parentWorkflowId, params.parentTaskId); } });
     pi.registerTool({ name: "sequential_workflow_prepare_template_directory", label: "Prepare Sequential Workflow Template Directory", description: "Cria, quando necessário, e informa o diretório padrão de templates JSON de Sequential Workflow do profile ativo.", promptSnippet: "Prepare the active profile's default Sequential Workflow template directory", promptGuidelines: ["Use sequential_workflow_prepare_template_directory only when the user explicitly names Sequential Workflow and asks to create or edit its JSON template without specifying an output directory."], parameters: Type.Object({}), async execute() { const path = templateDirectory(); await mkdir(path, { recursive: true }); return { content: [{ type: "text", text: `Diretório de templates pronto: ${path}` }], details: { path } }; } });
     pi.registerTool({ name: "sequential_workflow_validate_template", label: "Validate Sequential Workflow Template", description: "Lê e valida um arquivo JSON de template de Sequential Workflow sem criar ou executar um workflow.", promptSnippet: "Validate a Sequential Workflow JSON template before it is used", promptGuidelines: ["Use sequential_workflow_validate_template only when the user explicitly names Sequential Workflow and asks to create, edit, or validate its JSON template."], parameters: Type.Object({ path: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
             content: {
@@ -244,13 +258,13 @@ CREATE TABLE IF NOT EXISTS workflow_events (id INTEGER PRIMARY KEY AUTOINCREMENT
             }[];
             details: Record<string, unknown>;
         }> { const loaded = await loadTemplate(params.path); return { content: [{ type: "text", text: `Template válido: ${loaded.path} (${loaded.template.tasks.length} tasks, SHA-256: ${loaded.hash}).` }], details: loaded }; } });
-    pi.registerTool({ name: "sequential_workflow_create_from_template", label: "Create Sequential Workflow from Template", description: "Lê um template JSON validado e cria um workflow.", promptSnippet: "Create and start a persisted Sequential Workflow from a validated JSON template", promptGuidelines: ["Use sequential_workflow_create_from_template when the user explicitly requests Sequential Workflow or when the harness has focused a pending workflow definition that requires creation."], parameters: Type.Object({ path: Type.String({ minLength: 1 }), parentWorkflowId: Type.Optional(Type.Integer({ minimum: 1 })), parentTaskId: Type.Optional(Type.Integer({ minimum: 1 })) }), async execute(_id, params): Promise<{
+    pi.registerTool({ name: "sequential_workflow_create_from_template", label: "Create Sequential Workflow from Template", description: "Loads a template to create a root workflow or define the focused pending workflow.", promptSnippet: "Create a root Sequential Workflow from a validated template", promptGuidelines: ["Use sequential_workflow_create_from_template when the user explicitly requests Sequential Workflow or when the harness has focused a pending workflow definition that requires creation.", "This tool never creates a subworkflow."], parameters: Type.Object({ path: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
             content: {
                 type: "text";
                 text: string;
             }[];
             details: Record<string, unknown>;
-        }> { const loaded = await loadTemplate(params.path); return createWorkflow({ title: loaded.template.title, source: `Template ${loaded.path} (SHA-256: ${loaded.hash}): ${loaded.template.source}`, tasks: loaded.template.tasks }, params.parentWorkflowId, params.parentTaskId); } });
+        }> { const loaded = await loadTemplate(params.path); return createRootWorkflow({ title: loaded.template.title, source: `Template ${loaded.path} (SHA-256: ${loaded.hash}): ${loaded.template.source}`, tasks: loaded.template.tasks }); } });
     pi.registerTool({ name: "sequential_workflow_record_result", label: "Record Workflow Result", description: "Registra o resultado da Action ou Collect atual de um workflow identificado.", promptSnippet: "Record the result of the active Action or Collect task", promptGuidelines: ["Use sequential_workflow_record_result immediately after completing the active Action or receiving the active Collect response."], parameters: Type.Object({ workflowId: Type.Integer({ minimum: 1 }), taskId: Type.Integer({ minimum: 1 }), phase: phaseType, result: Type.String({ minLength: 1 }) }), async execute(_id, params): Promise<{
             content: {
                 type: "text";

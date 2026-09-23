@@ -134,15 +134,15 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             }
         }
         if (name === "sequential_workflow_create" || name.endsWith("create_from_template")) {
-            if (params.parentWorkflowId !== undefined)
-                own(params.parentWorkflowId);
-            if (params.parentTaskId !== undefined) {
-                const t = db.prepare("SELECT * FROM workflow_tasks WHERE id = ?").get(params.parentTaskId) as any;
-                if (!t || own(t.workflow_id).id !== focus() || task(t.workflow_id)?.id !== t.id)
-                    throw new Error("Child must belong to the current focused task.");
-            }
-            else if (focus() !== undefined && pendingWorkflow() === undefined)
+            if (focus() !== undefined && pendingWorkflow() === undefined)
                 throw new Error("Suspend the current workflow with /workflow-suspend before creating an independent execution.");
+        }
+        if (name === "sequential_workflow_create_subworkflow") {
+            const t = db.prepare("SELECT * FROM workflow_tasks WHERE id = ?").get(params.parentTaskId) as any;
+            if (!t || t.workflow_id !== params.parentWorkflowId || own(t.workflow_id).id !== focus() || task(t.workflow_id)?.id !== t.id)
+                throw new Error("A subworkflow must belong to the current focused task.");
+            if (t.type !== "workflow" || t.status !== "running")
+                throw new Error("A subworkflow requires a running workflow task.");
         }
     };
     const tools = new Map<string, any>();
@@ -154,7 +154,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                         return transaction(ctx, async () => {
                             assertOperation(definition.name, params);
                             const result = await definition.execute(id, params, signal, update, ctx);
-                            if (definition.name === "sequential_workflow_create" || definition.name.endsWith("create_from_template")) {
+                            if (definition.name === "sequential_workflow_create" || definition.name === "sequential_workflow_create_subworkflow" || definition.name.endsWith("create_from_template")) {
                                 const workflowId = result.details.workflowId as number;
                                 save([...new Set([...stack(), workflowId])]);
                             }
