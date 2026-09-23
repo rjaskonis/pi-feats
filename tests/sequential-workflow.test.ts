@@ -20,9 +20,11 @@ async function setup(legacy = false) {
     const messages: any[] = [];
     const notices: any[] = [];
     const statuses: any[] = [];
+    const workingMessages: any[] = [];
+    const renderers = new Map<string, any>();
     let activeTools = ["read", "bash", "edit", "write"];
     let classifierResponse: any;
-    const initialize = () => sequentialWorkflow({ registerTool: (t: any) => tools.set(t.name, t), registerCommand: (n: string, c: any) => commands.set(n, c), on: (n: string, h: any) => hooks.set(n, [...hooks.get(n) ?? [], h]), sendMessage: (...args: any[]) => messages.push(args), getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools = names; } } as any);
+    const initialize = () => sequentialWorkflow({ registerTool: (t: any) => tools.set(t.name, t), registerCommand: (n: string, c: any) => commands.set(n, c), registerMessageRenderer: (name: string, renderer: any) => renderers.set(name, renderer), on: (n: string, h: any) => hooks.set(n, [...hooks.get(n) ?? [], h]), sendMessage: (...args: any[]) => messages.push(args), getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools = names; } } as any);
     initialize();
     let sessionId = "A";
     let userId = "user-1";
@@ -30,12 +32,12 @@ async function setup(legacy = false) {
         cwd: root,
         getSystemPrompt: () => "Base system prompt",
         sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ id: userId, type: "message", message: { role: "user", content: "Current user request" } }] },
-        ui: { notify: (...args: any[]) => notices.push(args), setStatus: (...args: any[]) => statuses.push(args) },
+        ui: { notify: (...args: any[]) => notices.push(args), setStatus: (...args: any[]) => statuses.push(args), setWorkingMessage: (...args: any[]) => workingMessages.push(args) },
         model: undefined,
         modelRegistry: { streamSimple: (_model: any, context: any) => ({ result: async () => ({ content: [{ type: "text", text: JSON.stringify(classifierResponse) }], context }) }) },
     };
     return {
-        root, messages, notices, statuses, tools,
+        root, messages, notices, statuses, workingMessages, renderers, tools,
         activeTools: () => activeTools,
         enableClassifier(response: any) { classifierResponse = response; ctx.model = {}; },
         reload() { for (const h of hooks.get("session_shutdown") ?? [])
@@ -237,7 +239,7 @@ test("detected Sequential Workflow requirement creates a pending workflow that b
         assert.equal("parentTaskId" in childParameters, true);
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "The request requires a workflow." });
         await h.hook("input", { text: "This skill requires a Sequential Workflow before work begins.", source: "interactive" });
-        assert.deepEqual(h.statuses, [["sequential-workflow-evaluation", "Evaluating whether Sequential Workflow is required…"], ["sequential-workflow-evaluation", undefined]]);
+        assert.deepEqual(h.workingMessages, [["Evaluating whether Sequential Workflow is required…"], []]);
         const pending = (await h.call("status", {})).details.workflows[0];
         assert.equal(pending.status, "pending_definition");
         await h.hook("turn_start");
@@ -257,9 +259,12 @@ test("definition mode constrains the next model context and restores tools after
         await h.hook("input", { text: "Create a Sequential Workflow for this request.", source: "interactive" });
         assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
         const context = await h.hook("context_with_system", { messages: [{ role: "system", content: "old" }, { role: "user", content: "old request" }] });
-        assert.equal(context.messages.length, 2);
-        assert.match(context.messages[0].content, /definition mode is active/);
-        assert.match(context.messages[1].content, /Original user request/);
+        assert.equal(context.messages.length, 3);
+        assert.equal(context.messages[0].content, "old");
+        assert.equal(context.messages[1].content, "old request");
+        assert.match(context.messages[2].content, /definition mode is active/);
+        assert.equal(h.messages[0][0].customType, "sequential-workflow-created");
+        assert.equal(h.messages[0][0].display, true);
         await h.call("create", definition());
         assert.deepEqual(h.activeTools(), ["read", "bash", "edit", "write"]);
     }
@@ -298,8 +303,8 @@ test("a required Skill starts definition mode without executing its read", async
         assert.deepEqual(result, { block: true, terminate: true, reason: "Sequential Workflow definition mode has started from the required Skill." });
         assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
         const context = await h.hook("context_with_system", { messages: [] });
-        assert.match(context.messages[1].content, /Required Skill/);
-        assert.match(context.messages[1].content, /requires a Sequential Workflow/);
+        assert.match(context.messages[0].content, /Required Skill/);
+        assert.match(context.messages[0].content, /requires a Sequential Workflow/);
     }
     finally {
         await h.close();

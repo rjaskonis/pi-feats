@@ -3,6 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
+import { Box, Text } from "@earendil-works/pi-tui";
 /** Session ownership and execution gates. Prompts explain state; these gates enforce it. */
 export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     db.exec("PRAGMA busy_timeout = 5000");
@@ -69,6 +70,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         const activeTools = host.getActiveTools();
         addEvent(workflowId, "definition_mode_started", { origin, userRequest, skillPath, skillContent, activeTools });
         host.setActiveTools(definitionTools);
+        host.sendMessage({ customType: "sequential-workflow-created", content: `Workflow #${workflowId} created — defining ordered tasks.`, display: true, details: { workflowId, origin } });
     };
     const createPendingWorkflow = (origin: "user_input" | "skill", evidence: string, reasoning: string) => {
         const existing = pendingWorkflow();
@@ -127,7 +129,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             { role: "system", content: `${policy} Return only JSON with boolean requiresSequentialWorkflow and non-empty reasoning. Do not propose a template, tasks, or actions.` },
             { role: "user", content: JSON.stringify({ origin, evidence, userRequest, recentUserMessages: ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").slice(-4).map((entry: any) => entry.message.content) }) },
         ];
-        ctx.ui.setStatus("sequential-workflow-evaluation", "Evaluating whether Sequential Workflow is required…");
+        ctx.ui.setWorkingMessage("Evaluating whether Sequential Workflow is required…");
         try {
             const response: any = await ctx.modelRegistry.streamSimple(ctx.model, { messages } as any, { signal: ctx.signal }).result();
             const content = typeof response?.content === "string" ? response.content : (response?.content ?? []).map((part: any) => part.text ?? "").join("");
@@ -140,7 +142,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return { requiresSequentialWorkflow: false, reasoning: `Classifier could not confirm explicit intent: ${error instanceof Error ? error.message : String(error)}` };
         }
         finally {
-            ctx.ui.setStatus("sequential-workflow-evaluation", undefined);
+            ctx.ui.setWorkingMessage();
         }
     };
     let namedFailure = false;
@@ -173,6 +175,12 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                 throw new Error("A subworkflow requires a running workflow task.");
         }
     };
+    host.registerMessageRenderer("sequential-workflow-created", (message, { outputPad }, theme) => {
+        const workflowId = (message.details as any)?.workflowId;
+        const box = new Box(outputPad, 0);
+        box.addChild(new Text(`${theme.fg("muted", "Planning Sequential Workflow")}${workflowId ? ` #${workflowId}` : ""}\n${theme.fg("dim", String(message.content))}`, 0, 0));
+        return box;
+    });
     const tools = new Map<string, any>();
     const api = new Proxy(host, { get(target, key) {
             if (key !== "registerTool")
@@ -326,17 +334,19 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         }
         dispatched = true;
     }));
+    host.on("tool_result", (event) => {
+        if (definitionCutover && (event as any).toolName === "read")
+            return { content: [{ type: "text", text: "The required Sequential Workflow is being defined." }], details: { definitionMode: true }, isError: false };
+    });
     host.on("context_with_system", (event, ctx) => context.run(ctx, () => {
         const workflowId = pendingWorkflow();
         const mode = definitionMode(workflowId);
         if (!workflowId || !mode)
             return;
+        const messages = event.messages.filter((message: any) => !(message.role === "custom" && message.customType === "sequential-workflow-state"));
         const skill = mode.skillContent ? `\n\nRequired Skill (${mode.skillPath ?? "SKILL.md"}):\n${mode.skillContent}` : "";
-        const systemPrompt = `${ctx.getSystemPrompt()}\n\nSequential Workflow definition mode is active. Define the focused pending workflow now. Make exactly one tool call to sequential_workflow_create or sequential_workflow_create_from_template. Do not read files or Skills, perform work, inspect state, create a subworkflow, or call any other tool.`;
-        return { messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: `Original user request:\n${mode.userRequest}${skill}` },
-            ] as any };
+        messages.push({ role: "system", content: `Sequential Workflow definition mode is active for workflow #${workflowId}. Define it now from the original request${skill}. Make exactly one tool call to sequential_workflow_create or sequential_workflow_create_from_template. Do not read files or Skills, perform work, inspect state, create a subworkflow, or call any other tool.` } as any);
+        return { messages };
     }));
     host.on("context", (event, ctx) => context.run(ctx, () => {
         const messages = event.messages.filter(m => !(m.role === "custom" && m.customType === "sequential-workflow-state"));
