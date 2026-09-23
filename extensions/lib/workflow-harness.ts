@@ -77,10 +77,10 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     const announceDefinitionMode = (workflowId: number) => {
         const mode = definitionMode(workflowId);
         if (!mode || definitionAnnouncementSent(workflowId))
-            return;
+            return undefined;
         const template = mode.activation === "template";
-        host.sendMessage({ customType: "sequential-workflow-created", content: template ? `Preparing workflow #${workflowId} from template: ${mode.templatePath}` : `Workflow #${workflowId} created — defining ordered tasks.`, display: true, details: { workflowId, origin: mode.origin, activation: mode.activation, templatePath: mode.templatePath } });
         addEvent(workflowId, "definition_mode_announced", { activation: mode.activation, templatePath: mode.templatePath });
+        return { customType: "sequential-workflow-created", content: template ? `Preparing workflow #${workflowId} from template: ${mode.templatePath}` : `Workflow #${workflowId} created — defining ordered tasks.`, display: true, details: { workflowId, origin: mode.origin, activation: mode.activation, templatePath: mode.templatePath } };
     };
     const createPendingWorkflow = (origin: "user_input" | "skill", evidence: string, reasoning: string) => {
         const existing = pendingWorkflow();
@@ -139,7 +139,6 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             { role: "system", content: `${policy} Return only JSON with boolean requiresSequentialWorkflow, non-empty reasoning, activation ('definition' or 'template' when true), and templatePath only for an explicitly named template. Do not propose tasks or actions.` },
             { role: "user", content: JSON.stringify({ origin, evidence, userRequest, recentUserMessages: ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").slice(-4).map((entry: any) => entry.message.content) }) },
         ];
-        ctx.ui.setWorkingMessage("Evaluating whether Sequential Workflow is required…");
         try {
             const response: any = await ctx.modelRegistry.streamSimple(ctx.model, { messages } as any, { signal: ctx.signal }).result();
             const content = typeof response?.content === "string" ? response.content : (response?.content ?? []).map((part: any) => part.text ?? "").join("");
@@ -158,7 +157,8 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return { requiresSequentialWorkflow: false, reasoning: `Classifier could not confirm explicit intent: ${error instanceof Error ? error.message : String(error)}` };
         }
         finally {
-            ctx.ui.setWorkingMessage();
+            // Classification runs before Pi starts streaming, so a working indicator
+            // cannot render here. Its visible event is returned from before_agent_start.
         }
     };
     let namedFailure = false;
@@ -195,6 +195,11 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                 throw new Error("A subworkflow requires a running workflow task.");
         }
     };
+    host.registerMessageRenderer("sequential-workflow-evaluation", (message, { outputPad }, theme) => {
+        const box = new Box(outputPad, 0);
+        box.addChild(new Text(`${theme.fg("muted", "Evaluating Sequential Workflow requirement")}\n${theme.fg("dim", String(message.content))}`, 0, 0));
+        return box;
+    });
     host.registerMessageRenderer("sequential-workflow-created", (message, { outputPad }, theme) => {
         const workflowId = (message.details as any)?.workflowId;
         const box = new Box(outputPad, 0);
@@ -225,17 +230,34 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             };
         } });
     let namedActivation = false;
-    host.on("before_agent_start", (_event, ctx) => context.run(ctx, () => {
+    host.on("before_agent_start", async (event, ctx) => context.run(ctx, async () => {
+        const messages: any[] = [];
+        if (!namedActivation && focus() === undefined && hasSequentialTerm(event.prompt)) {
+            const decision = await classifyRequirement(ctx, "user_input", event.prompt, event.prompt);
+            messages.push({ customType: "sequential-workflow-evaluation", content: decision.requiresSequentialWorkflow ? "Sequential Workflow is required for this request." : "Sequential Workflow is not required for this request.", display: true, details: { requiresSequentialWorkflow: decision.requiresSequentialWorkflow, reasoning: decision.reasoning } });
+            if (decision.requiresSequentialWorkflow) {
+                await transaction(ctx, () => {
+                    if (focus() === undefined) {
+                        const workflowId = createPendingWorkflow("user_input", event.prompt, decision.reasoning);
+                        startDefinitionMode(workflowId, "user_input", event.prompt, decision.activation, decision.templatePath);
+                    }
+                });
+            }
+        }
         const pending = pendingWorkflow();
-        if (pending)
-            announceDefinitionMode(pending);
-        if (!namedActivation)
-            return;
-        namedActivation = false;
-        const id = focus();
-        const t = id ? task(id) : undefined;
-        if (t?.type === "collect")
-            db.prepare("UPDATE workflow_collect_checkpoint SET user_entry_id=? WHERE task_id=?").run(userEntry(), t.id);
+        if (pending) {
+            const announcement = announceDefinitionMode(pending);
+            if (announcement)
+                messages.push(announcement);
+        }
+        if (namedActivation) {
+            namedActivation = false;
+            const id = focus();
+            const t = id ? task(id) : undefined;
+            if (t?.type === "collect")
+                db.prepare("UPDATE workflow_collect_checkpoint SET user_entry_id=? WHERE task_id=?").run(userEntry(), t.id);
+        }
+        return messages.length ? { messages } : undefined;
     }));
     // Named activation is resolved before the model can invent a replacement plan.
     host.on("input", async (event, ctx) => context.run(ctx, async () => {
@@ -243,16 +265,6 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         const match = event.text.trim().match(/^(?:ative|execute|inicie|activate|run|start)\s+(?:(?:o|the)\s+)?sequential[ -]workflow\s+([\w.-]+)\s*$/i);
         if (pendingWorkflow() && explicitUserOverride(event.text)) {
             await transaction(ctx, () => { cancelPendingWorkflowByUser(event.text); });
-        }
-        else if (!match && focus() === undefined && hasSequentialTerm(event.text)) {
-            const decision = await classifyRequirement(ctx, "user_input", event.text, event.text);
-            if (decision.requiresSequentialWorkflow)
-                await transaction(ctx, () => {
-                    if (focus() === undefined) {
-                        const workflowId = createPendingWorkflow("user_input", event.text, decision.reasoning);
-                        startDefinitionMode(workflowId, "user_input", event.text, decision.activation, decision.templatePath);
-                    }
-                });
         }
         if (!match)
             return;

@@ -238,8 +238,10 @@ test("detected Sequential Workflow requirement creates a pending workflow that b
         assert.equal("parentWorkflowId" in childParameters, true);
         assert.equal("parentTaskId" in childParameters, true);
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "The request requires a workflow." });
-        await h.hook("input", { text: "This skill requires a Sequential Workflow before work begins.", source: "interactive" });
-        assert.deepEqual(h.workingMessages, [["Evaluating whether Sequential Workflow is required…"], []]);
+        const request = "This skill requires a Sequential Workflow before work begins.";
+        await h.hook("input", { text: request, source: "interactive" });
+        const startup = await h.hook("before_agent_start", { prompt: request });
+        assert.deepEqual(startup.messages.map((message: any) => message.customType), ["sequential-workflow-evaluation", "sequential-workflow-created"]);
         const pending = (await h.call("status", {})).details.workflows[0];
         assert.equal(pending.status, "pending_definition");
         await h.hook("turn_start");
@@ -256,7 +258,10 @@ test("definition mode constrains the next model context and restores tools after
     const h = await setup();
     try {
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit request." });
-        await h.hook("input", { text: "Create a Sequential Workflow for this request.", source: "interactive" });
+        const request = "Create a Sequential Workflow for this request.";
+        await h.hook("input", { text: request, source: "interactive" });
+        const startup = await h.hook("before_agent_start", { prompt: request });
+        assert.deepEqual(startup.messages.map((message: any) => message.customType), ["sequential-workflow-evaluation", "sequential-workflow-created"]);
         assert.deepEqual(h.activeTools(), ["sequential_workflow_create"]);
         const context = await h.hook("context_with_system", { messages: [{ role: "system", content: "old" }, { role: "user", content: "old request" }] });
         assert.equal(context.messages.length, 3);
@@ -264,9 +269,7 @@ test("definition mode constrains the next model context and restores tools after
         assert.equal(context.messages[1].content, "old request");
         assert.match(context.messages[2].content, /definition mode is active/);
         assert.equal(h.messages.length, 0);
-        await h.hook("before_agent_start", {});
-        assert.equal(h.messages[0][0].customType, "sequential-workflow-created");
-        assert.equal(h.messages[0][0].display, true);
+        assert.equal(startup.messages[1].display, true);
         await h.call("create", definition());
         assert.deepEqual(h.activeTools(), ["read", "bash", "edit", "write"]);
     }
@@ -279,12 +282,13 @@ test("an explicitly named template uses only template activation and announces a
     const h = await setup();
     try {
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit template activation.", activation: "template", templatePath: "release.json" });
-        await h.hook("input", { text: "Create a Sequential Workflow from release.json", source: "interactive" });
+        const request = "Create a Sequential Workflow from release.json";
+        await h.hook("input", { text: request, source: "interactive" });
+        const startup = await h.hook("before_agent_start", { prompt: request });
         assert.deepEqual(h.activeTools(), ["sequential_workflow_create_from_template"]);
         assert.equal(h.messages.length, 0);
-        await h.hook("before_agent_start", {});
-        assert.match(h.messages[0][0].content, /Preparing workflow/);
-        assert.match(h.messages[0][0].content, /release\.json/);
+        assert.match(startup.messages[1].content, /Preparing workflow/);
+        assert.match(startup.messages[1].content, /release\.json/);
         const context = await h.hook("context_with_system", { messages: [] });
         assert.match(context.messages[0].content, /sequential_workflow_create_from_template/);
         assert.match(context.messages[0].content, /release\.json/);
@@ -298,7 +302,9 @@ test("a discussion of Sequential Workflow after cancellation does not recreate i
     const h = await setup();
     try {
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit request." });
-        await h.hook("input", { text: "Create a Sequential Workflow.", source: "interactive" });
+        const request = "Create a Sequential Workflow.";
+        await h.hook("input", { text: request, source: "interactive" });
+        await h.hook("before_agent_start", { prompt: request });
         const pending = (await h.call("status", {})).details.workflows[0];
         await h.hook("input", { text: "Cancel the Sequential Workflow.", source: "interactive" });
         assert.equal((await h.call("status", { workflowId: pending.id })).details.workflow.status, "cancelled");
@@ -336,7 +342,9 @@ test("only an explicit user override dismisses a pending workflow requirement", 
     const h = await setup();
     try {
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit request." });
-        await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });
+        const request = "Use Sequential Workflow for this request.";
+        await h.hook("input", { text: request, source: "interactive" });
+        await h.hook("before_agent_start", { prompt: request });
         const pending = (await h.call("status", {})).details.workflows[0];
         await h.hook("input", { text: "Don't create it; continue manually.", source: "interactive" });
         assert.equal((await h.call("status", { workflowId: pending.id })).details.workflow.status, "cancelled");
