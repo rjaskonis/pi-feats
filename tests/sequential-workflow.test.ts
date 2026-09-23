@@ -19,13 +19,21 @@ async function setup(legacy = false) {
     const hooks = new Map<string, any[]>();
     const messages: any[] = [];
     const notices: any[] = [];
+    const statuses: any[] = [];
+    let classifierResponse: any;
     const initialize = () => sequentialWorkflow({ registerTool: (t: any) => tools.set(t.name, t), registerCommand: (n: string, c: any) => commands.set(n, c), on: (n: string, h: any) => hooks.set(n, [...hooks.get(n) ?? [], h]), sendMessage: (...args: any[]) => messages.push(args) } as any);
     initialize();
     let sessionId = "A";
     let userId = "user-1";
-    const ctx = { sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ id: userId, type: "message", message: { role: "user" } }] }, ui: { notify: (...args: any[]) => notices.push(args) } };
+    const ctx: any = {
+        sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ id: userId, type: "message", message: { role: "user" } }] },
+        ui: { notify: (...args: any[]) => notices.push(args), setStatus: (...args: any[]) => statuses.push(args) },
+        model: undefined,
+        modelRegistry: { streamSimple: (_model: any, context: any) => ({ result: async () => ({ content: [{ type: "text", text: JSON.stringify(classifierResponse) }], context }) }) },
+    };
     return {
-        root, messages, notices, tools,
+        root, messages, notices, statuses, tools,
+        enableClassifier(response: any) { classifierResponse = response; ctx.model = {}; },
         reload() { for (const h of hooks.get("session_shutdown") ?? [])
             h(); hooks.clear(); tools.clear(); commands.clear(); initialize(); },
         session(id: string) { sessionId = id; }, reply(id: string) { userId = id; },
@@ -217,7 +225,9 @@ test("missing named template fails closed without creating a replacement", async
 test("detected Sequential Workflow requirement creates a pending workflow that blocks work until hydrated", async () => {
     const h = await setup();
     try {
+        h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "The request requires a workflow." });
         await h.hook("input", { text: "This skill requires a Sequential Workflow before work begins.", source: "interactive" });
+        assert.deepEqual(h.statuses, [["sequential-workflow-evaluation", "Evaluating whether Sequential Workflow is required…"], ["sequential-workflow-evaluation", undefined]]);
         const pending = (await h.call("status", {})).details.workflows[0];
         assert.equal(pending.status, "pending_definition");
         await h.hook("turn_start");

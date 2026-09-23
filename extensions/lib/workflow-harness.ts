@@ -101,7 +101,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         ];
         ctx.ui.setStatus("sequential-workflow-evaluation", "Evaluating whether Sequential Workflow is required…");
         try {
-            const response: any = await ctx.modelRegistry.streamSimple(ctx.model, messages as any, { signal: ctx.signal }).result();
+            const response: any = await ctx.modelRegistry.streamSimple(ctx.model, { messages } as any, { signal: ctx.signal }).result();
             const content = typeof response?.content === "string" ? response.content : (response?.content ?? []).map((part: any) => part.text ?? "").join("");
             const parsed = JSON.parse(content);
             if (typeof parsed?.requiresSequentialWorkflow !== "boolean" || typeof parsed.reasoning !== "string" || !parsed.reasoning.trim())
