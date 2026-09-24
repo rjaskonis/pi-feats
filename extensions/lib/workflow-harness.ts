@@ -3,7 +3,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile, readdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { evaluateWorkflowRequirement, evaluateWorkflowTask, workflowEvaluationConfig, type RequirementDecision } from "./workflow-evaluator.ts";
 import { Box, Text } from "@earendil-works/pi-tui";
 /** Session ownership and execution gates. Prompts explain state; these gates enforce it. */
@@ -76,7 +76,9 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         audit("evaluation_blocked", { ...payload, reason, message: "Sequential Workflow decision is unresolved; work remains blocked." }, origin, workflowId, true);
     };
     type DefinitionActivation = "definition" | "template";
-    const definitionTools = (activation: DefinitionActivation) => [activation === "template" ? "sequential_workflow_create_from_template" : "sequential_workflow_create"];
+    const definitionTools = (activation: DefinitionActivation) => activation === "template"
+        ? ["sequential_workflow_create_from_template"]
+        : ["sequential_workflow_create", "sequential_workflow_create_from_template"];
     const definitionMode = (workflowId = pendingWorkflow()) => {
         if (!workflowId)
             return undefined;
@@ -84,7 +86,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         if (!event)
             return undefined;
         try {
-            const mode = JSON.parse(event.payload) as { origin: "user_input" | "skill"; userRequest: string; skillPath?: string; skillContent?: string; activeTools: string[]; activation?: DefinitionActivation; templatePath?: string };
+            const mode = JSON.parse(event.payload) as { origin: "user_input" | "skill"; userRequest: string; skillPath?: string; skillContent?: string; skillTemplatePaths?: string[]; activeTools: string[]; activation?: DefinitionActivation; templatePath?: string };
             return { ...mode, activation: mode.activation ?? "definition" };
         }
         catch {
@@ -96,9 +98,9 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         if (mode?.activeTools?.length)
             host.setActiveTools(mode.activeTools);
     };
-    const startDefinitionMode = (workflowId: number, origin: "user_input" | "skill", userRequest: string, activation: DefinitionActivation = "definition", templatePath?: string, skillPath?: string, skillContent?: string) => {
+    const startDefinitionMode = (workflowId: number, origin: "user_input" | "skill", userRequest: string, activation: DefinitionActivation = "definition", templatePath?: string, skillPath?: string, skillContent?: string, skillTemplatePaths?: string[]) => {
         const activeTools = host.getActiveTools();
-        addEvent(workflowId, "definition_mode_started", { origin, userRequest, activation, templatePath, skillPath, skillContent, activeTools });
+        addEvent(workflowId, "definition_mode_started", { origin, userRequest, activation, templatePath, skillPath, skillContent, skillTemplatePaths, activeTools });
         host.setActiveTools(definitionTools(activation));
     };
     const definitionEvaluationSent = (workflowId: number) => Boolean(db.prepare("SELECT 1 FROM workflow_events WHERE workflow_id = ? AND phase = 'definition_mode_evaluated' LIMIT 1").get(workflowId));
@@ -159,6 +161,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         queue = next.catch(() => undefined);
         return next;
     };
+    const skillTemplatePaths = (skillPath: string, content: string) => [...new Set([...content.matchAll(/`([^`\r\n]+\.workflow\.json)`/g)].map((match) => resolve(dirname(skillPath), match[1])))];
     const templateCandidates = async () => {
         const directory = join(process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent"), "sequential_workflow_templates");
         try {
@@ -196,7 +199,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             const pending = pendingWorkflow();
             const mode = definitionMode(pending);
             if (pending && mode && !definitionTools(mode.activation).includes(name))
-                throw new Error(`Definition mode requires ${definitionTools(mode.activation)[0]}.`);
+                throw new Error(`Definition mode requires one of: ${definitionTools(mode.activation).join(", ")}.`);
             if (focus() !== undefined && pendingWorkflow() === undefined)
                 throw new Error("Suspend the current workflow with /workflow-suspend before creating an independent execution.");
         }
@@ -420,7 +423,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                             if (focus() === undefined) {
                                 const workflowId = createPendingWorkflow("skill", path, decision.reasoning);
                                 const template = decision.templateId ? (await templateCandidates()).find(candidate => candidate.id === decision.templateId) : undefined;
-                                startDefinitionMode(workflowId, "skill", userRequest, decision.activation ?? "definition", template?.source, path, content);
+                                startDefinitionMode(workflowId, "skill", userRequest, decision.activation ?? "definition", template?.source, path, content, skillTemplatePaths(path, content));
                                 audit("definition_mode_started", { path, message: `Sequential Workflow definition mode started for workflow #${workflowId}.` }, "skill", workflowId, true);
                             }
                         });
@@ -483,9 +486,12 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return;
         const messages = event.messages.filter((message: any) => !(message.role === "custom" && message.customType === "sequential-workflow-state"));
         const skill = mode.skillContent ? `\n\nRequired Skill (${mode.skillPath ?? "SKILL.md"}):\n${mode.skillContent}` : "";
-        const creationTool = definitionTools(mode.activation)[0];
-        const template = mode.activation === "template" ? ` using the explicitly requested template path ${mode.templatePath}` : " from the original request";
-        messages.push({ role: "system", content: `Sequential Workflow definition mode is active for workflow #${workflowId}. Create or hydrate it${template}${skill}. Make exactly one tool call to ${creationTool}. Do not read files or Skills, perform work, inspect state, create a subworkflow, or call any other tool.` } as any);
+        const skillTemplates = mode.skillTemplatePaths?.length ? `\n\nWorkflow template paths explicitly named by the Skill: ${mode.skillTemplatePaths.join(", ")}` : "";
+        const creationTools = definitionTools(mode.activation);
+        const creation = mode.activation === "template"
+            ? `Use sequential_workflow_create_from_template with the explicitly requested template path ${mode.templatePath}.`
+            : `Make exactly one creation call: sequential_workflow_create, or sequential_workflow_create_from_template when the required Skill names one of the controlled template paths above. Follow the Skill's template instruction when present.`;
+        messages.push({ role: "system", content: `Sequential Workflow definition mode is active for workflow #${workflowId}. Create or hydrate it from the original request${skillTemplates}${skill}. ${creation} Do not read files or Skills, perform work, inspect state, create a subworkflow, or call any other tool. Available creation tools: ${creationTools.join(", ")}.` } as any);
         return { messages };
     }));
     host.on("context", (event, ctx) => context.run(ctx, () => {
@@ -494,9 +500,10 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         if (id !== undefined) {
             const pending = pendingWorkflow();
             const mode = definitionMode(pending);
-            const creationTool = mode ? definitionTools(mode.activation)[0] : "sequential_workflow_create";
+            const creationTools = mode ? definitionTools(mode.activation) : ["sequential_workflow_create"];
+            const templateHint = mode?.skillTemplatePaths?.length ? ` The required Skill explicitly names template path(s): ${mode.skillTemplatePaths.join(", ")}; use sequential_workflow_create_from_template for those instructions.` : "";
             messages.push({ role: "custom", customType: "sequential-workflow-state", display: false, timestamp: Date.now(), content: pending
-                ? `Session workflow focus: ${pending}. This workflow is pending definition because Sequential Workflow creation is required. Do not perform work or use external tools. Create or initialize this focused workflow using ${creationTool}.`
+                ? `Session workflow focus: ${pending}. This workflow is pending definition because Sequential Workflow creation is required. Do not perform work or use external tools. Make exactly one creation call using: ${creationTools.join(", ")}.${templateHint}`
                 : `Session workflow focus: ${id}. Current task: ${JSON.stringify(task(id))}. Work only on this task. Pass workflowId and taskId for transitions. Collect requires a new user response. External tools are blocked outside a running Action. Use one tool per turn. User commands /workflow-suspend and /workflow-focus control focus.` });
         }
         return { messages };

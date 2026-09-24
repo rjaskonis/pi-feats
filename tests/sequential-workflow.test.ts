@@ -335,7 +335,7 @@ test("definition mode constrains the next model context and restores tools after
         await h.hook("input", { text: request, source: "interactive" });
         const startup = await h.hook("before_agent_start", { prompt: request });
         assert.deepEqual(startup.messages.map((message: any) => message.customType), ["sequential-workflow-evaluation", "sequential-workflow-created"]);
-        assert.deepEqual(h.activeTools(), ["sequential_workflow_create"]);
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
         const context = await h.hook("context_with_system", { messages: [{ role: "system", content: "old" }, { role: "user", content: "old request" }] });
         assert.equal(context.messages.length, 3);
         assert.equal(context.messages[0].content, "old");
@@ -378,15 +378,21 @@ test("a Skill requirement is decided by the configured evaluator", async () => {
     try {
         h.enableClassifier({ status: "required", reasoning: "The evaluated Skill requires workflow control." });
         const skillDir = join(h.root, "skill"); await mkdir(skillDir);
-        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "## Required workflow\n\nCreate the Sequential Workflow before running the operation.");
+        const templatePath = join(skillDir, "contract.workflow.json");
+        await writeFile(templatePath, JSON.stringify({ version: 1, ...definition([{ type: "collect", instruction: "Provide the contract PDF.", criteria: "A PDF path was supplied." }]) }));
+        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "## Required workflow\n\nCreate the Sequential Workflow from `contract.workflow.json` before running the operation.");
         await h.hook("turn_start");
         const toolCallId = "skill-read";
         const result = await h.hook("tool_call", { toolName: "read", toolCallId, input: { path: skillPath } });
         assert.equal(result, undefined);
-        assert.deepEqual(h.activeTools(), ["sequential_workflow_create"]);
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
+        const context = await h.hook("context_with_system", { messages: [] });
+        assert.match(context.messages[0].content, new RegExp(templatePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
         const transformed = await h.hook("tool_result", { toolName: "read", toolCallId, content: [{ type: "text", text: "Skill body" }], isError: false });
         assert.deepEqual(transformed, { content: [{ type: "text", text: "Skill recognized. Sequential Workflow definition mode is active; create the required workflow before performing work." }], details: { definitionMode: true }, isError: false });
         assert.equal((await h.hook("tool_call", { toolName: "bash", toolCallId: "other-call", input: {} })).block, true);
+        const hydrated = await h.call("create_from_template", { path: templatePath });
+        assert.equal(hydrated.details.next.task.type, "collect");
         const audit = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string }>;
         assert.ok(audit.some((event) => event.phase === "requirement_classified_required"));
     } finally { await h.close(); }
