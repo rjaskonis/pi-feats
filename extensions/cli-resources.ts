@@ -177,7 +177,7 @@ async function readSettings() {
 }
 
 const isExcluded = (resourcePath: string, exclusions: string[]): boolean =>
-  exclusions.includes(`!${resourcePath}`);
+  exclusions.includes(`-${resourcePath}`) || exclusions.includes(`!${resourcePath}`);
 
 async function findSkillFiles(path: string): Promise<string[]> {
   if (!existsSync(path)) return [];
@@ -325,9 +325,13 @@ async function renderAndClose(element: React.ReactElement) {
 }
 
 function setExclusion(entries: string[], resourcePath: string, disable: boolean) {
-  const exclusion = `!${resourcePath}`;
-  if (disable) return entries.includes(exclusion) ? entries : [...entries, exclusion];
-  return entries.filter((entry) => entry !== exclusion);
+  // Pi applies exact exclusions (`-path`) to resources discovered through a
+  // package manifest. `!path` is a glob exclusion and is retained only as a
+  // legacy value when reading existing settings.
+  const exactExclusion = `-${resourcePath}`;
+  const legacyGlobExclusion = `!${resourcePath}`;
+  if (disable) return [...entries.filter((entry) => entry !== legacyGlobExclusion && entry !== exactExclusion), exactExclusion];
+  return entries.filter((entry) => entry !== exactExclusion && entry !== legacyGlobExclusion);
 }
 
 async function findResource(kind: "extensions" | "skills", target: string, settings: Record<string, unknown>, agentDir: string, resourceRoot: string) {
@@ -563,7 +567,7 @@ export default async function (pi: ExtensionAPI) {
       const settings = kind === "extensions" ? loaded.runtimeSettings : loaded.settings;
       const rawEntries = Array.isArray(settings[kind]) ? settings[kind].filter((value): value is string => typeof value === "string") : [];
       const configuredPaths = rawEntries.filter((value) => !/^[!+\-]/.test(value));
-      const exclusions = rawEntries.filter((value) => value.startsWith("!"));
+      const exclusions = rawEntries.filter((value) => value.startsWith("!") || value.startsWith("-"));
       const catalogRoot = join(resourceRoot, kind);
       const packageResources = await configuredPackageResources(resourceRoot, loaded.runtimeSettings, kind === "extensions" ? "extensions" : "skills");
       const paths = kind === "skills"
