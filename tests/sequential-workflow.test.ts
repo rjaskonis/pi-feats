@@ -398,6 +398,21 @@ test("an unavailable explicit Skill evaluator blocks work and is visible", async
         assert.ok(audit.some((event) => event.phase === "evaluation_blocked"));
     } finally { await h.close(); }
 });
+test("a new user input releases an unresolved requirement block when no workflow is active", async () => {
+    const h = await setup();
+    try {
+        const skillDir = join(h.root, "blocked-skill"); await mkdir(skillDir);
+        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "---\nrequires_sequential_workflow: true\n---\nA Skill.");
+        await h.hook("turn_start");
+        assert.equal((await h.hook("tool_call", { toolName: "read", input: { path: skillPath } }))?.block, true);
+        const db = new DatabaseSync(join(h.root, "sequential-workflow.db"));
+        assert.equal((db.prepare("SELECT COUNT(*) AS count FROM workflow_requirement_blocks WHERE session_id = ?").get("A") as { count: number }).count, 1);
+        await h.hook("input", { text: "Continue with the ordinary request.", source: "interactive" });
+        assert.equal((db.prepare("SELECT COUNT(*) AS count FROM workflow_requirement_blocks WHERE session_id = ?").get("A") as { count: number }).count, 0);
+        await h.hook("turn_start");
+        assert.equal(await h.hook("tool_call", { toolName: "bash", input: {} }), undefined);
+    } finally { await h.close(); }
+});
 test("non-required follow-up does not create a workflow", async () => {
     const h = await setup();
     try {

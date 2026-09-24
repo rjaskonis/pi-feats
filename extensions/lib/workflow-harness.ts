@@ -316,6 +316,13 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     // Requirement decisions remain evaluator-owned, but evaluation is entered only
     // from an explicit user request or a Skill that explicitly requires it.
     host.on("input", async (event, ctx) => context.run(ctx, async () => {
+        // An unavailable requirement evaluator must not permanently lock a session
+        // with no active workflow. A later user request is new evidence and can be
+        // evaluated normally if it explicitly requests a workflow.
+        if (event.source !== "extension" && focus() === undefined && requirementBlock()) {
+            clearRequirementBlock();
+            audit("requirement_block_released", { message: "A new user input released the unresolved Sequential Workflow evaluation block." }, "user_input");
+        }
         const focused = focus();
         const focusedTask = focused ? task(focused) : undefined;
         const evaluationConfig = await workflowEvaluationConfig().catch(() => undefined);
