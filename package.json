@@ -42,7 +42,7 @@
   "scripts": {
     "build:web": "cd extensions/pi-console-webui && npx --no-install next build",
     "ensure:nono": "sh scripts/install-nono.sh",
-    "postinstall": "npm run ensure:nono && npm run build:web",
+    "postinstall": "npm run ensure:nono && node scripts/ensure-console-build.mjs",
     "test": "npm run test:extensions && npm run build:web",
     "test:extensions": "node --experimental-strip-types --test tests/*.test.ts"
   },
