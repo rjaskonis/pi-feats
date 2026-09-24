@@ -245,30 +245,30 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         const task = details.taskId ? ` · Tarefa #${details.taskId}` : "";
         const phase = details.phase ?? "";
         const presentation: Record<string, { title: string; color: "accent" | "success" | "warning" | "error" | "muted" }> = {
-            requirement_check_started: { title: "Avaliando requisito", color: "accent" },
-            requirement_classified_required: { title: "Workflow necessário", color: "warning" },
-            requirement_classified_not_required: { title: "Workflow não necessário", color: "success" },
-            requirement_classified_uncertain: { title: "Decisão incerta", color: "warning" },
-            requirement_classified_unavailable: { title: "Avaliador indisponível", color: "error" },
-            requirement_classified_invalid_response: { title: "Resposta do avaliador inválida", color: "error" },
-            requirement_classified_error: { title: "Falha ao avaliar requisito", color: "error" },
-            evaluation_blocked: { title: "Trabalho bloqueado", color: "error" },
-            definition_mode_started: { title: "Definindo workflow", color: "accent" },
-            workflow_hydrated: { title: "Workflow pronto", color: "success" },
-            task_evaluation_accept: { title: "Tarefa aceita", color: "success" },
-            task_evaluation_retry: { title: "Tarefa será repetida", color: "warning" },
-            task_evaluation_fail: { title: "Falha terminal", color: "error" },
-            task_evaluation_uncertain: { title: "Avaliação da tarefa incerta", color: "warning" },
-            task_evaluation_unavailable: { title: "Avaliador de tarefa indisponível", color: "error" },
-            task_evaluation_invalid_response: { title: "Resposta de tarefa inválida", color: "error" },
-            task_evaluation_error: { title: "Falha ao avaliar tarefa", color: "error" },
-            workflow_completed: { title: "Workflow concluído", color: "success" },
-            workflow_cancelled: { title: "Workflow cancelado", color: "warning" },
+            requirement_check_started: { title: "Evaluating requirement", color: "accent" },
+            requirement_classified_required: { title: "Workflow required", color: "accent" },
+            requirement_classified_not_required: { title: "Workflow not required", color: "success" },
+            requirement_classified_uncertain: { title: "Decision uncertain", color: "warning" },
+            requirement_classified_unavailable: { title: "Evaluator unavailable", color: "error" },
+            requirement_classified_invalid_response: { title: "Invalid evaluator response", color: "error" },
+            requirement_classified_error: { title: "Requirement evaluation failed", color: "error" },
+            evaluation_blocked: { title: "Work blocked", color: "error" },
+            definition_mode_started: { title: "Defining workflow", color: "accent" },
+            workflow_hydrated: { title: "Workflow ready", color: "success" },
+            task_evaluation_accept: { title: "Task accepted", color: "success" },
+            task_evaluation_retry: { title: "Task will be retried", color: "warning" },
+            task_evaluation_fail: { title: "Terminal failure", color: "error" },
+            task_evaluation_uncertain: { title: "Task evaluation uncertain", color: "warning" },
+            task_evaluation_unavailable: { title: "Task evaluator unavailable", color: "error" },
+            task_evaluation_invalid_response: { title: "Invalid task response", color: "error" },
+            task_evaluation_error: { title: "Task evaluation failed", color: "error" },
+            workflow_completed: { title: "Workflow completed", color: "success" },
+            workflow_cancelled: { title: "Workflow cancelled", color: "warning" },
         };
-        const current = presentation[phase] ?? { title: "Atualização do workflow", color: "muted" as const };
+        const current = presentation[phase] ?? { title: "Workflow update", color: "muted" as const };
         const header = `${workflow}${task} · ${current.title}`;
         const metadata = [details.evaluator, details.model].filter(Boolean).join(" · ");
-        const body = [theme.fg(current.color, header), theme.fg("dim", String(message.content)), metadata ? theme.fg("muted", `Avaliador: ${metadata}`) : ""].filter(Boolean).join("\n");
+        const body = [theme.fg(current.color, header), theme.fg("dim", String(message.content)), metadata ? theme.fg("muted", `Evaluator: ${metadata}`) : ""].filter(Boolean).join("\n");
         const box = new Box(outputPad, 0);
         box.addChild(new Text(body, 0, 0));
         return box;
