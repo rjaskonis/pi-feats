@@ -270,6 +270,7 @@ test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {
         await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });
         assert.equal(request?.url, "https://openrouter.ai/api/alpha/decisions");
         assert.equal(request?.body.model, "typesafe/jev-1.13");
+        assert.ok("workflow_from_template" in request!.body.questions.decision.criteria);
         assert.equal((await h.call("status", {})).details.workflows[0].status, "pending_definition");
     } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
 });
@@ -335,7 +336,7 @@ test("definition mode constrains the next model context and restores tools after
         await h.hook("input", { text: request, source: "interactive" });
         const startup = await h.hook("before_agent_start", { prompt: request });
         assert.deepEqual(startup.messages.map((message: any) => message.customType), ["sequential-workflow-evaluation", "sequential-workflow-created"]);
-        assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create"]);
         const context = await h.hook("context_with_system", { messages: [{ role: "system", content: "old" }, { role: "user", content: "old request" }] });
         assert.equal(context.messages.length, 3);
         assert.equal(context.messages[0].content, "old");
@@ -376,7 +377,7 @@ test("explicit user cancellation remains mechanical", async () => {
 test("a Skill requirement is decided by the configured evaluator", async () => {
     const h = await setup();
     try {
-        h.enableClassifier({ status: "required", reasoning: "The evaluated Skill requires workflow control." });
+        h.enableClassifier({ status: "required", reasoning: "The evaluated Skill requires workflow control.", activation: "template" });
         const skillDir = join(h.root, "skill"); await mkdir(skillDir);
         const templatePath = join(skillDir, "contract.workflow.json");
         await writeFile(templatePath, JSON.stringify({ version: 1, ...definition([{ type: "collect", instruction: "Provide the contract PDF.", criteria: "A PDF path was supplied." }]) }));
@@ -385,9 +386,9 @@ test("a Skill requirement is decided by the configured evaluator", async () => {
         const toolCallId = "skill-read";
         const result = await h.hook("tool_call", { toolName: "read", toolCallId, input: { path: skillPath } });
         assert.equal(result, undefined);
-        assert.deepEqual(h.activeTools(), ["sequential_workflow_create", "sequential_workflow_create_from_template"]);
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create_from_template"]);
         const context = await h.hook("context_with_system", { messages: [] });
-        assert.match(context.messages[0].content, new RegExp(templatePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+        assert.match(context.messages[0].content, /contract\.workflow\.json/);
         const transformed = await h.hook("tool_result", { toolName: "read", toolCallId, content: [{ type: "text", text: "Skill body" }], isError: false });
         assert.deepEqual(transformed, { content: [{ type: "text", text: "Skill recognized. Sequential Workflow definition mode is active; create the required workflow before performing work." }], details: { definitionMode: true }, isError: false });
         assert.equal((await h.hook("tool_call", { toolName: "bash", toolCallId: "other-call", input: {} })).block, true);

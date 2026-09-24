@@ -69,19 +69,20 @@ const llmDecision = async (ctx: ExtensionContext, input: RequirementInput): Prom
         if (!object(parsed) || !["required", "not_required", "uncertain"].includes(text(parsed.status)) || !text(parsed.reasoning).trim()) throw new Error("Invalid classifier response.");
         if (parsed.status !== "required") return { status: parsed.status as "not_required" | "uncertain", reasoning: text(parsed.reasoning), evaluator: "llm" };
         const activation = parsed.activation === "template" ? "template" : "definition", templateId = text(parsed.templateId).trim() || undefined;
-        if (activation === "template" && (!templateId || !input.templates.some(template => template.id === templateId))) return { status: "invalid_response", reasoning: "Template activation selected an unavailable template.", evaluator: "llm" };
+        if (activation === "template" && input.origin !== "skill" && (!templateId || !input.templates.some(template => template.id === templateId))) return { status: "invalid_response", reasoning: "Template activation selected an unavailable template.", evaluator: "llm" };
         return { status: "required", reasoning: text(parsed.reasoning), activation, templateId, evaluator: "llm" };
     } catch (error) { const reasoning = error instanceof Error ? error.message : String(error); return { status: reasoning === "Invalid classifier response." ? "invalid_response" : "error", reasoning, evaluator: "llm" }; }
 };
 
 const systemOneRequirement = async (ctx: ExtensionContext, config: WorkflowEvaluationConfig, input: RequirementInput): Promise<RequirementDecision> => {
-    const model = config.systemOne!.model, options: Record<string, string> = { no_workflow: "A persisted Sequential Workflow is not needed.", workflow_definition: "A persisted Sequential Workflow is needed and should be defined from the supplied state.", uncertain: "The state does not provide enough evidence for a safe decision." };
+    const model = config.systemOne!.model, options: Record<string, string> = { no_workflow: "A persisted Sequential Workflow is not needed.", workflow_definition: "A persisted Sequential Workflow is needed and should be defined from the supplied state.", workflow_from_template: "A persisted Sequential Workflow is needed and the supplied Skill explicitly requires creating it from a named JSON template.", uncertain: "The state does not provide enough evidence for a safe decision." };
     for (const template of input.templates) options[`template:${template.id}`] = `A persisted Sequential Workflow is needed and should use '${template.id}': ${template.title}. ${template.source}`;
-    const response = await configuredSystemOneChoice(ctx, config, input, "Which workflow route is appropriate? Do not treat wording, names, frontmatter, or a template mention as conclusive by themselves.", options);
+    const response = await configuredSystemOneChoice(ctx, config, input, "Which workflow route is appropriate? Decide from the user request and supplied state. Select workflow_from_template only when the supplied Skill explicitly requires creating the workflow from a named JSON template; otherwise select workflow_definition when a workflow is needed. Do not treat wording, names, frontmatter, or a template mention alone as conclusive.", options);
     if (!response.answer) return { status: response.error?.endsWith("API credentials are unavailable.") ? "unavailable" : "error", reasoning: response.error!, evaluator: "system_one", model };
     const choice = text(response.answer.choice), common = metadata(response.answer, "system_one", model);
     if (typeof common.confidence !== "number") return { status: "invalid_response", reasoning: "TypeSafe API returned a Choice without confidence.", ...common };
     if (choice === "workflow_definition") return { status: "required", reasoning: "TypeSafe System One selected workflow definition.", activation: "definition", ...common };
+    if (choice === "workflow_from_template") return { status: "required", reasoning: "TypeSafe System One selected workflow creation from the Skill's named template.", activation: "template", ...common };
     if (choice.startsWith("template:") && input.templates.some(template => `template:${template.id}` === choice)) return { status: "required", reasoning: "TypeSafe System One selected a workflow template.", activation: "template", templateId: choice.slice(9), ...common };
     if (choice === "no_workflow") return { status: "not_required", reasoning: "TypeSafe System One selected no workflow.", ...common };
     if (choice === "uncertain") return { status: "uncertain", reasoning: "TypeSafe System One selected an uncertain workflow decision.", ...common };
