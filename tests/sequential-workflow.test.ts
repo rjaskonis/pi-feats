@@ -351,12 +351,12 @@ test("definition mode constrains the next model context and restores tools after
     }
 });
 
-test("Skill metadata is evidence only and never a deterministic requirement", async () => {
+test("a Skill keyword triggers evaluator-owned workflow routing without frontmatter flags", async () => {
     const h = await setup();
     try {
         h.enableClassifier({ status: "not_required", reasoning: "The Skill does not need persisted control for this request." });
-        const skillDir = join(h.root, "metadata-skill"); await mkdir(skillDir);
-        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "---\nrequires_sequential_workflow: true\n---\nRun the operation.");
+        const skillDir = join(h.root, "keyword-skill"); await mkdir(skillDir);
+        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "## Required workflow\n\nCreate the Sequential Workflow before running the operation.");
         await h.hook("turn_start");
         assert.equal(await h.hook("tool_call", { toolName: "read", input: { path: skillPath } }), undefined);
         assert.equal((await h.call("status", {})).details.workflows.length, 0);
@@ -378,7 +378,7 @@ test("a Skill requirement is decided by the configured evaluator", async () => {
     try {
         h.enableClassifier({ status: "required", reasoning: "The evaluated Skill requires workflow control." });
         const skillDir = join(h.root, "skill"); await mkdir(skillDir);
-        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "---\nrequires_sequential_workflow: true\n---\nRun the operation.");
+        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "## Required workflow\n\nCreate the Sequential Workflow before running the operation.");
         await h.hook("turn_start");
         const result = await h.hook("tool_call", { toolName: "read", input: { path: skillPath } });
         assert.deepEqual(result, { block: true, terminate: true, reason: "Sequential Workflow definition mode has started from the required Skill." });
@@ -391,7 +391,7 @@ test("an unavailable explicit Skill evaluator blocks work and is visible", async
     const h = await setup();
     try {
         const skillDir = join(h.root, "ambiguous-skill"); await mkdir(skillDir);
-        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "---\nrequires_sequential_workflow: true\n---\nA Skill.");
+        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "## Required workflow\n\nCreate the Sequential Workflow before running the operation.");
         await h.hook("turn_start");
         const result = await h.hook("tool_call", { toolName: "read", input: { path: skillPath } });
         assert.equal(result?.block, true);
@@ -404,7 +404,7 @@ test("a new user input releases an unresolved requirement block when no workflow
     const h = await setup();
     try {
         const skillDir = join(h.root, "blocked-skill"); await mkdir(skillDir);
-        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "---\nrequires_sequential_workflow: true\n---\nA Skill.");
+        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "## Required workflow\n\nCreate the Sequential Workflow before running the operation.");
         await h.hook("turn_start");
         assert.equal((await h.hook("tool_call", { toolName: "read", input: { path: skillPath } }))?.block, true);
         const db = new DatabaseSync(join(h.root, "sequential-workflow.db"));

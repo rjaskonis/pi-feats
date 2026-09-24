@@ -311,10 +311,11 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         const message = announceDefinitionMode(pending);
         return message ? { message } : undefined;
     }));
-    const explicitWorkflowRequest = (text: string) => /\b(?:sequential[\s-]workflow|workflow[\s-]sequencial|fluxo de trabalho sequencial)\b/i.test(text);
-    const skillRequiresWorkflowEvaluation = (content: string) => /^requires_sequential_workflow:\s*true\s*$/mi.test(content);
-    // Requirement decisions remain evaluator-owned, but evaluation is entered only
-    // from an explicit user request or a Skill that explicitly requires it.
+    const workflowKeyword = /\b(?:sequential[\s-]workflow|workflow[\s-]sequencial|fluxo de trabalho sequencial)\b/i;
+    const explicitWorkflowRequest = (text: string) => workflowKeyword.test(text);
+    const skillRequiresWorkflowEvaluation = (content: string) => workflowKeyword.test(content);
+    // Requirement decisions remain evaluator-owned, but evaluation starts as soon
+    // as an explicit user request or a read Skill mentions Sequential Workflow.
     host.on("input", async (event, ctx) => context.run(ctx, async () => {
         // An unavailable requirement evaluator must not permanently lock a session
         // with no active workflow. A later user request is new evidence and can be
