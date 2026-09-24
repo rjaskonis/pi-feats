@@ -24,6 +24,7 @@ async function setup(legacy = false) {
     const renderers = new Map<string, any>();
     let activeTools = ["read", "bash", "edit", "write"];
     let classifierResponse: any;
+    let classifierContext: any;
     const initialize = () => sequentialWorkflow({ registerTool: (t: any) => tools.set(t.name, t), registerCommand: (n: string, c: any) => commands.set(n, c), registerMessageRenderer: (name: string, renderer: any) => renderers.set(name, renderer), on: (n: string, h: any) => hooks.set(n, [...hooks.get(n) ?? [], h]), sendMessage: (...args: any[]) => messages.push(args), getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools = names; } } as any);
     initialize();
     let sessionId = "A";
@@ -34,11 +35,12 @@ async function setup(legacy = false) {
         sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ id: userId, type: "message", message: { role: "user", content: "Current user request" } }] },
         ui: { notify: (...args: any[]) => notices.push(args), setStatus: (...args: any[]) => statuses.push(args), setWorkingMessage: (...args: any[]) => workingMessages.push(args) },
         model: undefined,
-        modelRegistry: { streamSimple: (_model: any, context: any) => ({ result: async () => ({ content: [{ type: "text", text: JSON.stringify(classifierResponse) }], context }) }) },
+        modelRegistry: { streamSimple: (_model: any, context: any) => { classifierContext = context; return { result: async () => ({ content: [{ type: "text", text: JSON.stringify(classifierResponse) }], context }) }; } },
     };
     return {
         root, messages, notices, statuses, workingMessages, renderers, tools,
         activeTools: () => activeTools,
+        classifierContext: () => classifierContext,
         enableClassifier(response: any) { classifierResponse = response?.status ? response : { status: response?.requiresSequentialWorkflow ? "required" : "not_required", reasoning: response?.reasoning ?? "Test classifier decision.", activation: response?.activation, templateId: response?.templatePath?.replace(/^.*\//, "").replace(/\.json$/, "") }; ctx.model = {}; },
         reload() { for (const h of hooks.get("session_shutdown") ?? [])
             h(); hooks.clear(); tools.clear(); commands.clear(); initialize(); },
@@ -427,13 +429,16 @@ test("a new user input releases an unresolved requirement block when no workflow
         assert.equal(await h.hook("tool_call", { toolName: "bash", input: {} }), undefined);
     } finally { await h.close(); }
 });
-test("technical Sequential Workflow discussion does not start evaluation or block work", async () => {
+test("technical Sequential Workflow discussion is evaluated and can proceed without a workflow", async () => {
     const h = await setup();
     try {
-        h.enableClassifier({ status: "required", reasoning: "This must not be consulted." });
+        h.enableClassifier({ status: "not_required", reasoning: "The user is changing the feature, not requesting its execution." });
         await h.hook("input", { text: "Preciso que você corrija o código do Sequential Workflow; a Skill pode criar um workflow com template.", source: "interactive" });
         assert.equal((await h.call("status", {})).details.workflows.length, 0);
-        assert.equal(h.messages.some((message) => message[0].content === "Checking whether Sequential Workflow is required…"), false);
+        assert.equal(h.messages.some((message) => message[0].content === "Checking whether Sequential Workflow is required…"), true);
+        assert.equal(h.messages.some((message) => message[0].content === "Sequential Workflow is not required for this request."), true);
+        assert.match(h.classifierContext().messages[0].content, /keyword.*trigger to evaluate/i);
+        assert.match(h.classifierContext().messages[0].content, /Do not confuse a request to modify the feature/i);
         await h.hook("turn_start");
         assert.equal(await h.hook("tool_call", { toolName: "bash", input: {} }), undefined);
     } finally { await h.close(); }
@@ -452,6 +457,8 @@ test("System One requirement decisions preserve lifecycle visibility and block u
         assert.equal(requests.length, 1);
         assert.deepEqual(Object.keys(requests[0].questions), ["decision"]);
         assert.deepEqual(Object.keys(requests[0].questions.decision.criteria), ["no_workflow", "workflow_definition", "workflow_from_template", "uncertain"]);
+        assert.match(requests[0].questions.decision.instructions, /keyword.*trigger to evaluate/i);
+        assert.match(requests[0].questions.decision.instructions, /discussing, correcting, implementing, testing, configuring/i);
         assert.equal((await h.call("status", {})).details.workflows[0].status, "pending_definition");
         assert.ok(h.messages.some((message) => message[0].content === "Sequential Workflow is required for this request."));
         const events = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase, payload FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string; payload: string }>;
