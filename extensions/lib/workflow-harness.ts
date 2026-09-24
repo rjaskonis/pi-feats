@@ -319,8 +319,8 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     const workflowKeyword = /\b(?:sequential[\s-]workflow|workflow[\s-]sequencial|fluxo de trabalho sequencial)\b/i;
     // Mentioning the feature while discussing, testing, or changing it must never
     // initiate runtime workflow control. Only an operational request can do that.
-    const workflowOperation = /\b(?:use|create|run|start|continue|inspect|cancel|execute|inicie|crie|rode|continue|inspecione|cancele|execute|usar|criar|rodar|iniciar|executar)\b/i;
-    const explicitWorkflowRequest = (text: string) => workflowKeyword.test(text) && workflowOperation.test(text);
+    const workflowOperation = /^\s*(?:(?:please|por favor)\s+)?(?:(?:can|could)\s+you\s+|(?:você\s+)?pode\s+)?(?:use|create|run|start|continue|inspect|cancel|execute|inicie|crie|rode|inspecione|cancele|usar|criar|rodar|iniciar|executar)\b/i;
+    const explicitWorkflowRequest = (text: string) => workflowOperation.test(text) && workflowKeyword.test(text);
     const skillRequiresWorkflowEvaluation = (content: string) => workflowKeyword.test(content);
     // Requirement decisions remain evaluator-owned, but evaluation starts as soon
     // as an explicit user request or a read Skill mentions Sequential Workflow.

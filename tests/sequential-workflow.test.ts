@@ -431,7 +431,7 @@ test("technical Sequential Workflow discussion does not start evaluation or bloc
     const h = await setup();
     try {
         h.enableClassifier({ status: "required", reasoning: "This must not be consulted." });
-        await h.hook("input", { text: "Corrija o código do Sequential Workflow e seus templates.", source: "interactive" });
+        await h.hook("input", { text: "Preciso que você corrija o código do Sequential Workflow; a Skill pode criar um workflow com template.", source: "interactive" });
         assert.equal((await h.call("status", {})).details.workflows.length, 0);
         assert.equal(h.messages.some((message) => message[0].content === "Checking whether Sequential Workflow is required…"), false);
         await h.hook("turn_start");
