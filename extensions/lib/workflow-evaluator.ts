@@ -37,17 +37,23 @@ async function typesafeChoice(ctx: ExtensionContext, model: string, state: unkno
     } catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
 }
 
+async function openRouterChoice(ctx: ExtensionContext, model: string, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
+    const apiKey = process.env.OPENROUTER_API_KEY;
+    if (!apiKey) return { error: "OpenRouter API credentials are unavailable." };
+    try {
+        const response = await fetch("https://openrouter.ai/api/alpha/decisions", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model: model.slice("openrouter/".length), state, questions: { decision: { type: "choice", instructions, criteria } } }), signal: ctx.signal });
+        if (!response.ok) return { error: `OpenRouter Decisions API returned HTTP ${response.status}.` };
+        const body: unknown = await response.json();
+        const answer = object(body) && object(body.answers) && object(body.answers.decision) ? body.answers.decision : undefined;
+        return answer ? { answer } : { error: "OpenRouter Decisions API returned an invalid Choice response." };
+    } catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
+}
+
 async function configuredSystemOneChoice(ctx: ExtensionContext, config: WorkflowEvaluationConfig, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
     const systemOne = config.systemOne!;
     if (systemOne.provider === "typesafe") return typesafeChoice(ctx, systemOne.model, state, instructions, criteria);
-    const model = (ctx.modelRegistry as any).find(systemOne.provider, systemOne.model);
-    if (!model) return { error: `Configured model ${systemOne.provider}/${systemOne.model} is unavailable.` };
-    try {
-        const response: any = await (ctx.modelRegistry as any).streamSimple(model, { messages: [{ role: "system", content: `${instructions} Return only JSON with choice, confidence (0 to 1), and optional probabilities.` }, { role: "user", content: JSON.stringify({ state, criteria }) }] } as any, { signal: ctx.signal }).result();
-        const content = typeof response?.content === "string" ? response.content : (response?.content ?? []).map((part: any) => part.text ?? "").join("");
-        const answer: unknown = JSON.parse(content);
-        return object(answer) ? { answer } : { error: "Configured model returned an invalid Choice response." };
-    } catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
+    if (systemOne.model.startsWith("openrouter/typesafe/")) return openRouterChoice(ctx, systemOne.model, state, instructions, criteria);
+    return { error: `Configured model ${systemOne.provider}/${systemOne.model} does not support structured System One decisions.` };
 }
 
 const llmDecision = async (ctx: ExtensionContext, input: RequirementInput): Promise<RequirementDecision> => {

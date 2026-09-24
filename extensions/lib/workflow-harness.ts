@@ -400,8 +400,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                 const path = resolve(ctx.cwd, event.input.path);
                 const content = await readFile(path, "utf8");
                 {
-                    if (!skillRequiresWorkflowEvaluation(content))
-                        return;
+                    if (skillRequiresWorkflowEvaluation(content)) {
                     const userRequest = latestUserRequest(ctx);
                     audit("requirement_check_started", { path, message: "Checking whether Sequential Workflow is required…" }, "skill", undefined, true);
                     const decision = await classifyRequirement(ctx, "skill", content, userRequest);
@@ -424,6 +423,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                         definitionCutover = true;
                         definitionCutoverOrigin = "skill";
                     }
+                    }
                 }
             }
             catch {
@@ -434,7 +434,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return { block: true, terminate: true, reason: definitionCutoverOrigin === "skill" ? "Sequential Workflow definition mode has started from the required Skill." : "Sequential Workflow definition mode has started from the user request." };
         const id = focus();
         const blockedRequirement = requirementBlock();
-        if (blockedRequirement && !event.toolName.startsWith("sequential_workflow_"))
+        if (blockedRequirement && !["sequential_workflow_cancel", "sequential_workflow_status"].includes(event.toolName))
             return { block: true, terminate: true, reason: `Sequential Workflow evaluation is unresolved: ${blockedRequirement.reason}` };
         if (id === undefined && !event.toolName.startsWith("sequential_workflow_create")) {
             dispatched = true;

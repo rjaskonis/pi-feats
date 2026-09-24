@@ -258,6 +258,19 @@ test("System One evaluates collect input before allowing a transition", async ()
         assert.ok(h.messages.some((message) => String(message[0].content).includes("will be retried")));
     } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = oldKey; await h.close(); }
 });
+test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {
+    const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.OPENROUTER_API_KEY;
+    try {
+        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "omniroute", model: "openrouter/typesafe/jev-1.13" } } } }));
+        process.env.OPENROUTER_API_KEY = "test";
+        let request: { url: string; body: any } | undefined;
+        globalThis.fetch = async (url, init) => { request = { url: String(url), body: JSON.parse(String(init?.body)) }; return new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 1, probabilities: { workflow_definition: 1 } } } }), { status: 200 }); };
+        await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });
+        assert.equal(request?.url, "https://openrouter.ai/api/alpha/decisions");
+        assert.equal(request?.body.model, "typesafe/jev-1.13");
+        assert.equal((await h.call("status", {})).details.workflows[0].status, "pending_definition");
+    } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
+});
 test("an unavailable automatic collect evaluation restores the task to awaiting user input", async () => {
     const h = await setup(); const oldKey = process.env.TYPESAFE_API_KEY;
     try {
@@ -413,6 +426,7 @@ test("invalid System One configuration fails safely and blocks external work", a
         await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });
         await h.hook("turn_start");
         assert.equal((await h.hook("tool_call", { toolName: "bash", input: {} })).block, true);
+        assert.equal((await h.hook("tool_call", { toolName: "sequential_workflow_create", input: {} })).block, true);
         assert.ok(h.messages.some((message) => message[0].content === "Sequential Workflow requirement could not be classified."));
     } finally { await h.close(); }
 });
