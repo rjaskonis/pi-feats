@@ -683,7 +683,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       if (modelType !== "system_one" || !provider || !model || (systemOne.onUncertain !== undefined && systemOne.onUncertain !== "block")) throw Object.assign(new Error("Invalid Sequential Workflow evaluation configuration."), { status: 400 });
       const directory = api.profiles.directory(profile), runtime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath: join(directory, "models.json"), refreshOnCreate: false });
       if (runtime.getError()) throw Object.assign(new Error(runtime.getError()), { status: 400 });
-      if (!runtime.getModel(provider, model)) throw Object.assign(new Error("The selected provider and model are not available for this profile."), { status: 400 });
+      if (!runtime.getModels().some((available) => available.provider === provider)) throw Object.assign(new Error("The selected provider is not available for this profile."), { status: 400 });
       return { modelType: "system_one" as const, systemOne: { provider, model, onUncertain: "block" as const } };
     };
     const configuredWorkflowEvaluation = async (profile: string, settings: ProfileSettings) => {
