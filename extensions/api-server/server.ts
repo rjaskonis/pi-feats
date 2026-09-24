@@ -679,12 +679,14 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     const workflowEvaluation = async (profile: string, value: unknown) => {
       const input = objectBody(value), modelType = input.modelType;
       if (modelType === "llm") return { modelType: "llm" as const };
-      const systemOne = objectBody(input.systemOne), provider = typeof systemOne.provider === "string" ? systemOne.provider.trim() : "", model = typeof systemOne.model === "string" ? systemOne.model.trim() : "";
+      const systemOne = objectBody(input.systemOne), provider = typeof systemOne.provider === "string" ? systemOne.provider.trim() : "", model = typeof systemOne.model === "string" ? systemOne.model.trim() : "", endpoint = objectBody(systemOne.endpoint), baseUrl = typeof endpoint.baseUrl === "string" && endpoint.baseUrl.trim() ? endpoint.baseUrl.trim() : "https://openrouter.ai/api/", path = typeof endpoint.path === "string" && endpoint.path.trim() ? endpoint.path.trim().replace(/^\/+/, "") : "alpha/decisions";
+      try { const url = new URL(baseUrl); if (!/^https?:$/.test(url.protocol) || /^(?:https?:)?\/\//i.test(path)) throw new Error(); }
+      catch { throw Object.assign(new Error("Invalid System One endpoint configuration."), { status: 400 }); }
       if (modelType !== "system_one" || !provider || !model || (systemOne.onUncertain !== undefined && systemOne.onUncertain !== "block")) throw Object.assign(new Error("Invalid Sequential Workflow evaluation configuration."), { status: 400 });
       const directory = api.profiles.directory(profile), runtime = await ModelRuntime.create({ authPath: join(directory, "auth.json"), modelsPath: join(directory, "models.json"), refreshOnCreate: false });
       if (runtime.getError()) throw Object.assign(new Error(runtime.getError()), { status: 400 });
       if (!runtime.getModels().some((available) => available.provider === provider)) throw Object.assign(new Error("The selected provider is not available for this profile."), { status: 400 });
-      return { modelType: "system_one" as const, systemOne: { provider, model, onUncertain: "block" as const } };
+      return { modelType: "system_one" as const, systemOne: { provider, model, endpoint: { baseUrl, path }, onUncertain: "block" as const } };
     };
     const configuredWorkflowEvaluation = async (profile: string, settings: ProfileSettings) => {
       const value = (settings as Record<string, unknown>).sequentialWorkflow;

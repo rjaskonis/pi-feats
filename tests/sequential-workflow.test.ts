@@ -261,7 +261,7 @@ test("System One evaluates collect input before allowing a transition", async ()
 test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {
     const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.OPENROUTER_API_KEY;
     try {
-        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "omniroute", model: "openrouter/typesafe/jev-1.13" } } } }));
+        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "omniroute", model: "openrouter/typesafe/jev-1.13", endpoint: { baseUrl: "https://openrouter.ai/api/", path: "alpha/decisions" } } } } }));
         process.env.OPENROUTER_API_KEY = "test";
         let request: { url: string; body: any } | undefined;
         globalThis.fetch = async (url, init) => { request = { url: String(url), body: JSON.parse(String(init?.body)) }; return new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 1, probabilities: { workflow_definition: 1 } } } }), { status: 200 }); };

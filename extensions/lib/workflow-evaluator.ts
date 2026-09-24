@@ -3,7 +3,8 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type WorkflowEvaluationConfig = { modelType: "llm" | "system_one"; systemOne?: { provider: string; model: string; onUncertain?: "block" } };
+export type WorkflowEvaluationConfig = { modelType: "llm" | "system_one"; systemOne?: { provider: string; model: string; endpoint?: { baseUrl: string; path: string }; onUncertain?: "block" } };
+const defaultOpenRouterEndpoint = { baseUrl: "https://openrouter.ai/api/", path: "alpha/decisions" };
 export type RequirementDecision = { status: "required" | "not_required" | "uncertain" | "unavailable" | "invalid_response" | "error"; reasoning: string; activation?: "definition" | "template"; templateId?: string; evaluator: "llm" | "system_one"; model?: string; confidence?: number; probabilities?: Record<string, number> };
 export type TaskDecision = { outcome: "accept" | "retry" | "fail" | "uncertain" | "unavailable" | "invalid_response" | "error"; reasoning: string; evaluator: "llm" | "system_one"; model?: string; confidence?: number; probabilities?: Record<string, number> };
 export type RequirementInput = { origin: "user_input" | "skill"; evidence: string; userRequest: string; recentUserMessages: string[]; templates: Array<{ id: string; title: string; source: string }> };
@@ -21,8 +22,12 @@ export async function workflowEvaluationConfig(): Promise<WorkflowEvaluationConf
     if (!evaluation || evaluation.modelType === undefined) return { modelType: "llm" };
     if (evaluation.modelType === "llm") return { modelType: "llm" };
     const systemOne = object(evaluation.systemOne) ? evaluation.systemOne : undefined;
+    const endpoint = object(systemOne?.endpoint) ? systemOne.endpoint : defaultOpenRouterEndpoint;
+    const baseUrl = text(endpoint.baseUrl).trim() || defaultOpenRouterEndpoint.baseUrl, path = text(endpoint.path).trim() || defaultOpenRouterEndpoint.path;
+    try { const url = new URL(baseUrl); if (!/^https?:$/.test(url.protocol) || /^(?:https?:)?\/\//i.test(path)) throw new Error(); }
+    catch { throw new Error("Invalid System One endpoint configuration."); }
     if (evaluation.modelType !== "system_one" || !systemOne || !text(systemOne.provider).trim() || !text(systemOne.model).trim() || (systemOne.onUncertain !== undefined && systemOne.onUncertain !== "block")) throw new Error("Invalid sequentialWorkflow.evaluation configuration.");
-    return { modelType: "system_one", systemOne: { provider: text(systemOne.provider).trim(), model: text(systemOne.model).trim(), onUncertain: "block" } };
+    return { modelType: "system_one", systemOne: { provider: text(systemOne.provider).trim(), model: text(systemOne.model).trim(), endpoint: { baseUrl, path: path.replace(/^\/+/, "") }, onUncertain: "block" } };
 }
 
 async function typesafeChoice(ctx: ExtensionContext, model: string, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
@@ -37,11 +42,13 @@ async function typesafeChoice(ctx: ExtensionContext, model: string, state: unkno
     } catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
 }
 
-async function openRouterChoice(ctx: ExtensionContext, model: string, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
+const endpointUrl = (endpoint: { baseUrl: string; path: string }) => new URL(endpoint.path.replace(/^\/+/, ""), endpoint.baseUrl.endsWith("/") ? endpoint.baseUrl : `${endpoint.baseUrl}/`).toString();
+
+async function openRouterChoice(ctx: ExtensionContext, model: string, endpoint: { baseUrl: string; path: string }, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return { error: "OpenRouter API credentials are unavailable." };
     try {
-        const response = await fetch("https://openrouter.ai/api/alpha/decisions", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model: model.slice("openrouter/".length), state, questions: { decision: { type: "choice", instructions, criteria } } }), signal: ctx.signal });
+        const response = await fetch(endpointUrl(endpoint), { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model: model.slice("openrouter/".length), state, questions: { decision: { type: "choice", instructions, criteria } } }), signal: ctx.signal });
         if (!response.ok) return { error: `OpenRouter Decisions API returned HTTP ${response.status}.` };
         const body: unknown = await response.json();
         const answer = object(body) && object(body.answers) && object(body.answers.decision) ? body.answers.decision : undefined;
@@ -52,7 +59,7 @@ async function openRouterChoice(ctx: ExtensionContext, model: string, state: unk
 async function configuredSystemOneChoice(ctx: ExtensionContext, config: WorkflowEvaluationConfig, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
     const systemOne = config.systemOne!;
     if (systemOne.provider === "typesafe") return typesafeChoice(ctx, systemOne.model, state, instructions, criteria);
-    if (systemOne.model.startsWith("openrouter/typesafe/")) return openRouterChoice(ctx, systemOne.model, state, instructions, criteria);
+    if (systemOne.model.startsWith("openrouter/typesafe/")) return openRouterChoice(ctx, systemOne.model, systemOne.endpoint ?? defaultOpenRouterEndpoint, state, instructions, criteria);
     return { error: `Configured model ${systemOne.provider}/${systemOne.model} does not support structured System One decisions.` };
 }
 
