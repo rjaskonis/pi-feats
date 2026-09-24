@@ -209,7 +209,7 @@ test("template activation is selected by the evaluator from controlled candidate
         await mkdir(join(h.root, "sequential_workflow_templates"));
         await writeFile(join(h.root, "sequential_workflow_templates/basic.json"), JSON.stringify({ version: 1, ...definition([{ type: "collect", instruction: "Exact question", criteria: "Exact criterion" }]) }));
         h.enableClassifier({ status: "required", reasoning: "The controlled template is appropriate.", activation: "template", templateId: "basic" });
-        await h.hook("input", { text: "Process this contract.", source: "interactive" });
+        await h.hook("input", { text: "Use Sequential Workflow to process this contract.", source: "interactive" });
         assert.deepEqual(h.activeTools(), ["sequential_workflow_create_from_template"]);
         const context = await h.hook("context_with_system", { messages: [] });
         assert.match(context.messages[0].content, /basic\.json/);
@@ -257,6 +257,14 @@ test("System One evaluates collect input before allowing a transition", async ()
         assert.equal(status.details.workflow.status, "awaiting_user");
         assert.ok(h.messages.some((message) => String(message[0].content).includes("will be retried")));
     } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = oldKey; await h.close(); }
+});
+test("ordinary user input does not trigger workflow evaluation", async () => {
+    const h = await setup();
+    try {
+        await h.hook("input", { text: "Hello", source: "interactive" });
+        assert.equal((await h.call("status", {})).details.workflows.length, 0);
+        assert.equal(h.messages.filter((message) => message[0].customType === "sequential-workflow-harness").length, 0);
+    } finally { await h.close(); }
 });
 test("a user phrase does not bypass the evaluator", async () => {
     const h = await setup();
@@ -333,7 +341,7 @@ test("explicit user cancellation remains mechanical", async () => {
     const h = await setup();
     try {
         h.enableClassifier({ status: "required", reasoning: "Required." });
-        await h.hook("input", { text: "A request", source: "interactive" });
+        await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });
         const pending = (await h.call("status", {})).details.workflows[0];
         await h.hook("input", { text: "Cancel the Sequential Workflow.", source: "interactive" });
         assert.equal((await h.call("status", { workflowId: pending.id })).details.workflow.status, "cancelled");
@@ -353,11 +361,11 @@ test("a Skill requirement is decided by the configured evaluator", async () => {
         assert.ok(audit.some((event) => event.phase === "requirement_classified_required"));
     } finally { await h.close(); }
 });
-test("an unavailable Skill evaluator blocks work and is visible", async () => {
+test("an unavailable explicit Skill evaluator blocks work and is visible", async () => {
     const h = await setup();
     try {
         const skillDir = join(h.root, "ambiguous-skill"); await mkdir(skillDir);
-        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "A Skill.");
+        const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "---\nrequires_sequential_workflow: true\n---\nA Skill.");
         await h.hook("turn_start");
         const result = await h.hook("tool_call", { toolName: "read", input: { path: skillPath } });
         assert.equal(result?.block, true);
@@ -380,7 +388,7 @@ test("System One requirement decisions preserve lifecycle visibility and block u
         await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "typesafe", model: "jev-test" } } } }));
         process.env.TYPESAFE_API_KEY = "test";
         globalThis.fetch = async () => new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 0.97, probabilities: { workflow_definition: 0.97, no_workflow: 0.03 } } } }), { status: 200 });
-        await h.hook("input", { text: "Process this request safely.", source: "interactive" });
+        await h.hook("input", { text: "Use Sequential Workflow to process this request safely.", source: "interactive" });
         assert.equal((await h.call("status", {})).details.workflows[0].status, "pending_definition");
         assert.ok(h.messages.some((message) => message[0].content === "Sequential Workflow is required for this request."));
         const events = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase, payload FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string; payload: string }>;
@@ -391,7 +399,7 @@ test("invalid System One configuration fails safely and blocks external work", a
     const h = await setup();
     try {
         await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "wrong", model: "" } } } }));
-        await h.hook("input", { text: "Any request.", source: "interactive" });
+        await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });
         await h.hook("turn_start");
         assert.equal((await h.hook("tool_call", { toolName: "bash", input: {} })).block, true);
         assert.ok(h.messages.some((message) => message[0].content === "Sequential Workflow requirement could not be classified."));
