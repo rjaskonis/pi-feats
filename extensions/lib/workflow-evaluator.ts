@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type WorkflowEvaluationConfig = { modelType: "llm" | "system_one"; systemOne?: { provider: "typesafe"; model: string; onUncertain?: "block" } };
+export type WorkflowEvaluationConfig = { modelType: "llm" | "system_one"; systemOne?: { provider: string; model: string; onUncertain?: "block" } };
 export type RequirementDecision = { status: "required" | "not_required" | "uncertain" | "unavailable" | "invalid_response" | "error"; reasoning: string; activation?: "definition" | "template"; templateId?: string; evaluator: "llm" | "system_one"; model?: string; confidence?: number; probabilities?: Record<string, number> };
 export type TaskDecision = { outcome: "accept" | "retry" | "fail" | "uncertain" | "unavailable" | "invalid_response" | "error"; reasoning: string; evaluator: "llm" | "system_one"; model?: string; confidence?: number; probabilities?: Record<string, number> };
 export type RequirementInput = { origin: "user_input" | "skill"; evidence: string; userRequest: string; recentUserMessages: string[]; templates: Array<{ id: string; title: string; source: string }> };
@@ -21,8 +21,8 @@ export async function workflowEvaluationConfig(): Promise<WorkflowEvaluationConf
     if (!evaluation || evaluation.modelType === undefined) return { modelType: "llm" };
     if (evaluation.modelType === "llm") return { modelType: "llm" };
     const systemOne = object(evaluation.systemOne) ? evaluation.systemOne : undefined;
-    if (evaluation.modelType !== "system_one" || !systemOne || systemOne.provider !== "typesafe" || !text(systemOne.model).trim() || (systemOne.onUncertain !== undefined && systemOne.onUncertain !== "block")) throw new Error("Invalid sequentialWorkflow.evaluation configuration.");
-    return { modelType: "system_one", systemOne: { provider: "typesafe", model: text(systemOne.model).trim(), onUncertain: "block" } };
+    if (evaluation.modelType !== "system_one" || !systemOne || !text(systemOne.provider).trim() || !text(systemOne.model).trim() || (systemOne.onUncertain !== undefined && systemOne.onUncertain !== "block")) throw new Error("Invalid sequentialWorkflow.evaluation configuration.");
+    return { modelType: "system_one", systemOne: { provider: text(systemOne.provider).trim(), model: text(systemOne.model).trim(), onUncertain: "block" } };
 }
 
 async function typesafeChoice(ctx: ExtensionContext, model: string, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
