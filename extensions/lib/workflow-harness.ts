@@ -291,46 +291,10 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                 host.registerTool(wrapped);
             };
         } });
-    const workflowTurnDirective = () => {
-        const pending = pendingWorkflow(), mode = definitionMode(pending);
-        if (pending && mode) return `Sequential Workflow definition mode is active for workflow #${pending}. Make exactly one tool call to ${definitionTools(mode.activation)[0]}. Do not perform work, read files, inspect state, or use any other tool.`;
-        const id = focus(), current = id ? task(id) : undefined, blocked = requirementBlock();
-        if (blocked) return `Sequential Workflow evaluation is unresolved: ${blocked.reason}. Do not use tools other than sequential_workflow_cancel or sequential_workflow_status.`;
-        if (id && current) return `Sequential Workflow #${id} is focused. Current task: ${JSON.stringify(current)}. Obey this current state; do not record an already processed collection response.`;
-        return "";
-    };
-    const evaluatedRequirementInputs = new Set<string>();
-    host.on("before_agent_start", async (event, ctx) => context.run(ctx, async () => {
-        const inputId = userEntry(), config = await workflowEvaluationConfig().catch(() => undefined);
-        const focused = focus(), focusedTask = focused ? task(focused) : undefined;
-        if (config?.modelType === "system_one" && focused && focusedTask?.type === "collect" && focusedTask.status === "awaiting_user" && inputId) {
-            const checkpoint = db.prepare("SELECT user_entry_id FROM workflow_collect_checkpoint WHERE task_id = ?").get(focusedTask.id) as any;
-            if (checkpoint?.user_entry_id !== inputId) {
-                const record = rawTools.get("sequential_workflow_record_result");
-                if (!record) throw new Error("Sequential Workflow result recorder is unavailable.");
-                const recorded = await transaction(ctx, () => record.execute("system-one-collect", { workflowId: focused, taskId: focusedTask.id, phase: "collect", result: event.prompt }, ctx.signal, undefined, ctx));
-                if (recorded.details?.needsEvaluation) await transaction(ctx, () => automaticTaskEvaluation(ctx, focused, focusedTask.id, event.prompt));
-            }
-        }
-        else if (focus() === undefined && event.prompt.trim() && explicitWorkflowRequest(event.prompt) && inputId && !evaluatedRequirementInputs.has(inputId)) {
-            evaluatedRequirementInputs.add(inputId);
-            clearRequirementBlock();
-            audit("requirement_check_started", { message: "Checking whether Sequential Workflow is required…" }, "user_input", undefined, true);
-            const decision = await classifyRequirement(ctx, "user_input", event.prompt, event.prompt);
-            const message = decision.status === "required" ? "Sequential Workflow is required for this request." : decision.status === "not_required" ? "Sequential Workflow is not required for this request." : decision.status === "uncertain" ? "Sequential Workflow decision is uncertain; work remains blocked." : "Sequential Workflow requirement could not be classified.";
-            audit(`requirement_classified_${decision.status}`, { ...decision, requiresSequentialWorkflow: decision.status === "required", message }, "user_input", undefined, true);
-            if (decision.status === "required") await transaction(ctx, async () => {
-                if (focus() === undefined) {
-                    const workflowId = createPendingWorkflow("user_input", event.prompt, decision.reasoning);
-                    const template = decision.templateId ? (await templateCandidates()).find(candidate => candidate.id === decision.templateId) : undefined;
-                    startDefinitionMode(workflowId, "user_input", event.prompt, decision.activation ?? "definition", template?.source);
-                    audit("definition_mode_started", { evaluator: decision.evaluator, model: decision.model, message: `Sequential Workflow definition mode started for workflow #${workflowId}.` }, "user_input", workflowId);
-                }
-            });
-            else if (decision.status !== "not_required") await transaction(ctx, () => { blockEvaluation(decision.reasoning, decision as any, "user_input"); });
-        }
-        const directive = workflowTurnDirective();
-        return directive ? { systemPrompt: `${event.systemPrompt}\n\n${directive}` } : undefined;
+    host.on("before_agent_start", (_event, ctx) => context.run(ctx, () => {
+        // Requirement checks are emitted immediately by the input/tool handler so
+        // their visible custom message is persisted before any model turn begins.
+        return;
     }));
     host.on("before_agent_start", (_event, ctx) => context.run(ctx, () => {
         const pending = pendingWorkflow();
@@ -359,8 +323,39 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             clearRequirementBlock();
             audit("requirement_block_released", { message: "A new user input released the unresolved Sequential Workflow evaluation block." }, "user_input");
         }
+        const focused = focus();
+        const focusedTask = focused ? task(focused) : undefined;
+        const evaluationConfig = await workflowEvaluationConfig().catch(() => undefined);
+        if (evaluationConfig?.modelType === "system_one" && focused && focusedTask?.type === "collect" && focusedTask.status === "awaiting_user") {
+            const record = rawTools.get("sequential_workflow_record_result");
+            if (!record)
+                throw new Error("Sequential Workflow result recorder is unavailable.");
+            const recorded = await transaction(ctx, () => record.execute("system-one-collect", { workflowId: focused, taskId: focusedTask.id, phase: "collect", result: event.text }, ctx.signal, undefined, ctx));
+            if (recorded.details?.needsEvaluation)
+                await transaction(ctx, () => automaticTaskEvaluation(ctx, focused, focusedTask.id, event.text));
+            return { action: "continue" as const };
+        }
         if (pendingWorkflow() && explicitUserOverride(event.text))
             await transaction(ctx, () => { cancelPendingWorkflowByUser(event.text); });
+        if (focus() !== undefined || !event.text.trim() || !explicitWorkflowRequest(event.text))
+            return;
+        clearRequirementBlock();
+        audit("requirement_check_started", { message: "Checking whether Sequential Workflow is required…" }, "user_input", undefined, true);
+        const decision = await classifyRequirement(ctx, "user_input", event.text, event.text);
+        const message = decision.status === "required" ? "Sequential Workflow is required for this request." : decision.status === "not_required" ? "Sequential Workflow is not required for this request." : decision.status === "uncertain" ? "Sequential Workflow decision is uncertain; work remains blocked." : "Sequential Workflow requirement could not be classified.";
+        audit(`requirement_classified_${decision.status}`, { ...decision, requiresSequentialWorkflow: decision.status === "required", message }, "user_input", undefined, true);
+        if (decision.status !== "required") {
+            if (decision.status !== "not_required") await transaction(ctx, () => { blockEvaluation(decision.reasoning, decision as any, "user_input"); });
+            return;
+        }
+        await transaction(ctx, async () => {
+            if (focus() === undefined) {
+                const workflowId = createPendingWorkflow("user_input", event.text, decision.reasoning);
+                const template = decision.templateId ? (await templateCandidates()).find(candidate => candidate.id === decision.templateId) : undefined;
+                startDefinitionMode(workflowId, "user_input", event.text, decision.activation ?? "definition", template?.source);
+                audit("definition_mode_started", { evaluator: decision.evaluator, model: decision.model, message: `Sequential Workflow definition mode started for workflow #${workflowId}.` }, "user_input", workflowId);
+            }
+        });
     }));
     let continuationKey = "";
     let continuations = 0;
