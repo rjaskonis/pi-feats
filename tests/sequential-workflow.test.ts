@@ -246,17 +246,17 @@ test("reload restores focus; adopting a tree revokes the old session owner", asy
     }
 });
 test("System One evaluates collect input before allowing a transition", async () => {
-    const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.TYPESAFE_API_KEY;
+    const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.OPENROUTER_API_KEY;
     try {
-        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "typesafe", model: "jev-test" } } } }));
-        process.env.TYPESAFE_API_KEY = "test";
+        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "openrouter", model: "typesafe/jev-test" } } } }));
+        process.env.OPENROUTER_API_KEY = "test";
         globalThis.fetch = async () => new Response(JSON.stringify({ answers: { decision: { choice: "retry", confidence: 1, probabilities: { retry: 1 } } } }), { status: 200 });
         const created = ids(await h.call("create", definition([{ type: "collect", instruction: "Name?", criteria: "Full name" }])));
         await h.hook("input", { text: "Renne", source: "interactive" });
         const status = await h.call("status", { workflowId: created.workflowId });
         assert.equal(status.details.workflow.status, "awaiting_user");
         assert.ok(h.messages.some((message) => String(message[0].content).includes("will be retried")));
-    } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = oldKey; await h.close(); }
+    } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
 });
 test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {
     const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.OPENROUTER_API_KEY;
@@ -272,15 +272,15 @@ test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {
     } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
 });
 test("an unavailable automatic collect evaluation restores the task to awaiting user input", async () => {
-    const h = await setup(); const oldKey = process.env.TYPESAFE_API_KEY;
+    const h = await setup(); const oldKey = process.env.OPENROUTER_API_KEY;
     try {
-        delete process.env.TYPESAFE_API_KEY;
-        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "typesafe", model: "jev-test" } } } }));
+        delete process.env.OPENROUTER_API_KEY;
+        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "openrouter", model: "typesafe/jev-test" } } } }));
         const created = ids(await h.call("create", definition([{ type: "collect", instruction: "Name?", criteria: "Full name" }])));
         await h.hook("input", { text: "Renne", source: "interactive" });
         const status = await h.call("status", { workflowId: created.workflowId });
         assert.equal(status.details.workflow.status, "awaiting_user");
-    } finally { if (oldKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = oldKey; await h.close(); }
+    } finally { if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
 });
 test("ordinary user input does not trigger workflow evaluation", async () => {
     const h = await setup();
@@ -422,17 +422,17 @@ test("non-required follow-up does not create a workflow", async () => {
     } finally { await h.close(); }
 });
 test("System One requirement decisions preserve lifecycle visibility and block uncertainty", async () => {
-    const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.TYPESAFE_API_KEY;
+    const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.OPENROUTER_API_KEY;
     try {
-        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "typesafe", model: "jev-test" } } } }));
-        process.env.TYPESAFE_API_KEY = "test";
+        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "openrouter", model: "typesafe/jev-test" } } } }));
+        process.env.OPENROUTER_API_KEY = "test";
         globalThis.fetch = async () => new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 0.97, probabilities: { workflow_definition: 0.97, no_workflow: 0.03 } } } }), { status: 200 });
         await h.hook("input", { text: "Use Sequential Workflow to process this request safely.", source: "interactive" });
         assert.equal((await h.call("status", {})).details.workflows[0].status, "pending_definition");
         assert.ok(h.messages.some((message) => message[0].content === "Sequential Workflow is required for this request."));
         const events = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase, payload FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string; payload: string }>;
         assert.ok(events.some((event) => event.phase === "requirement_classified_required" && JSON.parse(event.payload).evaluator === "system_one"));
-    } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = oldKey; await h.close(); }
+    } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
 });
 test("invalid System One configuration fails safely and blocks external work", async () => {
     const h = await setup();

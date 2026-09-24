@@ -30,37 +30,23 @@ export async function workflowEvaluationConfig(): Promise<WorkflowEvaluationConf
     return { modelType: "system_one", systemOne: { provider: text(systemOne.provider).trim(), model: text(systemOne.model).trim(), endpoint: { baseUrl, path: path.replace(/^\/+/, "") }, onUncertain: "block" } };
 }
 
-async function typesafeChoice(ctx: ExtensionContext, model: string, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
-    const apiKey = process.env.TYPESAFE_API_KEY;
-    if (!apiKey) return { error: "TypeSafe API credentials are unavailable." };
-    try {
-        const response = await fetch("https://api.typesafe.ai/v1/systemone", { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model, state, questions: { decision: { type: "choice", instructions, criteria } } }), signal: ctx.signal });
-        if (!response.ok) return { error: `TypeSafe API returned HTTP ${response.status}.` };
-        const body: unknown = await response.json();
-        const answer = object(body) && object(body.answers) && object(body.answers.decision) ? body.answers.decision : undefined;
-        return answer ? { answer } : { error: "TypeSafe API returned an invalid Choice response." };
-    } catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
-}
-
 const endpointUrl = (endpoint: { baseUrl: string; path: string }) => new URL(endpoint.path.replace(/^\/+/, ""), endpoint.baseUrl.endsWith("/") ? endpoint.baseUrl : `${endpoint.baseUrl}/`).toString();
 
-async function openRouterChoice(ctx: ExtensionContext, model: string, endpoint: { baseUrl: string; path: string }, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
+async function decisionEndpointChoice(ctx: ExtensionContext, model: string, endpoint: { baseUrl: string; path: string }, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
     const apiKey = process.env.OPENROUTER_API_KEY;
     if (!apiKey) return { error: "OpenRouter API credentials are unavailable." };
     try {
-        const response = await fetch(endpointUrl(endpoint), { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model: model.slice("openrouter/".length), state, questions: { decision: { type: "choice", instructions, criteria } } }), signal: ctx.signal });
-        if (!response.ok) return { error: `OpenRouter Decisions API returned HTTP ${response.status}.` };
+        const response = await fetch(endpointUrl(endpoint), { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model: model.replace(/^openrouter\//, ""), state, questions: { decision: { type: "choice", instructions, criteria } } }), signal: ctx.signal });
+        if (!response.ok) return { error: `Configured Decisions API returned HTTP ${response.status}.` };
         const body: unknown = await response.json();
         const answer = object(body) && object(body.answers) && object(body.answers.decision) ? body.answers.decision : undefined;
-        return answer ? { answer } : { error: "OpenRouter Decisions API returned an invalid Choice response." };
+        return answer ? { answer } : { error: "Configured Decisions API returned an invalid Choice response." };
     } catch (error) { return { error: error instanceof Error ? error.message : String(error) }; }
 }
 
 async function configuredSystemOneChoice(ctx: ExtensionContext, config: WorkflowEvaluationConfig, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
     const systemOne = config.systemOne!;
-    if (systemOne.provider === "typesafe") return typesafeChoice(ctx, systemOne.model, state, instructions, criteria);
-    if (systemOne.model.startsWith("openrouter/typesafe/")) return openRouterChoice(ctx, systemOne.model, systemOne.endpoint ?? defaultOpenRouterEndpoint, state, instructions, criteria);
-    return { error: `Configured model ${systemOne.provider}/${systemOne.model} does not support structured System One decisions.` };
+    return decisionEndpointChoice(ctx, systemOne.model, systemOne.endpoint ?? defaultOpenRouterEndpoint, state, instructions, criteria);
 }
 
 const llmDecision = async (ctx: ExtensionContext, input: RequirementInput): Promise<RequirementDecision> => {
@@ -82,7 +68,7 @@ const systemOneRequirement = async (ctx: ExtensionContext, config: WorkflowEvalu
     const model = config.systemOne!.model, options: Record<string, string> = { no_workflow: "A persisted Sequential Workflow is not needed.", workflow_definition: "A persisted Sequential Workflow is needed and should be defined from the supplied state.", uncertain: "The state does not provide enough evidence for a safe decision." };
     for (const template of input.templates) options[`template:${template.id}`] = `A persisted Sequential Workflow is needed and should use '${template.id}': ${template.title}. ${template.source}`;
     const response = await configuredSystemOneChoice(ctx, config, input, "Which workflow route is appropriate? Do not treat wording, names, frontmatter, or a template mention as conclusive by themselves.", options);
-    if (!response.answer) return { status: response.error === "TypeSafe API credentials are unavailable." ? "unavailable" : "error", reasoning: response.error!, evaluator: "system_one", model };
+    if (!response.answer) return { status: response.error?.endsWith("API credentials are unavailable.") ? "unavailable" : "error", reasoning: response.error!, evaluator: "system_one", model };
     const choice = text(response.answer.choice), common = metadata(response.answer, "system_one", model);
     if (typeof common.confidence !== "number") return { status: "invalid_response", reasoning: "TypeSafe API returned a Choice without confidence.", ...common };
     if (choice === "workflow_definition") return { status: "required", reasoning: "TypeSafe System One selected workflow definition.", activation: "definition", ...common };
@@ -100,7 +86,7 @@ export async function evaluateWorkflowTask(ctx: ExtensionContext, input: TaskInp
     if (config.modelType === "llm") return undefined;
     const model = config.systemOne!.model;
     const response = await configuredSystemOneChoice(ctx, config, input, "Does the recorded result meet the task criterion? Select fail only when the task cannot safely progress; select retry when another attempt may succeed.", { accept: "The result fully meets the criterion.", retry: "The result does not meet the criterion but another attempt may succeed.", fail: "The result cannot safely satisfy the criterion and the workflow must fail.", uncertain: "The evidence is insufficient for a safe transition." });
-    if (!response.answer) return { outcome: response.error === "TypeSafe API credentials are unavailable." ? "unavailable" : "error", reasoning: response.error!, evaluator: "system_one", model };
+    if (!response.answer) return { outcome: response.error?.endsWith("API credentials are unavailable.") ? "unavailable" : "error", reasoning: response.error!, evaluator: "system_one", model };
     const choice = text(response.answer.choice), common = metadata(response.answer, "system_one", model);
     if (typeof common.confidence !== "number") return { outcome: "invalid_response", reasoning: "TypeSafe API returned a Choice without confidence.", ...common };
     if (["accept", "retry", "fail"].includes(choice) && common.confidence >= 0.85) return { outcome: choice as "accept" | "retry" | "fail", reasoning: `TypeSafe System One selected ${choice}.`, ...common };

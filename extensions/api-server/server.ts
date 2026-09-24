@@ -709,8 +709,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       if (!guard(request, reply)) return;
       const profile = profileName(request), evaluation = await configuredWorkflowEvaluation(profile, await api.profiles.readSettings(profile));
       const environment = await api.handlerEnvironment(profile);
-      const model = evaluation.modelType === "system_one" ? evaluation.systemOne.model : "";
-      const credentialConfigured = evaluation.modelType !== "system_one" ? true : model.startsWith("openrouter/typesafe/") ? Boolean(environment.OPENROUTER_API_KEY) : evaluation.systemOne.provider !== "typesafe" || Boolean(environment.TYPESAFE_API_KEY);
+      const credentialConfigured = evaluation.modelType !== "system_one" || Boolean(environment.OPENROUTER_API_KEY);
       return { evaluation, credentialConfigured };
     });
 
