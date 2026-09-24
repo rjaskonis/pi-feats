@@ -250,9 +250,10 @@ test("System One evaluates collect input before allowing a transition", async ()
     try {
         await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "openrouter", model: "typesafe/jev-test" } } } }));
         process.env.OPENROUTER_API_KEY = "test";
-        globalThis.fetch = async () => new Response(JSON.stringify({ answers: { decision: { choice: "retry", confidence: 1, probabilities: { retry: 1 } } } }), { status: 200 });
+        globalThis.fetch = async () => new Response(JSON.stringify({ answers: { decision: { choice: "retry", confidence: 0.01, probabilities: { retry: 1 } } } }), { status: 200 });
         const created = ids(await h.call("create", definition([{ type: "collect", instruction: "Name?", criteria: "Full name" }])));
-        await h.hook("input", { text: "Renne", source: "interactive" });
+        const input = await h.hook("input", { text: "Renne", source: "interactive" });
+        assert.equal(input.action, "continue");
         const status = await h.call("status", { workflowId: created.workflowId });
         assert.equal(status.details.workflow.status, "awaiting_user");
         assert.ok(h.messages.some((message) => String(message[0].content).includes("will be retried")));
@@ -265,7 +266,7 @@ test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {
         delete process.env.OPENROUTER_API_KEY;
         await writeFile(join(h.root, "auth.json"), JSON.stringify({ openrouter: { type: "api_key", key: "test" } }));
         let request: { url: string; body: any } | undefined;
-        globalThis.fetch = async (url, init) => { request = { url: String(url), body: JSON.parse(String(init?.body)) }; return new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 1, probabilities: { workflow_definition: 1 } } } }), { status: 200 }); };
+        globalThis.fetch = async (url, init) => { request = { url: String(url), body: JSON.parse(String(init?.body)) }; return new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 0.01, probabilities: { workflow_definition: 1 } } } }), { status: 200 }); };
         await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });
         assert.equal(request?.url, "https://openrouter.ai/api/alpha/decisions");
         assert.equal(request?.body.model, "typesafe/jev-1.13");
@@ -449,10 +450,13 @@ test("invalid System One configuration fails safely and blocks external work", a
 test("Console and API expose the dedicated Sequential Workflows configuration", async () => {
     const server = await readFile(join(process.cwd(), "extensions/api-server/server.ts"), "utf8");
     const consoleSource = await readFile(join(process.cwd(), "extensions/pi-console-webui/components/console.tsx"), "utf8");
+    const chatSource = await readFile(join(process.cwd(), "extensions/pi-console-webui/components/chat-workspace.tsx"), "utf8");
     assert.match(server, /\/api\/profiles\/:profile\/sequential-workflows\/config/);
     assert.match(server, /credentialConfigured/);
     assert.match(consoleSource, /href: "\/sequential-workflows"[\s\S]*href: "\/applications"/);
     assert.match(consoleSource, /SequentialWorkflowConfig/);
+    assert.match(chatSource, /loadConversation\(id, false\)/);
+    assert.match(chatSource, /mergeConversationEntries/);
 });
 test("legacy migration preserves unowned executions without injecting or exposing them", async () => {
     const h = await setup(true);

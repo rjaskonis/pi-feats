@@ -84,7 +84,7 @@ const systemOneRequirement = async (ctx: ExtensionContext, config: WorkflowEvalu
     if (choice === "workflow_definition") return { status: "required", reasoning: "TypeSafe System One selected workflow definition.", activation: "definition", ...common };
     if (choice.startsWith("template:") && input.templates.some(template => `template:${template.id}` === choice)) return { status: "required", reasoning: "TypeSafe System One selected a workflow template.", activation: "template", templateId: choice.slice(9), ...common };
     if (choice === "no_workflow") return { status: "not_required", reasoning: "TypeSafe System One selected no workflow.", ...common };
-    if (choice === "uncertain" || common.confidence < 0.85) return { status: "uncertain", reasoning: "TypeSafe System One could not make a sufficiently confident workflow decision.", ...common };
+    if (choice === "uncertain") return { status: "uncertain", reasoning: "TypeSafe System One selected an uncertain workflow decision.", ...common };
     return { status: "invalid_response", reasoning: "TypeSafe API returned an unsupported workflow route.", ...common };
 };
 
@@ -99,6 +99,7 @@ export async function evaluateWorkflowTask(ctx: ExtensionContext, input: TaskInp
     if (!response.answer) return { outcome: response.error?.endsWith("API credentials are unavailable.") ? "unavailable" : "error", reasoning: response.error!, evaluator: "system_one", model };
     const choice = text(response.answer.choice), common = metadata(response.answer, "system_one", model);
     if (typeof common.confidence !== "number") return { outcome: "invalid_response", reasoning: "TypeSafe API returned a Choice without confidence.", ...common };
-    if (["accept", "retry", "fail"].includes(choice) && common.confidence >= 0.85) return { outcome: choice as "accept" | "retry" | "fail", reasoning: `TypeSafe System One selected ${choice}.`, ...common };
-    return { outcome: "uncertain", reasoning: "TypeSafe System One could not make a sufficiently confident task decision.", ...common };
+    if (["accept", "retry", "fail"].includes(choice)) return { outcome: choice as "accept" | "retry" | "fail", reasoning: `TypeSafe System One selected ${choice}.`, ...common };
+    if (choice === "uncertain") return { outcome: "uncertain", reasoning: "TypeSafe System One selected an uncertain task decision.", ...common };
+    return { outcome: "invalid_response", reasoning: "TypeSafe API returned an unsupported task decision.", ...common };
 }

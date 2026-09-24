@@ -333,7 +333,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             const recorded = await transaction(ctx, () => record.execute("system-one-collect", { workflowId: focused, taskId: focusedTask.id, phase: "collect", result: event.text }, ctx.signal, undefined, ctx));
             if (recorded.details?.needsEvaluation)
                 await transaction(ctx, () => automaticTaskEvaluation(ctx, focused, focusedTask.id, event.text));
-            return { action: "transform" as const, text: `${event.text}\nThe Sequential Workflow harness recorded and evaluated this collection response. Do not record or evaluate it again.` };
+            return { action: "continue" as const };
         }
         if (pendingWorkflow() && explicitUserOverride(event.text))
             await transaction(ctx, () => { cancelPendingWorkflowByUser(event.text); });
