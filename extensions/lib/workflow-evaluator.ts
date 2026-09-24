@@ -78,14 +78,11 @@ const llmDecision = async (ctx: ExtensionContext, input: RequirementInput): Prom
 
 const systemOneRequirement = async (ctx: ExtensionContext, config: WorkflowEvaluationConfig, input: RequirementInput): Promise<RequirementDecision> => {
     const model = config.systemOne!.model, options: Record<string, string> = { no_workflow: "A persisted Sequential Workflow is not needed.", workflow_definition: "A persisted Sequential Workflow is needed and should be defined from the supplied state.", workflow_from_template: "A persisted Sequential Workflow is needed and the supplied Skill explicitly requires creating it from a named JSON template.", uncertain: "The state does not provide enough evidence for a safe decision." };
-    for (const template of input.templates) options[`template:${template.id}`] = `A persisted Sequential Workflow is needed and should use '${template.id}': ${template.title}. ${template.source}`;
-    const response = await configuredSystemOneChoice(ctx, config, input, `${workflowRequirementPolicy} Choose exactly one route: no_workflow, workflow_definition, workflow_from_template, or a listed controlled template.`, options);
+    const response = await configuredSystemOneChoice(ctx, config, input, `${workflowRequirementPolicy} Choose exactly one route: no_workflow, workflow_definition, workflow_from_template, or uncertain.`, options);
     if (!response.answer) return { status: response.error?.endsWith("API credentials are unavailable.") ? "unavailable" : "error", reasoning: response.error!, evaluator: "system_one", model };
     const choice = text(response.answer.choice), common = metadata(response.answer, "system_one", model);
-    if (typeof common.confidence !== "number") return { status: "invalid_response", reasoning: "TypeSafe API returned a Choice without confidence.", ...common };
     if (choice === "workflow_definition") return { status: "required", reasoning: "TypeSafe System One selected workflow definition.", activation: "definition", ...common };
     if (choice === "workflow_from_template") return { status: "required", reasoning: "TypeSafe System One selected workflow creation from the Skill's named template.", activation: "template", ...common };
-    if (choice.startsWith("template:") && input.templates.some(template => `template:${template.id}` === choice)) return { status: "required", reasoning: "TypeSafe System One selected a workflow template.", activation: "template", templateId: choice.slice(9), ...common };
     if (choice === "no_workflow") return { status: "not_required", reasoning: "TypeSafe System One selected no workflow.", ...common };
     if (choice === "uncertain") return { status: "uncertain", reasoning: "TypeSafe System One selected an uncertain workflow decision.", ...common };
     return { status: "invalid_response", reasoning: "TypeSafe API returned an unsupported workflow route.", ...common };
@@ -101,7 +98,6 @@ export async function evaluateWorkflowTask(ctx: ExtensionContext, input: TaskInp
     const response = await configuredSystemOneChoice(ctx, config, input, "Does the recorded result meet the task criterion? Select fail only when the task cannot safely progress; select retry when another attempt may succeed.", { accept: "The result fully meets the criterion.", retry: "The result does not meet the criterion but another attempt may succeed.", fail: "The result cannot safely satisfy the criterion and the workflow must fail.", uncertain: "The evidence is insufficient for a safe transition." });
     if (!response.answer) return { outcome: response.error?.endsWith("API credentials are unavailable.") ? "unavailable" : "error", reasoning: response.error!, evaluator: "system_one", model };
     const choice = text(response.answer.choice), common = metadata(response.answer, "system_one", model);
-    if (typeof common.confidence !== "number") return { outcome: "invalid_response", reasoning: "TypeSafe API returned a Choice without confidence.", ...common };
     if (["accept", "retry", "fail"].includes(choice)) return { outcome: choice as "accept" | "retry" | "fail", reasoning: `TypeSafe System One selected ${choice}.`, ...common };
     if (choice === "uncertain") return { outcome: "uncertain", reasoning: "TypeSafe System One selected an uncertain task decision.", ...common };
     return { outcome: "invalid_response", reasoning: "TypeSafe API returned an unsupported task decision.", ...common };

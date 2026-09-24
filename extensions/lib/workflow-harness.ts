@@ -319,11 +319,13 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     const workflowKeyword = /\b(?:sequential[\s-]workflow|workflow[\s-]sequencial|fluxo de trabalho sequencial)\b/i;
     // A keyword starts semantic evaluation; the configured evaluator, rather than
     // local verb matching, decides whether the user is requesting an execution.
-    const explicitWorkflowRequest = (text: string) => workflowKeyword.test(text);
-    const skillRequiresWorkflowEvaluation = (content: string) => workflowKeyword.test(content);
-    // Requirement decisions remain evaluator-owned, but evaluation starts as soon
-    // as an explicit user request or a read Skill mentions Sequential Workflow.
+    const workflowKeywordDetected = (text: string) => workflowKeyword.test(text);
+    const skillRequiresWorkflowEvaluation = (content: string) => workflowKeywordDetected(content);
+    // Evaluation starts when a user message or a read Skill contains the keyword.
+    // The evaluator alone decides whether that evidence is an explicit request.
     host.on("input", async (event, ctx) => context.run(ctx, async () => {
+        if (event.source === "extension")
+            return;
         // An unavailable requirement evaluator must not permanently lock a session
         // with no active workflow. A later user request is new evidence and can be
         // evaluated normally if it explicitly requests a workflow.
@@ -345,7 +347,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         }
         if (pendingWorkflow() && explicitUserOverride(event.text))
             await transaction(ctx, () => { cancelPendingWorkflowByUser(event.text); });
-        if (focus() !== undefined || !event.text.trim() || !explicitWorkflowRequest(event.text))
+        if (focus() !== undefined || !event.text.trim() || !workflowKeywordDetected(event.text))
             return;
         clearRequirementBlock();
         audit("requirement_check_started", { message: "Checking whether Sequential Workflow is required…" }, "user_input", undefined, true);

@@ -295,6 +295,15 @@ test("ordinary user input does not trigger workflow evaluation", async () => {
         assert.equal(h.messages.filter((message) => message[0].customType === "sequential-workflow-harness").length, 0);
     } finally { await h.close(); }
 });
+test("extension input does not initiate workflow requirement evaluation", async () => {
+    const h = await setup();
+    try {
+        h.enableClassifier({ status: "required", reasoning: "Extension input must be ignored." });
+        await h.hook("input", { text: "Use Sequential Workflow now.", source: "extension" });
+        assert.equal((await h.call("status", {})).details.workflows.length, 0);
+        assert.equal(h.messages.filter((message) => message[0].customType === "sequential-workflow-harness").length, 0);
+    } finally { await h.close(); }
+});
 test("a user phrase does not bypass the evaluator", async () => {
     const h = await setup();
     try {
@@ -451,12 +460,13 @@ test("System One requirement decisions preserve lifecycle visibility and block u
         const requests: any[] = [];
         globalThis.fetch = async (_url, init) => {
             requests.push(JSON.parse(String(init?.body)));
-            return new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 0.97, probabilities: { workflow_definition: 0.97, no_workflow: 0.03 } } } }), { status: 200 });
+            return new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition" } } }), { status: 200 });
         };
         await h.hook("input", { text: "Use Sequential Workflow to process this request safely.", source: "interactive" });
         assert.equal(requests.length, 1);
         assert.deepEqual(Object.keys(requests[0].questions), ["decision"]);
         assert.deepEqual(Object.keys(requests[0].questions.decision.criteria), ["no_workflow", "workflow_definition", "workflow_from_template", "uncertain"]);
+        assert.equal(requests[0].questions.decision.criteria["template:basic"], undefined);
         assert.match(requests[0].questions.decision.instructions, /keyword.*trigger to evaluate/i);
         assert.match(requests[0].questions.decision.instructions, /discussing, correcting, implementing, testing, configuring/i);
         assert.equal((await h.call("status", {})).details.workflows[0].status, "pending_definition");
