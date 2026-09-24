@@ -226,6 +226,12 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     });
     const tools = new Map<string, any>();
     const rawTools = new Map<string, any>();
+    const restoreTaskAfterUnavailableEvaluation = (workflowId: number, taskId: number, type: string) => {
+        const taskStatus = type === "collect" ? "awaiting_user" : "running";
+        const workflowStatus = type === "collect" ? "awaiting_user" : "running";
+        db.prepare("UPDATE workflow_tasks SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND workflow_id = ? AND status = 'evaluating'").run(taskStatus, taskId, workflowId);
+        db.prepare("UPDATE workflows SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'evaluating'").run(workflowStatus, workflowId);
+    };
     const automaticTaskEvaluation = async (ctx: ExtensionContext, workflowId: number, taskId: number, result: string) => {
         const current = task(workflowId);
         if (!current?.criteria || current.id !== taskId)
@@ -236,6 +242,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         const message = decision.outcome === "accept" ? `Task #${taskId} accepted by the configured evaluator.` : decision.outcome === "retry" ? `Task #${taskId} will be retried.` : decision.outcome === "fail" ? `Task #${taskId} ended with a terminal failure; workflow failed.` : `Task #${taskId} evaluation is unresolved; work remains blocked.`;
         audit(`task_evaluation_${decision.outcome}`, { taskId, ...decision, message }, undefined, workflowId, true);
         if (!["accept", "retry", "fail"].includes(decision.outcome)) {
+            restoreTaskAfterUnavailableEvaluation(workflowId, taskId, current.type);
             blockEvaluation(decision.reasoning, decision as any, undefined, workflowId);
             return decision;
         }

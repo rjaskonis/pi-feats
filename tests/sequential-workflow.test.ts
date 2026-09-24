@@ -258,6 +258,17 @@ test("System One evaluates collect input before allowing a transition", async ()
         assert.ok(h.messages.some((message) => String(message[0].content).includes("will be retried")));
     } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = oldKey; await h.close(); }
 });
+test("an unavailable automatic collect evaluation restores the task to awaiting user input", async () => {
+    const h = await setup(); const oldKey = process.env.TYPESAFE_API_KEY;
+    try {
+        delete process.env.TYPESAFE_API_KEY;
+        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "typesafe", model: "jev-test" } } } }));
+        const created = ids(await h.call("create", definition([{ type: "collect", instruction: "Name?", criteria: "Full name" }])));
+        await h.hook("input", { text: "Renne", source: "interactive" });
+        const status = await h.call("status", { workflowId: created.workflowId });
+        assert.equal(status.details.workflow.status, "awaiting_user");
+    } finally { if (oldKey === undefined) delete process.env.TYPESAFE_API_KEY; else process.env.TYPESAFE_API_KEY = oldKey; await h.close(); }
+});
 test("ordinary user input does not trigger workflow evaluation", async () => {
     const h = await setup();
     try {
