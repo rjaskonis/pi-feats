@@ -210,7 +210,7 @@ test("template activation is selected by the evaluator from controlled candidate
         await writeFile(join(h.root, "sequential_workflow_templates/basic.json"), JSON.stringify({ version: 1, ...definition([{ type: "collect", instruction: "Exact question", criteria: "Exact criterion" }]) }));
         h.enableClassifier({ status: "required", reasoning: "The controlled template is appropriate.", activation: "template", templateId: "basic" });
         await h.hook("input", { text: "Use Sequential Workflow to process this contract.", source: "interactive" });
-        assert.deepEqual(h.activeTools(), ["read", "bash", "edit", "write"]);
+        assert.deepEqual(h.activeTools(), ["read", "sequential_workflow_create_from_template"]);
         const context = await h.hook("context_with_system", { messages: [] });
         assert.match(context.messages[0].content, /basic\.json/);
     } finally { await h.close(); }
@@ -319,7 +319,7 @@ test("detected Sequential Workflow requirement creates a pending workflow before
         const pending = (await h.call("status", {})).details.workflows[0];
         assert.equal(pending.status, "pending_definition");
         await h.hook("turn_start");
-        assert.equal(await h.hook("tool_call", { toolName: "bash", input: {} }), undefined);
+        assert.equal((await h.hook("tool_call", { toolName: "bash", input: {} })).block, true);
         const hydrated = ids(await h.call("create", definition()));
         assert.equal(hydrated.workflowId, pending.id);
         assert.equal((await h.call("status", hydrated)).details.workflow.status, "running");
@@ -336,7 +336,7 @@ test("definition mode constrains the next model context and restores tools after
         await h.hook("input", { text: request, source: "interactive" });
         const startup = await h.hook("before_agent_start", { prompt: request });
         assert.deepEqual(startup.messages.map((message: any) => message.customType), ["sequential-workflow-evaluation", "sequential-workflow-created"]);
-        assert.deepEqual(h.activeTools(), ["read", "bash", "edit", "write"]);
+        assert.deepEqual(h.activeTools(), ["sequential_workflow_create"]);
         const context = await h.hook("context_with_system", { messages: [{ role: "system", content: "old" }, { role: "user", content: "old request" }] });
         assert.equal(context.messages.length, 3);
         assert.equal(context.messages[0].content, "old");
@@ -386,13 +386,13 @@ test("a Skill requirement is decided by the configured evaluator", async () => {
         const toolCallId = "skill-read";
         const result = await h.hook("tool_call", { toolName: "read", toolCallId, input: { path: skillPath } });
         assert.equal(result, undefined);
-        assert.deepEqual(h.activeTools(), ["read", "bash", "edit", "write"]);
+        assert.deepEqual(h.activeTools(), ["read", "sequential_workflow_create_from_template"]);
         const context = await h.hook("context_with_system", { messages: [] });
         assert.match(context.messages[0].content, /contract\.workflow\.json/);
         const transformed = await h.hook("tool_result", { toolName: "read", toolCallId, content: [{ type: "text", text: "Skill body" }], isError: false });
         assert.deepEqual(transformed, { content: [{ type: "text", text: "Skill recognized. Sequential Workflow definition mode is active; create the required workflow before performing work." }], details: { definitionMode: true }, isError: false });
         await h.hook("turn_start");
-        assert.equal(await h.hook("tool_call", { toolName: "bash", toolCallId: "other-call", input: {} }), undefined);
+        assert.equal((await h.hook("tool_call", { toolName: "bash", toolCallId: "other-call", input: {} })).block, true);
         const hydrated = await h.call("create_from_template", { path: templatePath });
         assert.equal(hydrated.details.next.task.type, "collect");
         const audit = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string }>;
@@ -427,12 +427,15 @@ test("a new user input releases an unresolved requirement block when no workflow
         assert.equal(await h.hook("tool_call", { toolName: "bash", input: {} }), undefined);
     } finally { await h.close(); }
 });
-test("non-required follow-up does not create a workflow", async () => {
+test("technical Sequential Workflow discussion does not start evaluation or block work", async () => {
     const h = await setup();
     try {
-        h.enableClassifier({ status: "not_required", reasoning: "Discussion only." });
-        await h.hook("input", { text: "Discuss Sequential Workflow templates.", source: "interactive" });
+        h.enableClassifier({ status: "required", reasoning: "This must not be consulted." });
+        await h.hook("input", { text: "Corrija o código do Sequential Workflow e seus templates.", source: "interactive" });
         assert.equal((await h.call("status", {})).details.workflows.length, 0);
+        assert.equal(h.messages.some((message) => message[0].content === "Checking whether Sequential Workflow is required…"), false);
+        await h.hook("turn_start");
+        assert.equal(await h.hook("tool_call", { toolName: "bash", input: {} }), undefined);
     } finally { await h.close(); }
 });
 test("System One requirement decisions preserve lifecycle visibility and block uncertainty", async () => {
@@ -440,8 +443,15 @@ test("System One requirement decisions preserve lifecycle visibility and block u
     try {
         await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "openrouter", model: "typesafe/jev-test" } } } }));
         process.env.OPENROUTER_API_KEY = "test";
-        globalThis.fetch = async () => new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 0.97, probabilities: { workflow_definition: 0.97, no_workflow: 0.03 } } } }), { status: 200 });
+        const requests: any[] = [];
+        globalThis.fetch = async (_url, init) => {
+            requests.push(JSON.parse(String(init?.body)));
+            return new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 0.97, probabilities: { workflow_definition: 0.97, no_workflow: 0.03 } } } }), { status: 200 });
+        };
         await h.hook("input", { text: "Use Sequential Workflow to process this request safely.", source: "interactive" });
+        assert.equal(requests.length, 1);
+        assert.deepEqual(Object.keys(requests[0].questions), ["decision"]);
+        assert.deepEqual(Object.keys(requests[0].questions.decision.criteria), ["no_workflow", "workflow_definition", "workflow_from_template", "uncertain"]);
         assert.equal((await h.call("status", {})).details.workflows[0].status, "pending_definition");
         assert.ok(h.messages.some((message) => message[0].content === "Sequential Workflow is required for this request."));
         const events = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase, payload FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string; payload: string }>;
