@@ -676,6 +676,37 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       return { settings: await api.profiles.writeSettings(profileName(request), settings) };
     });
 
+    const workflowEvaluation = (value: unknown) => {
+      const input = objectBody(value), modelType = input.modelType;
+      if (modelType === "llm") return { modelType: "llm" as const };
+      const systemOne = objectBody(input.systemOne);
+      if (modelType !== "system_one" || systemOne.provider !== "typesafe" || typeof systemOne.model !== "string" || !systemOne.model.trim() || (systemOne.onUncertain !== undefined && systemOne.onUncertain !== "block")) throw Object.assign(new Error("Invalid Sequential Workflow evaluation configuration."), { status: 400 });
+      return { modelType: "system_one" as const, systemOne: { provider: "typesafe" as const, model: systemOne.model.trim(), onUncertain: "block" as const } };
+    };
+    const configuredWorkflowEvaluation = (settings: ProfileSettings) => {
+      const value = (settings as Record<string, unknown>).sequentialWorkflow;
+      if (!value || typeof value !== "object" || Array.isArray(value)) return { modelType: "llm" as const };
+      const evaluation = (value as Record<string, unknown>).evaluation;
+      return !evaluation || typeof evaluation !== "object" || Array.isArray(evaluation) ? { modelType: "llm" as const } : workflowEvaluation(evaluation);
+    };
+    server.get<{ Params: { profile: string } }>("/api/profiles/:profile/sequential-workflows/config", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      return { evaluation: configuredWorkflowEvaluation(await api.profiles.readSettings(profileName(request))) };
+    });
+    server.put<{ Params: { profile: string } }>("/api/profiles/:profile/sequential-workflows/config", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      const profile = profileName(request), evaluation = workflowEvaluation(objectBody(request.body).evaluation), settings = await api.profiles.readSettings(profile);
+      const sequentialWorkflow = { ...(((settings as Record<string, unknown>).sequentialWorkflow as Record<string, unknown> | undefined) ?? {}), evaluation };
+      await api.profiles.writeSettings(profile, { ...settings, sequentialWorkflow } as ProfileSettings);
+      return { evaluation };
+    });
+    server.get<{ Params: { profile: string } }>("/api/profiles/:profile/sequential-workflows/status", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      const profile = profileName(request), evaluation = configuredWorkflowEvaluation(await api.profiles.readSettings(profile));
+      const environment = await api.handlerEnvironment(profile);
+      return { evaluation, credentialConfigured: evaluation.modelType !== "system_one" || Boolean(environment.TYPESAFE_API_KEY) };
+    });
+
     const documentRoute = (name: "soul" | "refine", file: "SOUL.md" | "REFINE.md") => {
       server.get<{ Params: { profile: string } }>(`/api/profiles/:profile/${name}`, async (request, reply) => {
         if (!guard(request, reply)) return;

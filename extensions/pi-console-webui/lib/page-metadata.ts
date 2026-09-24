@@ -14,6 +14,7 @@ const sectionLabels: Record<string, string> = {
   tools: "Tools",
   packages: "Packages",
   pulses: "Pulses",
+  "sequential-workflows": "Sequential Workflows",
   extensions: "Extensions",
   applications: "Applications",
   models: "Models",
