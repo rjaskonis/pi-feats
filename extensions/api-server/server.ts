@@ -79,6 +79,14 @@ function objectBody(input: unknown): Record<string, unknown> {
   return input as Record<string, unknown>;
 }
 
+async function hasOpenRouterCredential(directory: string, environment: NodeJS.ProcessEnv): Promise<boolean> {
+  if (environment.OPENROUTER_API_KEY?.trim()) return true;
+  try {
+    const auth: unknown = JSON.parse(await readFile(join(directory, "auth.json"), "utf8"));
+    return !!auth && typeof auth === "object" && !Array.isArray(auth) && typeof (auth as { openrouter?: { key?: unknown } }).openrouter?.key === "string" && !!(auth as { openrouter: { key: string } }).openrouter.key.trim();
+  } catch { return false; }
+}
+
 function resourceKind(value: string): ResourceKind {
   if (!(RESOURCE_KINDS as readonly string[]).includes(value)) throw Object.assign(new Error("Unknown resource type."), { status: 404 });
   return value as ResourceKind;
@@ -709,7 +717,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       if (!guard(request, reply)) return;
       const profile = profileName(request), evaluation = await configuredWorkflowEvaluation(profile, await api.profiles.readSettings(profile));
       const environment = await api.handlerEnvironment(profile);
-      const credentialConfigured = evaluation.modelType !== "system_one" || Boolean(environment.OPENROUTER_API_KEY);
+      const credentialConfigured = evaluation.modelType !== "system_one" || await hasOpenRouterCredential(directory, environment);
       return { evaluation, credentialConfigured };
     });
 

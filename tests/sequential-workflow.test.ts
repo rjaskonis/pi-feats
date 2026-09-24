@@ -262,7 +262,8 @@ test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {
     const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.OPENROUTER_API_KEY;
     try {
         await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "omniroute", model: "openrouter/typesafe/jev-1.13", endpoint: { baseUrl: "https://openrouter.ai/api/", path: "alpha/decisions" } } } } }));
-        process.env.OPENROUTER_API_KEY = "test";
+        delete process.env.OPENROUTER_API_KEY;
+        await writeFile(join(h.root, "auth.json"), JSON.stringify({ openrouter: { type: "api_key", key: "test" } }));
         let request: { url: string; body: any } | undefined;
         globalThis.fetch = async (url, init) => { request = { url: String(url), body: JSON.parse(String(init?.body)) }; return new Response(JSON.stringify({ answers: { decision: { choice: "workflow_definition", confidence: 1, probabilities: { workflow_definition: 1 } } } }), { status: 200 }); };
         await h.hook("input", { text: "Use Sequential Workflow for this request.", source: "interactive" });

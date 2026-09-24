@@ -32,8 +32,18 @@ export async function workflowEvaluationConfig(): Promise<WorkflowEvaluationConf
 
 const endpointUrl = (endpoint: { baseUrl: string; path: string }) => new URL(endpoint.path.replace(/^\/+/, ""), endpoint.baseUrl.endsWith("/") ? endpoint.baseUrl : `${endpoint.baseUrl}/`).toString();
 
+async function openRouterApiKey(): Promise<string | undefined> {
+    const environmentKey = process.env.OPENROUTER_API_KEY?.trim();
+    if (environmentKey) return environmentKey;
+    try {
+        const auth: unknown = JSON.parse(await readFile(join(root(), "auth.json"), "utf8"));
+        const key = object(auth) && object(auth.openrouter) ? text(auth.openrouter.key).trim() : "";
+        return key || undefined;
+    } catch { return undefined; }
+}
+
 async function decisionEndpointChoice(ctx: ExtensionContext, model: string, endpoint: { baseUrl: string; path: string }, state: unknown, instructions: string, criteria: Record<string, string>): Promise<{ answer?: Record<string, unknown>; error?: string }> {
-    const apiKey = process.env.OPENROUTER_API_KEY;
+    const apiKey = await openRouterApiKey();
     if (!apiKey) return { error: "OpenRouter API credentials are unavailable." };
     try {
         const response = await fetch(endpointUrl(endpoint), { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` }, body: JSON.stringify({ model: model.replace(/^openrouter\//, ""), state, questions: { decision: { type: "choice", instructions, criteria } } }), signal: ctx.signal });
