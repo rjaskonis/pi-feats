@@ -447,7 +447,15 @@ test("technical Sequential Workflow discussion is evaluated and can proceed with
         assert.equal(h.messages.some((message) => message[0].content === "Checking whether Sequential Workflow is required…"), true);
         assert.equal(h.messages.some((message) => message[0].content === "Sequential Workflow is not required for this request."), true);
         assert.match(h.classifierContext().messages[0].content, /keyword.*trigger to evaluate/i);
-        assert.match(h.classifierContext().messages[0].content, /Do not confuse a request to modify the feature/i);
+        assert.match(h.classifierContext().messages[0].content, /userLastMessage is the primary and decisive evidence/i);
+        assert.match(h.classifierContext().messages[0].content, /quoted.*workflow command is not a command to execute/i);
+        const classifierState = JSON.parse(h.classifierContext().messages[1].content);
+        assert.deepEqual(classifierState, {
+            origin: "user_input",
+            userLastMessage: "Preciso que você corrija o código do Sequential Workflow; a Skill pode criar um workflow com template.",
+            conversationHistory: [{ role: "user", content: "Current user request" }],
+            templates: [],
+        });
         await h.hook("turn_start");
         assert.equal(await h.hook("tool_call", { toolName: "bash", input: {} }), undefined);
     } finally { await h.close(); }
@@ -467,8 +475,14 @@ test("System One requirement decisions preserve lifecycle visibility and block u
         assert.deepEqual(Object.keys(requests[0].questions), ["decision"]);
         assert.deepEqual(Object.keys(requests[0].questions.decision.criteria), ["no_workflow", "workflow_definition", "workflow_from_template", "uncertain"]);
         assert.equal(requests[0].questions.decision.criteria["template:basic"], undefined);
-        assert.match(requests[0].questions.decision.instructions, /keyword.*trigger to evaluate/i);
-        assert.match(requests[0].questions.decision.instructions, /discussing, correcting, implementing, testing, configuring/i);
+        assert.deepEqual(requests[0].state, {
+            origin: "user_input",
+            userLastMessage: "Use Sequential Workflow to process this request safely.",
+            conversationHistory: [{ role: "user", content: "Current user request" }],
+            templates: [],
+        });
+        assert.match(requests[0].questions.decision.instructions, /userLastMessage is the primary and decisive evidence/i);
+        assert.match(requests[0].questions.decision.instructions, /question, hypothetical, conditional, explanation request/i);
         assert.equal((await h.call("status", {})).details.workflows[0].status, "pending_definition");
         assert.ok(h.messages.some((message) => message[0].content === "Sequential Workflow is required for this request."));
         const events = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase, payload FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string; payload: string }>;

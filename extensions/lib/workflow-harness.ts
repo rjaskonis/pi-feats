@@ -170,16 +170,31 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return (await readdir(directory, { withFileTypes: true })).filter(entry => entry.isFile() && entry.name.endsWith(".json")).map(entry => ({ id: entry.name.slice(0, -5), title: entry.name.slice(0, -5), source: join(directory, entry.name) }));
         } catch { return []; }
     };
-    const classifyRequirement = async (ctx: ExtensionContext, origin: "user_input" | "skill", evidence: string, userRequest: string): Promise<RequirementDecision> => evaluateWorkflowRequirement(ctx, {
-        origin,
-        evidence,
-        userRequest,
-        recentUserMessages: ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").slice(-4).map((entry: any) => {
-            const content = entry.message.content;
-            return typeof content === "string" ? content : Array.isArray(content) ? content.map((part: any) => part.text ?? "").join("") : "";
-        }),
-        templates: await templateCandidates(),
-    });
+    const messageText = (content: unknown) => typeof content === "string" ? content : Array.isArray(content) ? content.map((part: any) => part.text ?? "").join("") : "";
+    const classifyRequirement = async (ctx: ExtensionContext, origin: "user_input" | "skill", evidence: string, userRequest: string): Promise<RequirementDecision> => {
+        const templates = await templateCandidates();
+        const branch = ctx.sessionManager.getBranch();
+        if (origin === "user_input") {
+            const conversationHistory = branch
+                .filter((entry: any) => entry.type === "message" && (entry.message?.role === "user" || entry.message?.role === "assistant"))
+                .map((entry: any) => ({ role: entry.message.role as "user" | "assistant", content: messageText(entry.message.content) }))
+                .filter((entry: { content: string }) => !!entry.content.trim())
+                .slice(-12);
+            // Depending on Pi's event ordering, the current message may already be
+            // in the branch. It belongs only in userLastMessage, never twice.
+            const last = conversationHistory.at(-1);
+            if (last?.role === "user" && last.content === userRequest)
+                conversationHistory.pop();
+            return evaluateWorkflowRequirement(ctx, { origin, userLastMessage: userRequest, conversationHistory, templates });
+        }
+        return evaluateWorkflowRequirement(ctx, {
+            origin,
+            evidence,
+            userRequest,
+            recentUserMessages: branch.filter((entry: any) => entry.type === "message" && entry.message?.role === "user").slice(-4).map((entry: any) => messageText(entry.message.content)),
+            templates,
+        });
+    };
     const assertOperation = (name: string, params: any) => {
         if (params.workflowId !== undefined && name !== "sequential_workflow_cancel")
             own(params.workflowId);
