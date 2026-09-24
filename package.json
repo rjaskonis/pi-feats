@@ -40,7 +40,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "build:web": "cd extensions/pi-console-webui && npx --no-install next build",
+    "build:web": "node scripts/build-console-webui.mjs",
+    "build:web:next": "cd extensions/pi-console-webui && npx --no-install next build",
     "ensure:nono": "sh scripts/install-nono.sh",
     "postinstall": "npm run ensure:nono && node scripts/ensure-console-build.mjs",
     "test": "npm run test:extensions && npm run build:web",
