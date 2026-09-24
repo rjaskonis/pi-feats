@@ -2,7 +2,10 @@ import { existsSync, realpathSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+
+const moduleDirectory = dirname(fileURLToPath(import.meta.url));
 
 export type ProfileSandboxSettings = { sandbox?: boolean; profile?: { skillSources?: { shared?: boolean; profile?: boolean } } };
 const managedDescription = "Pi profile runtime sandbox";
@@ -24,7 +27,7 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
   // This module is distributed inside <package>/extensions/lib. Allow the
   // package root, not only ~/.pi/agent/extensions, so Git and npm packages
   // remain readable inside a profile sandbox.
-  const packageRoot = dirname(dirname(__dirname));
+  const packageRoot = dirname(dirname(moduleDirectory));
   // Pulse scheduling is shared runtime state. A profile can create a schedule,
   // which starts the detached tick process and therefore must create its state
   // and log files as well as update the SQLite database.

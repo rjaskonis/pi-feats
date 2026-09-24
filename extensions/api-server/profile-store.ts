@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import { ensureProfileSandbox } from "../lib/profile-sandbox.ts";
 import { BUILTIN_TOOLS, activeBuiltinTools, updatedBuiltinTools } from "../lib/builtin-tools.ts";
@@ -334,29 +334,60 @@ export class ProfileStore {
     await this.refreshSkills(profile);
   }
 
-  async create(name: string, metadata: unknown = {}): Promise<{ name: string; path: string } & ProfileMetadata> {
+  async create(name: string, metadata: unknown = {}, cloneFrom?: string): Promise<{ name: string; path: string } & ProfileMetadata> {
     if (!validName(name) || name === "default") throw Object.assign(new Error("Invalid profile name"), { status: 400 });
     const destination = this.directory(name);
     if (existsSync(destination)) throw Object.assign(new Error("Profile already exists"), { status: 409 });
     const details = profileMetadata(metadata);
-    await mkdir(join(destination, "sessions"), { recursive: true });
-    let base: ProfileSettings = {};
-    try { base = await this.readSettings("default"); } catch {}
-    const { packages: _packages, extensions: _extensions, ...profileBase } = base;
-    const settings: ProfileSettings = {
-      ...profileBase,
-      defaultTools: BUILTIN_TOOLS,
-      sandbox: true,
-      profile: { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], skillSources: { shared: true, profile: false }, ...details },
-    };
-    await this.writeSettings(name, settings);
-    await ensureProfileSandbox(destination, resolve(process.argv[1]));
-    await writeFile(join(destination, "SOUL.md"), "", "utf8");
-    await writeFile(join(destination, "guardrails.json"), "{\n  \"guardrails\": []\n}\n", "utf8");
-    const auth = join(this.agentDir, "auth.json");
-    if (existsSync(auth)) await copyFile(auth, join(destination, "auth.json"));
-    await this.linkSharedModels(name);
-    return { name, path: destination, ...details };
+    if (cloneFrom !== undefined && (typeof cloneFrom !== "string" || !validName(cloneFrom) || cloneFrom === "default")) throw Object.assign(new Error("Clone source must be an existing named profile."), { status: 400 });
+
+    let sourceSettings: ProfileSettings | undefined;
+    let sourceDirectory: string | undefined;
+    if (cloneFrom) {
+      sourceSettings = await this.readSettings(cloneFrom);
+      sourceDirectory = this.directory(cloneFrom);
+    }
+
+    try {
+      await mkdir(join(destination, "sessions"), { recursive: true });
+      let settings: ProfileSettings;
+      if (sourceSettings && sourceDirectory) {
+        const sourceSkills = join(sourceDirectory, "skills");
+        if (existsSync(sourceSkills)) await cp(sourceSkills, join(destination, "skills"), { recursive: true, force: false });
+        for (const file of ["SOUL.md", "REFINE.md", "guardrails.json", ".env", "auth.json"]) {
+          const source = join(sourceDirectory, file);
+          if (existsSync(source)) await copyFile(source, join(destination, file));
+        }
+        settings = {
+          ...sourceSettings,
+          sandbox: true,
+          profile: { ...(sourceSettings.profile ?? {}), ...details },
+        };
+      } else {
+        let base: ProfileSettings = {};
+        try { base = await this.readSettings("default"); } catch {}
+        const { packages: _packages, extensions: _extensions, ...profileBase } = base;
+        settings = {
+          ...profileBase,
+          defaultTools: BUILTIN_TOOLS,
+          sandbox: true,
+          profile: { enabledTools: ["*"], enabledSkills: ["*"], enabledProfileSkills: ["*"], skillSources: { shared: true, profile: false }, ...details },
+        };
+      }
+      await this.writeSettings(name, settings);
+      await ensureProfileSandbox(destination, resolve(process.argv[1]));
+      if (!sourceSettings) {
+        await writeFile(join(destination, "SOUL.md"), "", "utf8");
+        await writeFile(join(destination, "guardrails.json"), "{\n  \"guardrails\": []\n}\n", "utf8");
+        const auth = join(this.agentDir, "auth.json");
+        if (existsSync(auth)) await copyFile(auth, join(destination, "auth.json"));
+      }
+      await this.linkSharedModels(name);
+      return { name, path: destination, ...details };
+    } catch (error) {
+      await rm(destination, { recursive: true, force: true });
+      throw error;
+    }
   }
 
   async updateMetadata(name: string, metadata: unknown): Promise<{ name: string; path: string } & ProfileMetadata> {

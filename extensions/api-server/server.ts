@@ -626,9 +626,10 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     });
     server.post("/api/profiles", async (request, reply) => {
       if (!guard(request, reply)) return;
-      const body = objectBody(request.body), name = body.name;
+      const body = objectBody(request.body), name = body.name, cloneFrom = body.cloneFrom;
       if (typeof name !== "string") throw Object.assign(new Error("The 'name' field must be a string."), { status: 400 });
-      const profile = await api.profiles.create(name, { description: body.description, tags: body.tags });
+      if (cloneFrom !== undefined && typeof cloneFrom !== "string") throw Object.assign(new Error("The 'cloneFrom' field must be a string."), { status: 400 });
+      const profile = await api.profiles.create(name, { description: body.description, tags: body.tags }, cloneFrom);
       return reply.code(201).send(profile);
     });
     server.get<{ Params: { profile: string } }>("/api/profiles/:profile", async (request, reply) => {

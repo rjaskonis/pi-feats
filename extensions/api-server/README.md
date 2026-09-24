@@ -81,7 +81,7 @@ All routes below require Bearer authentication. Resource responses expose only m
 
 ```text
 GET    /api/profiles
-POST   /api/profiles                         { "name": "work" }
+POST   /api/profiles                         { "name": "work", "cloneFrom": "existing-profile" }
 GET    /api/profiles/:profile
 DELETE /api/profiles/:profile                 { "force": true }
 

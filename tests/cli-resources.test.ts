@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, mkdir, readFile, readlink, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -26,6 +27,46 @@ test("profile metadata is listed and can be updated without changing policy", as
     const settings = await store.readSettings("support");
     assert.deepEqual(settings.profile?.enabledTools, ["read"]);
     assert.equal(settings.profile?.description, "Escalation desk");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("cloned profiles copy profile configuration and credentials without state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "profile-clone-test-"));
+  const source = join(root, "profiles", "source");
+  try {
+    await mkdir(join(source, "skills", "source-skill"), { recursive: true });
+    await mkdir(join(source, "sessions"), { recursive: true });
+    await mkdir(join(source, "context-memory"), { recursive: true });
+    await writeFile(join(root, "models.json"), "{\"providers\":{}}\n");
+    await writeFile(join(source, "settings.json"), JSON.stringify({ packages: ["npm:never-copy"], extensions: ["never-copy"], profile: { enabledTools: ["read"], enabledSkills: ["*"], enabledProfileSkills: ["*"], skillSources: { shared: true, profile: true }, contextMemory: { mode: "file", target: "profile" }, description: "Source", tags: ["source"] } }));
+    await writeFile(join(source, "SOUL.md"), "Source soul\n");
+    await writeFile(join(source, "REFINE.md"), "Source refine\n");
+    await writeFile(join(source, "guardrails.json"), "{\n  \"guardrails\": []\n}\n");
+    await writeFile(join(source, ".env"), "SOURCE_SECRET=value\n");
+    await writeFile(join(source, "auth.json"), "{\"source\":true}\n");
+    await writeFile(join(source, "skills", "source-skill", "SKILL.md"), "---\nname: source-skill\n---\n");
+    await writeFile(join(source, "sessions", "session.jsonl"), "must not copy\n");
+    await writeFile(join(source, "context-memory", "PROFILE.md"), "must not copy\n");
+    await writeFile(join(source, "application-sessions.json"), "{}\n");
+    await writeFile(join(source, "sequential-workflow.db"), "must not copy\n");
+
+    const created = await new ProfileStore(root).create("target", { description: "Target", tags: ["clone"] }, "source");
+    assert.equal(created.name, "target");
+    const target = join(root, "profiles", "target");
+    const settings = JSON.parse(await readFile(join(target, "settings.json"), "utf8"));
+    assert.equal(settings.profile.description, "Target");
+    assert.deepEqual(settings.profile.tags, ["clone"]);
+    assert.deepEqual(settings.profile.contextMemory, { mode: "file", target: "profile" });
+    assert.equal(settings.packages, undefined);
+    assert.equal(settings.extensions, undefined);
+    assert.equal(await readFile(join(target, "SOUL.md"), "utf8"), "Source soul\n");
+    assert.equal(await readFile(join(target, ".env"), "utf8"), "SOURCE_SECRET=value\n");
+    assert.equal(await readFile(join(target, "auth.json"), "utf8"), "{\"source\":true}\n");
+    assert.equal(await readFile(join(target, "skills", "source-skill", "SKILL.md"), "utf8"), "---\nname: source-skill\n---\n");
+    assert.equal(await readlink(join(target, "models.json")), join(root, "models.json"));
+    for (const file of [join(target, "sessions", "session.jsonl"), join(target, "context-memory", "PROFILE.md"), join(target, "application-sessions.json"), join(target, "sequential-workflow.db")]) assert.equal(existsSync(file), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
