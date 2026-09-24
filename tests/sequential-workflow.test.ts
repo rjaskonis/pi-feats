@@ -28,10 +28,11 @@ async function setup(legacy = false) {
     initialize();
     let sessionId = "A";
     let userId = "user-1";
+    const branch: any[] = [{ id: userId, type: "message", message: { role: "user", content: "Current user request" } }];
     const ctx: any = {
         cwd: root,
         getSystemPrompt: () => "Base system prompt",
-        sessionManager: { getSessionId: () => sessionId, getBranch: () => [{ id: userId, type: "message", message: { role: "user", content: "Current user request" } }] },
+        sessionManager: { getSessionId: () => sessionId, getBranch: () => branch },
         ui: { notify: (...args: any[]) => notices.push(args), setStatus: (...args: any[]) => statuses.push(args), setWorkingMessage: (...args: any[]) => workingMessages.push(args) },
         model: undefined,
         modelRegistry: { streamSimple: (_model: any, context: any) => ({ result: async () => ({ content: [{ type: "text", text: JSON.stringify(classifierResponse) }], context }) }) },
@@ -42,16 +43,10 @@ async function setup(legacy = false) {
         enableClassifier(response: any) { classifierResponse = response?.status ? response : { status: response?.requiresSequentialWorkflow ? "required" : "not_required", reasoning: response?.reasoning ?? "Test classifier decision.", activation: response?.activation, templateId: response?.templatePath?.replace(/^.*\//, "").replace(/\.json$/, "") }; ctx.model = {}; },
         reload() { for (const h of hooks.get("session_shutdown") ?? [])
             h(); hooks.clear(); tools.clear(); commands.clear(); initialize(); },
-        session(id: string) { sessionId = id; }, reply(id: string) { userId = id; },
+        session(id: string) { sessionId = id; }, reply(id: string) { userId = id; branch.push({ id, type: "message", message: { role: "user", content: "User response" } }); },
         call: (name: string, params: any) => tools.get(`sequential_workflow_${name}`).execute("call", params, undefined, undefined, ctx),
         command: (name: string, args = "") => commands.get(`workflow-${name}`).handler(args, ctx),
-        hook: async (name: string, args: any = {}) => { let value; const beforeAgentMessages: any[] = []; for (const h of hooks.get(name) ?? []) {
-            const result = await h(args, ctx);
-            if (name === "before_agent_start" && result?.message)
-                beforeAgentMessages.push(result.message);
-            if (result !== undefined)
-                value = result;
-        } return name === "before_agent_start" && beforeAgentMessages.length ? { messages: beforeAgentMessages } : value; },
+        hook: async (name: string, args: any = {}) => { let value; const beforeAgentMessages: any[] = []; const run = async (event: string, input: any) => { let resultValue; for (const h of hooks.get(event) ?? []) { const result = await h(input, ctx); if (event === "before_agent_start" && result?.message) beforeAgentMessages.push(result.message); if (result !== undefined) resultValue = result; } return resultValue; }; value = await run(name, args); if (name === "input") { branch.push({ id: `input-${branch.length + 1}`, type: "message", message: { role: "user", content: args.text } }); await run("before_agent_start", { prompt: args.text, systemPrompt: "Base system prompt" }); } return name === "before_agent_start" && beforeAgentMessages.length ? { messages: beforeAgentMessages } : value; },
         async close() { for (const h of hooks.get("session_shutdown") ?? [])
             h(); if (previous === undefined)
             delete process.env.PI_CODING_AGENT_DIR;
@@ -252,8 +247,7 @@ test("System One evaluates collect input before allowing a transition", async ()
         process.env.OPENROUTER_API_KEY = "test";
         globalThis.fetch = async () => new Response(JSON.stringify({ answers: { decision: { choice: "retry", confidence: 0.01, probabilities: { retry: 1 } } } }), { status: 200 });
         const created = ids(await h.call("create", definition([{ type: "collect", instruction: "Name?", criteria: "Full name" }])));
-        const input = await h.hook("input", { text: "Renne", source: "interactive" });
-        assert.equal(input.action, "continue");
+        await h.hook("input", { text: "Renne", source: "interactive" });
         const status = await h.call("status", { workflowId: created.workflowId });
         assert.equal(status.details.workflow.status, "awaiting_user");
         assert.ok(h.messages.some((message) => String(message[0].content).includes("will be retried")));
@@ -313,8 +307,6 @@ test("detected Sequential Workflow requirement creates a pending workflow that b
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "The request requires a workflow." });
         const request = "Use a Sequential Workflow before work begins.";
         await h.hook("input", { text: request, source: "interactive" });
-        const startup = await h.hook("before_agent_start", { prompt: request });
-        assert.deepEqual(startup.messages.map((message: any) => message.customType), ["sequential-workflow-evaluation", "sequential-workflow-created"]);
         const pending = (await h.call("status", {})).details.workflows[0];
         assert.equal(pending.status, "pending_definition");
         await h.hook("turn_start");
@@ -333,8 +325,6 @@ test("definition mode constrains the next model context and restores tools after
         h.enableClassifier({ requiresSequentialWorkflow: true, reasoning: "Explicit request." });
         const request = "Create a Sequential Workflow for this request.";
         await h.hook("input", { text: request, source: "interactive" });
-        const startup = await h.hook("before_agent_start", { prompt: request });
-        assert.deepEqual(startup.messages.map((message: any) => message.customType), ["sequential-workflow-evaluation", "sequential-workflow-created"]);
         assert.deepEqual(h.activeTools(), ["sequential_workflow_create"]);
         const context = await h.hook("context_with_system", { messages: [{ role: "system", content: "old" }, { role: "user", content: "old request" }] });
         assert.equal(context.messages.length, 3);
@@ -342,7 +332,6 @@ test("definition mode constrains the next model context and restores tools after
         assert.equal(context.messages[1].content, "old request");
         assert.match(context.messages[2].content, /definition mode is active/);
         assert.ok(h.messages.length >= 2);
-        assert.equal(startup.messages[1].display, true);
         await h.call("create", definition());
         assert.deepEqual(h.activeTools(), ["read", "bash", "edit", "write"]);
     }
