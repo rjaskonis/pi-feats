@@ -716,7 +716,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.get<{ Params: { profile: string } }>("/api/profiles/:profile/sequential-workflows/status", async (request, reply) => {
       if (!guard(request, reply)) return;
       const profile = profileName(request), evaluation = await configuredWorkflowEvaluation(profile, await api.profiles.readSettings(profile));
-      const environment = await api.handlerEnvironment(profile);
+      const directory = api.profiles.directory(profile), environment = await api.handlerEnvironment(profile);
       const credentialConfigured = evaluation.modelType !== "system_one" || await hasOpenRouterCredential(directory, environment);
       return { evaluation, credentialConfigured };
     });
