@@ -380,9 +380,13 @@ test("a Skill requirement is decided by the configured evaluator", async () => {
         const skillDir = join(h.root, "skill"); await mkdir(skillDir);
         const skillPath = join(skillDir, "SKILL.md"); await writeFile(skillPath, "## Required workflow\n\nCreate the Sequential Workflow before running the operation.");
         await h.hook("turn_start");
-        const result = await h.hook("tool_call", { toolName: "read", input: { path: skillPath } });
-        assert.deepEqual(result, { block: true, terminate: true, reason: "Sequential Workflow definition mode has started from the required Skill." });
+        const toolCallId = "skill-read";
+        const result = await h.hook("tool_call", { toolName: "read", toolCallId, input: { path: skillPath } });
+        assert.equal(result, undefined);
         assert.deepEqual(h.activeTools(), ["sequential_workflow_create"]);
+        const transformed = await h.hook("tool_result", { toolName: "read", toolCallId, content: [{ type: "text", text: "Skill body" }], isError: false });
+        assert.deepEqual(transformed, { content: [{ type: "text", text: "Skill recognized. Sequential Workflow definition mode is active; create the required workflow before performing work." }], details: { definitionMode: true }, isError: false });
+        assert.equal((await h.hook("tool_call", { toolName: "bash", toolCallId: "other-call", input: {} })).block, true);
         const audit = new DatabaseSync(join(h.root, "sequential-workflow.db")).prepare("SELECT phase FROM workflow_harness_events ORDER BY id").all() as Array<{ phase: string }>;
         assert.ok(audit.some((event) => event.phase === "requirement_classified_required"));
     } finally { await h.close(); }

@@ -397,11 +397,12 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     let dispatched = false;
     let definitionCutover = false;
     let definitionCutoverOrigin: "user_input" | "skill" | undefined;
+    let definitionCutoverReadCallId: string | undefined;
     const latestUserRequest = (ctx: ExtensionContext) => {
         const content = ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").at(-1)?.message?.content;
         return typeof content === "string" ? content : Array.isArray(content) ? content.map((part: any) => part.text ?? "").join("") : "";
     };
-    host.on("turn_start", () => { dispatched = false; definitionCutover = false; definitionCutoverOrigin = undefined; });
+    host.on("turn_start", () => { dispatched = false; definitionCutover = false; definitionCutoverOrigin = undefined; definitionCutoverReadCallId = undefined; });
     host.on("tool_call", async (event, ctx) => context.run(ctx, async () => {
         if (event.toolName === "read" && typeof event.input?.path === "string" && basename(event.input.path) === "SKILL.md" && focus() === undefined) {
             try {
@@ -425,6 +426,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                         });
                         definitionCutover = true;
                         definitionCutoverOrigin = "skill";
+                        definitionCutoverReadCallId = event.toolCallId;
                     }
                     else if (decision.status !== "not_required") {
                         await transaction(ctx, () => { blockEvaluation(decision.reasoning, decision as any, "skill"); });
@@ -438,8 +440,13 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                 // The original read tool reports path and access errors.
             }
         }
-        if (definitionCutover)
+        const allowCutoverRead = definitionCutoverReadCallId !== undefined && event.toolCallId === definitionCutoverReadCallId;
+        if (definitionCutover && !allowCutoverRead)
             return { block: true, terminate: true, reason: definitionCutoverOrigin === "skill" ? "Sequential Workflow definition mode has started from the required Skill." : "Sequential Workflow definition mode has started from the user request." };
+        // Let the already-preflighted Skill read complete. Its successful result is
+        // replaced below, so the agent receives a controlled transition, not an error.
+        if (allowCutoverRead)
+            return;
         const id = focus();
         const blockedRequirement = requirementBlock();
         if (blockedRequirement && !["sequential_workflow_cancel", "sequential_workflow_status"].includes(event.toolName))
@@ -466,8 +473,8 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         dispatched = true;
     }));
     host.on("tool_result", (event) => {
-        if (definitionCutover && (event as any).toolName === "read")
-            return { content: [{ type: "text", text: "The required Sequential Workflow is being defined." }], details: { definitionMode: true }, isError: false };
+        if (definitionCutover && (event as any).toolCallId === definitionCutoverReadCallId && (event as any).toolName === "read" && !(event as any).isError)
+            return { content: [{ type: "text", text: "Skill recognized. Sequential Workflow definition mode is active; create the required workflow before performing work." }], details: { definitionMode: true }, isError: false };
     });
     host.on("context_with_system", (event, ctx) => context.run(ctx, () => {
         const workflowId = pendingWorkflow();
