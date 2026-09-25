@@ -263,7 +263,7 @@ test("reload restores focus; adopting a tree revokes the old session owner", asy
         await h.close();
     }
 });
-test("System One evaluates collect input before allowing a transition", async () => {
+test("Low-confidence System One task decisions retry and preserve their evaluation", async () => {
     const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.OPENROUTER_API_KEY;
     try {
         await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "openrouter", model: "typesafe/jev-test" } } } }));
@@ -276,7 +276,11 @@ test("System One evaluates collect input before allowing a transition", async ()
         const status = await h.call("status", { workflowId: created.workflowId });
         assert.equal(status.details.workflow.status, "awaiting_user");
         assert.deepEqual(request.state, { workflow: { title: "Test", source: "test" }, task: { type: "collect", instruction: "Request the full name.", criteria: "The response contains a given name and surname." }, result: "Renne" });
-        assert.ok(h.messages.some((message) => String(message[0].content).includes("unresolved")));
+        assert.ok(h.messages.some((message) => String(message[0].content).includes("will be retried")));
+        const evaluation = JSON.parse(status.details.tasks[0].evaluation);
+        assert.equal(evaluation.outcome, "retry");
+        assert.match(evaluation.reasoning, /below the automatic-acceptance threshold/);
+        assert.equal(evaluation.decision.confidence, 0.5);
     } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
 });
 test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {
