@@ -12,7 +12,8 @@ type ConversationMessage = { role: "user" | "assistant"; content: string };
 type UserInputRequirement = { origin: "user_input"; userLastMessage: string; conversationHistory: ConversationMessage[]; templates: WorkflowTemplate[] };
 type SkillRequirement = { origin: "skill"; evidence: string; userRequest: string; recentUserMessages: string[]; templates: WorkflowTemplate[] };
 export type RequirementInput = UserInputRequirement | SkillRequirement;
-export type TaskInput = { task: { type: "action" | "collect" | "workflow"; instruction: string; criteria: string }; result: string };
+export type TaskInput = { workflow: { title: string; source: string }; task: { type: "action" | "collect" | "workflow"; instruction: string; criteria: string }; result: string };
+const minimumAutomaticTaskConfidence = 0.85;
 
 const root = () => process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
@@ -99,10 +100,10 @@ export async function evaluateWorkflowTask(ctx: ExtensionContext, input: TaskInp
     try { config = await workflowEvaluationConfig(); } catch (error) { return { outcome: "error", reasoning: error instanceof Error ? error.message : String(error), evaluator: "llm" }; }
     if (config.modelType === "llm") return undefined;
     const model = config.systemOne!.model;
-    const response = await configuredSystemOneChoice(ctx, config, input, "Does the recorded result meet the task criterion? Select fail only when the task cannot safely progress; select retry when another attempt may succeed.", { accept: "The result fully meets the criterion.", retry: "The result does not meet the criterion but another attempt may succeed.", fail: "The result cannot safely satisfy the criterion and the workflow must fail.", uncertain: "The evidence is insufficient for a safe transition." });
+    const response = await configuredSystemOneChoice(ctx, config, input, "Evaluate the recorded result against the complete task contract: workflow source, task instruction, and acceptance criterion. The criterion is a minimum condition, never permission to weaken a more specific requirement in the instruction or workflow source. Accept only when every material requirement is demonstrably satisfied by the result. For a request for a full name, require at least a given name and surname; a single token is incomplete. Select fail only when the task cannot safely progress; select retry when another attempt may succeed; select uncertain when the evidence or confidence is insufficient for a safe transition.", { accept: "The result fully and demonstrably meets every material requirement of the task contract.", retry: "The result is incomplete or does not meet the task contract, but another attempt may succeed.", fail: "The result cannot safely satisfy the task contract and the workflow must fail.", uncertain: "The evidence is insufficient for a safe transition." });
     if (!response.answer) return { outcome: response.error?.endsWith("API credentials are unavailable.") ? "unavailable" : "error", reasoning: response.error!, evaluator: "system_one", model };
     const choice = text(response.answer.choice), common = metadata(response.answer, "system_one", model);
+    if (choice === "uncertain" || typeof common.confidence !== "number" || common.confidence < minimumAutomaticTaskConfidence) return { outcome: "uncertain", reasoning: choice === "uncertain" ? "TypeSafe System One selected an uncertain task decision." : `TypeSafe System One confidence (${common.confidence ?? "missing"}) is below the automatic-transition threshold (${minimumAutomaticTaskConfidence}).`, ...common };
     if (["accept", "retry", "fail"].includes(choice)) return { outcome: choice as "accept" | "retry" | "fail", reasoning: `TypeSafe System One selected ${choice}.`, ...common };
-    if (choice === "uncertain") return { outcome: "uncertain", reasoning: "TypeSafe System One selected an uncertain task decision.", ...common };
     return { outcome: "invalid_response", reasoning: "TypeSafe API returned an unsupported task decision.", ...common };
 }

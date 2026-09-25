@@ -130,6 +130,22 @@ test("Action criteria fail the workflow after five rejected attempts", async () 
     }
 });
 
+test("Task evaluations persist a structured contract, evidence, and decision record", async () => {
+    const h = await setup();
+    try {
+        const id = ids(await h.call("create", definition([{ type: "action", instruction: "Verify the report", criteria: "The report includes every required section." }])));
+        await h.call("record_result", { ...id, phase: "action", result: "The report contains all required sections." });
+        await h.call("evaluate", { ...id, outcome: "accept", reasoning: "Every required section is present.", decision: { evaluator: "system_one", model: "typesafe/jev-test", confidence: 0.97, probabilities: { accept: 0.97, retry: 0.02, uncertain: 0.01 } } });
+        const status = await h.call("status", { workflowId: id.workflowId });
+        const evaluation = JSON.parse(status.details.tasks[0].evaluation);
+        assert.deepEqual(evaluation.contract, { instruction: "Verify the report", criteria: "The report includes every required section." });
+        assert.deepEqual(evaluation.evidence, { result: "The report contains all required sections." });
+        assert.deepEqual(evaluation.decision, { evaluator: "system_one", model: "typesafe/jev-test", confidence: 0.97, probabilities: { accept: 0.97, retry: 0.02, uncertain: 0.01 } });
+        assert.equal(evaluation.outcome, "accept");
+        assert.equal(evaluation.reasoning, "Every required section is present.");
+        assert.equal(evaluation.version, 1);
+    } finally { await h.close(); }
+});
 test("Terminal evaluation fails a workflow without retrying or advancing", async () => {
     const h = await setup();
     try {
@@ -252,13 +268,15 @@ test("System One evaluates collect input before allowing a transition", async ()
     try {
         await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "openrouter", model: "typesafe/jev-test" } } } }));
         process.env.OPENROUTER_API_KEY = "test";
-        globalThis.fetch = async () => new Response(JSON.stringify({ answers: { decision: { choice: "retry", confidence: 0.01, probabilities: { retry: 1 } } } }), { status: 200 });
-        const created = ids(await h.call("create", definition([{ type: "collect", instruction: "Name?", criteria: "Full name" }])));
+        let request: any;
+        globalThis.fetch = async (_url, init) => { request = JSON.parse(String(init?.body)); return new Response(JSON.stringify({ answers: { decision: { choice: "accept", confidence: 0.5, probabilities: { accept: 0.63, retry: 0.26, uncertain: 0.11 } } } }), { status: 200 }); };
+        const created = ids(await h.call("create", definition([{ type: "collect", instruction: "Request the full name.", criteria: "The response contains a given name and surname." }])));
         const input = await h.hook("input", { text: "Renne", source: "interactive" });
         assert.equal(input.action, "continue");
         const status = await h.call("status", { workflowId: created.workflowId });
         assert.equal(status.details.workflow.status, "awaiting_user");
-        assert.ok(h.messages.some((message) => String(message[0].content).includes("will be retried")));
+        assert.deepEqual(request.state, { workflow: { title: "Test", source: "test" }, task: { type: "collect", instruction: "Request the full name.", criteria: "The response contains a given name and surname." }, result: "Renne" });
+        assert.ok(h.messages.some((message) => String(message[0].content).includes("unresolved")));
     } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
 });
 test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {

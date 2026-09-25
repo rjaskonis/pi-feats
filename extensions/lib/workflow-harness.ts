@@ -285,7 +285,8 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         const current = task(workflowId);
         if (!current?.criteria || current.id !== taskId)
             return undefined;
-        const decision = await evaluateWorkflowTask(ctx, { task: { type: current.type, instruction: current.instruction, criteria: current.criteria }, result });
+        const item = row(workflowId);
+        const decision = await evaluateWorkflowTask(ctx, { workflow: { title: item?.title ?? "", source: item?.source ?? "" }, task: { type: current.type, instruction: current.instruction, criteria: current.criteria }, result });
         if (!decision)
             return undefined;
         const message = decision.outcome === "accept" ? `Task #${taskId} accepted by the configured evaluator.` : decision.outcome === "retry" ? `Task #${taskId} will be retried.` : decision.outcome === "fail" ? `Task #${taskId} ended with a terminal failure; workflow failed.` : `Task #${taskId} evaluation is unresolved; work remains blocked.`;
@@ -298,7 +299,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         const evaluate = rawTools.get("sequential_workflow_evaluate");
         if (!evaluate)
             throw new Error("Sequential Workflow evaluator is unavailable.");
-        const applied = await evaluate.execute("system-one-evaluation", { workflowId, taskId, outcome: decision.outcome, reasoning: decision.reasoning }, ctx.signal, undefined, ctx);
+        const applied = await evaluate.execute("system-one-evaluation", { workflowId, taskId, outcome: decision.outcome, reasoning: decision.reasoning, decision: { evaluator: decision.evaluator, model: decision.model, confidence: decision.confidence, probabilities: decision.probabilities } }, ctx.signal, undefined, ctx);
         if (applied.details?.next?.completed)
             audit("workflow_completed", { evaluator: decision.evaluator, model: decision.model, message: `Workflow #${workflowId} completed.` }, undefined, workflowId, true);
         return { ...decision, applied };
