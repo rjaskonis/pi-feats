@@ -283,6 +283,20 @@ test("Low-confidence System One task decisions retry and preserve their evaluati
         assert.equal(evaluation.decision.confidence, 0.5);
     } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
 });
+test("Low-confidence Action acceptance does not consume a retry", async () => {
+    const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.OPENROUTER_API_KEY;
+    try {
+        await writeFile(join(h.root, "settings.json"), JSON.stringify({ sequentialWorkflow: { evaluation: { modelType: "system_one", systemOne: { provider: "openrouter", model: "typesafe/jev-test" } } } }));
+        process.env.OPENROUTER_API_KEY = "test";
+        globalThis.fetch = async () => new Response(JSON.stringify({ answers: { decision: { choice: "accept", confidence: 0.4, probabilities: { accept: 0.6, retry: 0.3, uncertain: 0.1 } } } }), { status: 200 });
+        const id = ids(await h.call("create", definition([{ type: "action", instruction: "Write the requested report.", criteria: "The requested report was written and its result was recorded." }])));
+        await h.call("record_result", { ...id, phase: "action", result: "The requested report was written and recorded." });
+        const status = await h.call("status", { workflowId: id.workflowId });
+        assert.equal(status.details.workflow.status, "completed");
+        assert.equal(status.details.tasks[0].attempts, 0);
+        assert.equal(JSON.parse(status.details.tasks[0].evaluation).outcome, "accept");
+    } finally { globalThis.fetch = oldFetch; if (oldKey === undefined) delete process.env.OPENROUTER_API_KEY; else process.env.OPENROUTER_API_KEY = oldKey; await h.close(); }
+});
 test("OpenRouter TypeSafe System One uses the Decisions endpoint", async () => {
     const h = await setup(); const oldFetch = globalThis.fetch, oldKey = process.env.OPENROUTER_API_KEY;
     try {

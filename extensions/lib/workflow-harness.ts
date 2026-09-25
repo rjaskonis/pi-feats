@@ -240,9 +240,9 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         return box;
     });
     host.registerMessageRenderer("sequential-workflow-harness", (message, { outputPad }, theme) => {
-        const details = (message.details ?? {}) as { phase?: string; workflowId?: number; taskId?: number; evaluator?: string; model?: string; reasoning?: string };
+        const details = (message.details ?? {}) as { phase?: string; workflowId?: number; taskId?: number; taskPosition?: number; evaluator?: string; model?: string; reasoning?: string };
         const workflow = details.workflowId ? `Workflow #${details.workflowId}` : "Sequential Workflow";
-        const task = details.taskId ? ` · Tarefa #${details.taskId}` : "";
+        const task = details.taskPosition ? ` · Task #${details.taskPosition}` : "";
         const phase = details.phase ?? "";
         const presentation: Record<string, { title: string; color: "accent" | "success" | "warning" | "error" | "muted" }> = {
             requirement_check_started: { title: "Evaluating requirement", color: "accent" },
@@ -289,8 +289,8 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         const decision = await evaluateWorkflowTask(ctx, { workflow: { title: item?.title ?? "", source: item?.source ?? "" }, task: { type: current.type, instruction: current.instruction, criteria: current.criteria }, result });
         if (!decision)
             return undefined;
-        const message = decision.outcome === "accept" ? `Task #${taskId} accepted by the configured evaluator.` : decision.outcome === "retry" ? `Task #${taskId} will be retried.` : decision.outcome === "fail" ? `Task #${taskId} ended with a terminal failure; workflow failed.` : `Task #${taskId} evaluation is unresolved; work remains blocked.`;
-        audit(`task_evaluation_${decision.outcome}`, { taskId, ...decision, message }, undefined, workflowId, true);
+        const message = decision.outcome === "accept" ? `Task #${current.position} accepted by the configured evaluator.` : decision.outcome === "retry" ? `Task #${current.position} will be retried.` : decision.outcome === "fail" ? `Task #${current.position} ended with a terminal failure; workflow failed.` : `Task #${current.position} evaluation is unresolved; work remains blocked.`;
+        audit(`task_evaluation_${decision.outcome}`, { taskId, taskPosition: current.position, ...decision, message }, undefined, workflowId, true);
         if (!["accept", "retry", "fail"].includes(decision.outcome)) {
             restoreTaskAfterUnavailableEvaluation(workflowId, taskId, current.type);
             blockEvaluation(decision.reasoning, decision as any, undefined, workflowId);
@@ -313,6 +313,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                         return transaction(ctx, async () => {
                             assertOperation(definition.name, params);
                             const pendingBefore = pendingWorkflow();
+                            const taskBefore = params.workflowId !== undefined ? task(params.workflowId) : undefined;
                             const result = await definition.execute(id, params, signal, update, ctx);
                             if (definition.name === "sequential_workflow_create" || definition.name === "sequential_workflow_create_subworkflow" || definition.name.endsWith("create_from_template")) {
                                 const workflowId = result.details.workflowId as number;
@@ -328,10 +329,10 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                             }
                             if (definition.name === "sequential_workflow_evaluate" && result.details?.failed) {
                                 const phase = result.details.terminal ? "task_terminal_failed" : "failed_attempt_limit";
-                                audit(phase, { taskId: params.taskId, message: result.details.terminal ? `Task #${params.taskId} ended with a terminal failure; workflow failed.` : `Task #${params.taskId} reached its retry limit; workflow failed.` }, undefined, params.workflowId, true);
+                                audit(phase, { taskId: params.taskId, taskPosition: taskBefore?.position, message: result.details.terminal ? `Task #${taskBefore?.position ?? params.taskId} ended with a terminal failure; workflow failed.` : `Task #${taskBefore?.position ?? params.taskId} reached its retry limit; workflow failed.` }, undefined, params.workflowId, true);
                             }
                             else if (definition.name === "sequential_workflow_evaluate" && (params.outcome === "retry" || params.accepted === false))
-                                audit("task_retry", { taskId: params.taskId, message: `Task #${params.taskId} will be retried.` }, undefined, params.workflowId, true);
+                                audit("task_retry", { taskId: params.taskId, taskPosition: taskBefore?.position, message: `Task #${taskBefore?.position ?? params.taskId} will be retried.` }, undefined, params.workflowId, true);
                             if ((definition.name === "sequential_workflow_evaluate" || definition.name === "sequential_workflow_record_result") && result.details?.next?.completed)
                                 audit("workflow_completed", { message: `Workflow #${params.workflowId} completed.` }, undefined, params.workflowId, true);
                             return result;
