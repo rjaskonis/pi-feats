@@ -89,7 +89,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         if (!event)
             return undefined;
         try {
-            const mode = JSON.parse(event.payload) as { origin: "user_input" | "skill"; userRequest: string; skillPath?: string; skillContent?: string; activeTools: string[]; activation?: DefinitionActivation; templatePath?: string };
+            const mode = JSON.parse(event.payload) as { origin: "user_input" | "skill"; userRequest: string; skillPath?: string; activeTools: string[]; activation?: DefinitionActivation; templatePath?: string };
             return { ...mode, activation: mode.activation ?? "definition" };
         }
         catch {
@@ -101,9 +101,9 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         if (mode?.activeTools?.length)
             host.setActiveTools(mode.activeTools);
     };
-    const startDefinitionMode = (workflowId: number, origin: "user_input" | "skill", userRequest: string, activation: DefinitionActivation = "definition", templatePath?: string, skillPath?: string, skillContent?: string) => {
+    const startDefinitionMode = (workflowId: number, origin: "user_input" | "skill", userRequest: string, activation: DefinitionActivation = "definition", templatePath?: string, skillPath?: string) => {
         const activeTools = host.getActiveTools();
-        addEvent(workflowId, "definition_mode_started", { origin, userRequest, activation, templatePath, skillPath, skillContent, activeTools });
+        addEvent(workflowId, "definition_mode_started", { origin, userRequest, activation, templatePath, skillPath, activeTools });
         host.setActiveTools(definitionTools(activation));
     };
     const definitionEvaluationSent = (workflowId: number) => Boolean(db.prepare("SELECT 1 FROM workflow_events WHERE workflow_id = ? AND phase = 'definition_mode_evaluated' LIMIT 1").get(workflowId));
@@ -115,7 +115,12 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
             return undefined;
         const template = mode.activation === "template";
         addEvent(workflowId, "definition_mode_announced", { activation: mode.activation, templatePath: mode.templatePath });
-        return { customType: "sequential-workflow-created", content: template ? `Preparing workflow #${workflowId} from template: ${mode.templatePath}` : `Workflow #${workflowId} created — defining ordered tasks.`, display: true, details: { workflowId, origin: mode.origin, activation: mode.activation, templatePath: mode.templatePath } };
+        const content = template
+            ? mode.origin === "skill"
+                ? `Preparing workflow #${workflowId} from the template specified by the required Skill.`
+                : `Preparing workflow #${workflowId} from template: ${mode.templatePath}`
+            : `Workflow #${workflowId} created — defining ordered tasks.`;
+        return { customType: "sequential-workflow-created", content, display: true, details: { workflowId, origin: mode.origin, activation: mode.activation, templatePath: mode.templatePath } };
     };
     const createPendingWorkflow = (origin: "user_input" | "skill", evidence: string, reasoning: string) => {
         const existing = pendingWorkflow();
@@ -450,14 +455,11 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     // Pi preflights sibling calls before executing them. Allow only one call per
     // model turn while focused (including a create call that establishes focus).
     let dispatched = false;
-    let definitionCutover = false;
-    let definitionCutoverOrigin: "user_input" | "skill" | undefined;
-    let definitionCutoverReadPending = false;
     const latestUserRequest = (ctx: ExtensionContext) => {
         const content = ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").at(-1)?.message?.content;
         return typeof content === "string" ? content : Array.isArray(content) ? content.map((part: any) => part.text ?? "").join("") : "";
     };
-    host.on("turn_start", () => { dispatched = false; definitionCutover = false; definitionCutoverOrigin = undefined; definitionCutoverReadPending = false; });
+    host.on("turn_start", () => { dispatched = false; });
     host.on("tool_call", async (event, ctx) => context.run(ctx, async () => {
         if (event.toolName === "read" && typeof event.input?.path === "string" && basename(event.input.path) === "SKILL.md" && focus() === undefined) {
             try {
@@ -474,21 +476,16 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                         await transaction(ctx, async () => {
                             if (focus() === undefined) {
                                 const workflowId = createPendingWorkflow("skill", path, decision.reasoning);
-                                const template = decision.templateId ? (await templateCandidates()).find(candidate => candidate.id === decision.templateId) : undefined;
-                                startDefinitionMode(workflowId, "skill", userRequest, decision.activation ?? "definition", template?.source, path, content);
+                                startDefinitionMode(workflowId, "skill", userRequest, decision.activation ?? "definition", undefined, path);
                                 audit("definition_mode_started", { path, message: `Sequential Workflow definition mode started for workflow #${workflowId}.` }, "skill", workflowId, true);
                             }
                         });
-                        definitionCutover = true;
-                        definitionCutoverOrigin = "skill";
-                        definitionCutoverReadPending = true;
+                        // Preserve the normal read result. The next model decision receives
+                        // the Skill it requested plus the definition-mode system instruction.
                         return;
                     }
-                    else if (decision.status !== "not_required") {
+                    else if (decision.status !== "not_required")
                         await transaction(ctx, () => { blockEvaluation(decision.reasoning, decision as any, "skill"); });
-                        definitionCutover = true;
-                        definitionCutoverOrigin = "skill";
-                    }
                     }
                 }
             }
@@ -496,8 +493,6 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                 // The original read tool reports path and access errors.
             }
         }
-        if (definitionCutover)
-            return { block: true, terminate: true, reason: definitionCutoverOrigin === "skill" ? "Sequential Workflow definition mode has started from the required Skill." : "Sequential Workflow definition mode has started from the user request." };
         const id = focus();
         const blockedRequirement = requirementBlock();
         if (blockedRequirement && !["sequential_workflow_cancel", "sequential_workflow_status"].includes(event.toolName))
@@ -527,25 +522,26 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         }
         dispatched = true;
     }));
-    host.on("tool_result", (event) => {
-        if (definitionCutoverReadPending && (event as any).toolName === "read" && !(event as any).isError) {
-            definitionCutoverReadPending = false;
-            return { content: [{ type: "text", text: "Skill recognized. Sequential Workflow definition mode is active; create the required workflow before performing work." }], details: { definitionMode: true }, isError: false };
-        }
-    });
     host.on("context_with_system", (event, ctx) => context.run(ctx, () => {
         const workflowId = pendingWorkflow();
         const mode = definitionMode(workflowId);
         if (!workflowId || !mode)
             return;
         const messages = event.messages.filter((message: any) => !(message.role === "custom" && message.customType === "sequential-workflow-state"));
-        const skill = mode.skillContent ? `\n\nRequired Skill (${mode.skillPath ?? "SKILL.md"}):\n${mode.skillContent}` : "";
         const creationTool = definitionCreationTool(mode.activation);
-        const creation = mode.activation === "template"
-            ? mode.templatePath ? `Use the explicitly requested template path ${mode.templatePath}.` : `Use the exact JSON template name explicitly required by the supplied Skill. A relative template name is relative to the directory containing ${mode.skillPath ?? "the Skill"}.`
-            : "Define the ordered workflow from the original request and the supplied Skill.";
+        const creation = mode.origin === "skill" && mode.activation === "template"
+            ? "The Skill just read specifies the template. Use that template now."
+            : mode.activation === "template"
+                ? mode.templatePath ? `Use the explicitly requested template path ${mode.templatePath}.` : `Use the exact JSON template name explicitly required by the supplied Skill. A relative template name is relative to the directory containing ${mode.skillPath ?? "the Skill"}.`
+                : "Define the ordered workflow from the original request and the supplied Skill.";
         const permitted = definitionTools(mode.activation).join(", ");
-        messages.push({ role: "system", content: `Sequential Workflow definition mode is active for workflow #${workflowId}. You MUST create or hydrate this workflow before performing the user's requested work${skill}. ${creation} The only permitted tools are: ${permitted}. Do not perform the requested operation, claim completion, use any other tool, or bypass workflow creation. When ready, make exactly one call to ${creationTool}; the harness will reject the other workflow creation route.` } as any);
+        const instruction = { role: "system", content: `Sequential Workflow definition mode is active for workflow #${workflowId}. You MUST create or hydrate this workflow before performing the user's requested work. ${creation} The only permitted tools are: ${permitted}. Do not perform the requested operation, claim completion, use any other tool, or bypass workflow creation. When ready, make exactly one call to ${creationTool}; the harness will reject the other workflow creation route.` } as any;
+        // A Skill cutover must steer the immediate post-read continuation without
+        // replacing the Skill's normal tool result. Keep the steering message first.
+        if (mode.origin === "skill")
+            messages.unshift(instruction);
+        else
+            messages.push(instruction);
         return { messages };
     }));
     host.on("context", (event, ctx) => context.run(ctx, () => {
