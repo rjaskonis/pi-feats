@@ -16,7 +16,7 @@ pi install git:github.com/rjaskonis/pi-feats
 
 The root `package.json` is authoritative: `pi.extensions` declares every exported extension, runtime dependencies belong in root `dependencies`, and `postinstall` runs `scripts/install-nono.sh` followed by the Console build. Do not add package extension paths manually to a consumer's `settings.json`.
 
-Keep source, comments, commit messages, scripts, and documentation in English.
+Keep all source code, comments, commit messages, scripts, documentation, user-facing strings, prompts, tests, and generated text in English. Do not write Portuguese in any project artifact.
 
 ## Profile architecture (non-negotiable)
 
