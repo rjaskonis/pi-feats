@@ -8,6 +8,7 @@ import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { ensureNonoAvailable, ensureProfileSandbox, isSandboxEnabled, migrateLegacySandboxRuntime, sandboxedCommand } from "./lib/profile-sandbox.ts";
 import { profileEnvironment } from "./lib/profile-env.ts";
+import { packageExtensions } from "./lib/package-resources.ts";
 import { handleRemoteCli, REMOTE_COMMAND_NAMES } from "./lib/remote-hosts.ts";
 
 type ProfilePolicy = {
@@ -164,13 +165,12 @@ export async function rootRuntimeSources(root: string, base: ProfileSettings): P
   const sources = new Set<string>();
   const enabled = base.profile?.enabledExtensions;
   const extensionName = (path: string) => basename(path).replace(/\.(?:ts|js)$/, "");
-  const add = (path: string) => {
+  const add = (path: string, aliases = [extensionName(path)]) => {
     if (!existsSync(path)) return;
-    const name = extensionName(path);
     // Profiles are workspaces, but these extensions are core runtime
     // capabilities and must cross the default-runtime boundary even when a
     // profile limits optional extensions.
-    if (requiredRuntimeExtensions.has(name) || !enabled || enabled.includes("*") || enabled.includes(name)) sources.add(path);
+    if (aliases.some((name) => requiredRuntimeExtensions.has(name)) || !enabled || enabled.includes("*") || aliases.some((name) => enabled.includes(name))) sources.add(path);
   };
   if (Array.isArray(base.packages)) for (const entry of base.packages) {
     const source = typeof entry === "object" && entry !== null ? (entry as { source?: unknown }).source : entry;
@@ -178,8 +178,8 @@ export async function rootRuntimeSources(root: string, base: ProfileSettings): P
     const packagePath = packageInstallPath(root, source);
     if (!packagePath) { add(source.startsWith(".") ? resolve(root, source) : source); continue; }
     try {
-      const manifest = JSON.parse(await readFile(join(packagePath, "package.json"), "utf8")) as { pi?: { extensions?: unknown } };
-      if (Array.isArray(manifest.pi?.extensions)) for (const extension of manifest.pi.extensions) if (typeof extension === "string") add(join(packagePath, extension));
+      const manifest = JSON.parse(await readFile(join(packagePath, "package.json"), "utf8")) as { name?: string; pi?: { extensions?: unknown } };
+      for (const extension of packageExtensions([{ base: packagePath, name: manifest.name ?? basename(packagePath), manifest }])) add(extension.path, extension.aliases);
     } catch {}
   }
   if (Array.isArray(base.extensions)) for (const entry of base.extensions) if (typeof entry === "string") add(entry.startsWith(".") ? resolve(root, entry) : entry);

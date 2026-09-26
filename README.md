@@ -392,6 +392,9 @@ pi skills disable my-skill
 pi skills enable my-skill
 pi extensions disable my-extension
 pi extensions enable my-extension
+# A package with a sole index extension uses its package name.
+pi extensions disable pi-mcp-adapter
+pi extensions enable pi-mcp-adapter
 
 # Enable or disable an installed package for the selected profile
 pi packages disable npm:some-package

@@ -3,6 +3,7 @@ import { copyFile, cp, mkdir, readFile, readlink, readdir, rm, symlink, writeFil
 import { join, relative, resolve } from "node:path";
 import { ensureProfileSandbox } from "../lib/profile-sandbox.ts";
 import { BUILTIN_TOOLS, activeBuiltinTools, updatedBuiltinTools } from "../lib/builtin-tools.ts";
+import { packageExtensions } from "../lib/package-resources.ts";
 
 export { BUILTIN_TOOLS } from "../lib/builtin-tools.ts";
 export const RESOURCE_KINDS = ["tools", "skills", "extensions"] as const;
@@ -194,11 +195,7 @@ export class ProfileStore {
   }
 
   private async packageExtensions(settings: ProfileSettings): Promise<Array<{ name: string; path: string; package: string }>> {
-    const entries: Array<{ name: string; path: string; package: string }> = [];
-    for (const pkg of await this.configuredPackages(settings)) {
-      for (const extension of Array.isArray(pkg.manifest?.pi?.extensions) ? pkg.manifest.pi.extensions : []) if (typeof extension === "string") entries.push({ name: extension.split("/").pop()?.replace(/\.(?:ts|js)$/, "") ?? pkg.name, path: join(pkg.base, extension), package: pkg.name });
-    }
-    return entries;
+    return packageExtensions(await this.configuredPackages(settings)).map(({ name, path, packageName }) => ({ name, path, package: packageName }));
   }
 
   private async packageToolSources(settings: ProfileSettings, names: Iterable<string>): Promise<Map<string, string>> {

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import test from "node:test";
 import { activeBuiltinTools, updatedBuiltinTools } from "../extensions/lib/builtin-tools.ts";
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
-import { skillRows } from "../extensions/cli-resources.ts";
+import { findResource, skillRows } from "../extensions/cli-resources.ts";
+import { packageExtensions } from "../extensions/lib/package-resources.ts";
 import { resolveRootAgentDir, rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
 
 test("profile root uses the remote agent directory when no reexec root is set", () => {
@@ -124,6 +125,33 @@ test("default profile tool resources use defaultTools instead of reporting every
   }
 });
 
+test("a package with a sole index extension uses its package name and preserves index as an alias", async () => {
+  const root = await mkdtemp(join(tmpdir(), "package-extension-name-test-"));
+  try {
+    const packageDir = join(root, "npm", "node_modules", "pi-mcp-adapter");
+    await mkdir(packageDir, { recursive: true });
+    await writeFile(join(root, "settings.json"), JSON.stringify({ packages: ["npm:pi-mcp-adapter"] }));
+    await writeFile(join(packageDir, "package.json"), JSON.stringify({ name: "pi-mcp-adapter", pi: { extensions: ["./index.ts"] } }));
+    await writeFile(join(packageDir, "index.ts"), "export default () => {};\n");
+
+    assert.deepEqual(packageExtensions([{ base: packageDir, name: "pi-mcp-adapter", manifest: { pi: { extensions: ["./index.ts"] } } }]), [{
+      name: "pi-mcp-adapter",
+      aliases: ["pi-mcp-adapter", "index"],
+      path: join(packageDir, "index.ts"),
+      packageName: "pi-mcp-adapter",
+    }]);
+    assert.equal(await findResource("extensions", "pi-mcp-adapter", { packages: ["npm:pi-mcp-adapter"] }, root, root), join(packageDir, "index.ts"));
+    assert.equal(await findResource("extensions", "index", { packages: ["npm:pi-mcp-adapter"] }, root, root), join(packageDir, "index.ts"));
+
+    const resources = await new ProfileStore(root).resources("default", "extensions");
+    assert.equal(resources.find((resource) => resource.path === join(packageDir, "index.ts"))?.name, "pi-mcp-adapter");
+    await new ProfileStore(root).setResource("default", "extensions", "pi-mcp-adapter", false);
+    assert.equal((await new ProfileStore(root).resources("default", "extensions")).find((resource) => resource.name === "pi-mcp-adapter")?.enabled, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("profile tool resources never attribute builtins from a package tool catalog", async () => {
   const root = await mkdtemp(join(tmpdir(), "profile-tool-sources-test-"));
   try {
@@ -153,6 +181,20 @@ test("named profiles materialize skills declared by enabled packages", async () 
 
     const resources = await sharedResources(root, { enabledSkills: ["*"], skillSources: { shared: true } });
     assert.ok(resources.skills.includes(join(packageDir, "skills")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("named profiles recognize a package name for a sole index extension", async () => {
+  const root = await mkdtemp(join(tmpdir(), "profile-package-extension-name-test-"));
+  try {
+    const packageDir = join(root, "npm", "node_modules", "pi-mcp-adapter");
+    await mkdir(packageDir, { recursive: true });
+    await writeFile(join(packageDir, "package.json"), JSON.stringify({ name: "pi-mcp-adapter", pi: { extensions: ["./index.ts"] } }));
+    await writeFile(join(packageDir, "index.ts"), "export default () => {};\n");
+    const sources = await rootRuntimeSources(root, { packages: ["npm:pi-mcp-adapter"], profile: { enabledExtensions: ["pi-mcp-adapter"] } });
+    assert.deepEqual(sources, [join(packageDir, "index.ts")]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
