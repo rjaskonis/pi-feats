@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { activeBuiltinTools, updatedBuiltinTools } from "../extensions/lib/builtin-tools.ts";
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
-import { findResource, skillRows } from "../extensions/cli-resources.ts";
+import { findResource, skillRows, updatedExtensionSettings } from "../extensions/cli-resources.ts";
 import { packageExtensions } from "../extensions/lib/package-resources.ts";
 import { resolveRootAgentDir, rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
 
@@ -142,6 +142,17 @@ test("a package with a sole index extension uses its package name and preserves 
     }]);
     assert.equal(await findResource("extensions", "pi-mcp-adapter", { packages: ["npm:pi-mcp-adapter"] }, root, root), join(packageDir, "index.ts"));
     assert.equal(await findResource("extensions", "index", { packages: ["npm:pi-mcp-adapter"] }, root, root), join(packageDir, "index.ts"));
+    const identity = { name: "pi-mcp-adapter", aliases: ["pi-mcp-adapter", "index"] };
+    assert.deepEqual(updatedExtensionSettings({ profile: { enabledExtensions: ["profiles"] } }, join(packageDir, "index.ts"), identity, true), {
+      profile: { enabledExtensions: ["pi-mcp-adapter", "profiles"] },
+    });
+    assert.deepEqual(updatedExtensionSettings({ profile: { enabledExtensions: ["index", "profiles"] } }, join(packageDir, "index.ts"), identity, true), {
+      profile: { enabledExtensions: ["pi-mcp-adapter", "profiles"] },
+    });
+    assert.deepEqual(updatedExtensionSettings({ profile: { enabledExtensions: ["pi-mcp-adapter", "profiles"] } }, join(packageDir, "index.ts"), identity, false), {
+      extensions: [`-${join(packageDir, "index.ts")}`],
+      profile: { enabledExtensions: ["profiles"] },
+    });
 
     const resources = await new ProfileStore(root).resources("default", "extensions");
     assert.equal(resources.find((resource) => resource.path === join(packageDir, "index.ts"))?.name, "pi-mcp-adapter");

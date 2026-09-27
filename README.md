@@ -392,7 +392,8 @@ pi skills disable my-skill
 pi skills enable my-skill
 pi extensions disable my-extension
 pi extensions enable my-extension
-# A package with a sole index extension uses its package name.
+# A package with a sole index extension uses its package name. These commands
+# also update an explicit runtime extension allowlist.
 pi extensions disable pi-mcp-adapter
 pi extensions enable pi-mcp-adapter
 

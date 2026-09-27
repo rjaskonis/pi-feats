@@ -222,14 +222,16 @@ export async function skillRows(paths: string[], sharedSkillRoot: string, profil
   return rows.sort((a, b) => a[0].localeCompare(b[0]) || a[2].localeCompare(b[2]));
 }
 
-async function extensionRows(paths: string[], exclusions: string[], enabledExtensions?: string[], namesByPath = new Map<string, string>()): Promise<Row[]> {
+type ExtensionIdentity = { name: string; aliases: string[] };
+
+async function extensionRows(paths: string[], exclusions: string[], enabledExtensions?: string[], identitiesByPath = new Map<string, ExtensionIdentity>()): Promise<Row[]> {
   const rows: Row[] = [];
-  const enabled = (name: string, path: string) => !enabledExtensions || enabledExtensions.includes("*") || enabledExtensions.includes(name) ? !isExcluded(path, exclusions) : false;
+  const enabled = (identity: ExtensionIdentity, path: string) => !enabledExtensions || enabledExtensions.includes("*") || identity.aliases.some((name) => enabledExtensions.includes(name)) ? !isExcluded(path, exclusions) : false;
   for (const path of paths) {
     if (!existsSync(path)) continue;
     if ([".ts", ".js"].includes(extname(path))) {
-      const name = namesByPath.get(path) ?? basename(path, extname(path));
-      rows.push([name, enabled(name, path) ? "enabled" : "disabled", path]);
+      const identity = identitiesByPath.get(path) ?? { name: basename(path, extname(path)), aliases: [basename(path, extname(path))] };
+      rows.push([identity.name, enabled(identity, path) ? "enabled" : "disabled", path]);
       continue;
     }
     // A configured directory with index.ts/index.js is one extension. Its
@@ -296,6 +298,13 @@ async function configuredPackageExtensions(resourceRoot: string, settings: Recor
   return packageExtensions(await configuredPackages(resourceRoot, settings));
 }
 
+async function extensionIdentity(resourcePath: string, resourceRoot: string, settings: Record<string, unknown>): Promise<ExtensionIdentity> {
+  const packageExtension = (await configuredPackageExtensions(resourceRoot, settings)).find((entry) => entry.path === resourcePath);
+  if (packageExtension) return { name: packageExtension.name, aliases: packageExtension.aliases };
+  const name = basename(resourcePath, extname(resourcePath));
+  return { name, aliases: [name] };
+}
+
 async function packageToolSources(resourceRoot: string, settings: Record<string, unknown>, names: string[]): Promise<Map<string, string>> {
   const sources = new Map<string, string>();
   for (const { path, packageName } of await configuredPackageExtensions(resourceRoot, settings)) try { const source = await readFile(path, "utf8"); for (const name of names) if (source.includes(`"${name}"`) || source.includes(`'${name}'`) || source.includes(`\`${name}\``)) sources.set(name, packageName); } catch {}
@@ -334,6 +343,26 @@ function setExclusion(entries: string[], resourcePath: string, disable: boolean)
   const legacyGlobExclusion = `!${resourcePath}`;
   if (disable) return [...entries.filter((entry) => entry !== legacyGlobExclusion && entry !== exactExclusion), exactExclusion];
   return entries.filter((entry) => entry !== exactExclusion && entry !== legacyGlobExclusion);
+}
+
+export function updatedExtensionSettings(settings: Record<string, unknown>, resourcePath: string, identity: ExtensionIdentity, enable: boolean): Record<string, unknown> {
+  const entries = Array.isArray(settings.extensions) ? settings.extensions.filter((entry): entry is string => typeof entry === "string") : [];
+  const extensions = setExclusion(entries, resourcePath, !enable);
+  const updated: Record<string, unknown> = { ...settings };
+  if (extensions.length) updated.extensions = extensions;
+  else delete updated.extensions;
+
+  const profile = settings.profile;
+  const enabledExtensions = profile && typeof profile === "object" && Array.isArray((profile as Record<string, unknown>).enabledExtensions)
+    ? (profile as Record<string, unknown>).enabledExtensions.filter((entry): entry is string => typeof entry === "string")
+    : undefined;
+  if (enabledExtensions && !enabledExtensions.includes("*")) {
+    const selected = new Set(enabledExtensions);
+    for (const alias of identity.aliases) selected.delete(alias);
+    if (enable) selected.add(identity.name);
+    updated.profile = { ...(profile as Record<string, unknown>), enabledExtensions: [...selected].sort() };
+  }
+  return updated;
 }
 
 export async function findResource(kind: "extensions" | "skills", target: string, settings: Record<string, unknown>, agentDir: string, resourceRoot: string) {
@@ -456,6 +485,17 @@ async function applyAction(action: ParsedAction) {
   const resourcePath = await findResource(action.kind, action.target, settings, agentDir, resourceRoot);
   if (!resourcePath) throw new Error(`${action.kind.slice(0, -1)} \"${action.target}\" não encontrada.`);
   if (action.kind === "skills" && await applyProfileSkillAction(action, resourcePath, settings, agentDir, resourceRoot, settingsPath)) return;
+  if (action.kind === "extensions") {
+    const identity = await extensionIdentity(resourcePath, resourceRoot, settings);
+    const updatedSettings = updatedExtensionSettings(settings, resourcePath, identity, enable);
+    if (JSON.stringify(settings) === JSON.stringify(updatedSettings)) {
+      console.log(`Extension \"${action.target}\" is already ${enable ? "enabled" : "disabled"}.`);
+      return;
+    }
+    await writeFile(settingsPath, `${JSON.stringify(updatedSettings, null, 2)}\n`, "utf8");
+    console.log(`Extension \"${identity.name}\" ${enable ? "enabled" : "disabled"} in ${settingsPath}. Use /reload to apply.`);
+    return;
+  }
   const entries = Array.isArray(settings[action.kind])
     ? settings[action.kind].filter((entry): entry is string => typeof entry === "string")
     : [];
@@ -577,8 +617,10 @@ export default async function (pi: ExtensionAPI) {
         ? [...new Set([catalogRoot, ...configuredPaths, ...packageResources.map(({ path }) => path)])]
         : [...new Set([...(configuredPaths.length > 0 ? configuredPaths : [catalogRoot]), ...packageResources.map(({ path }) => path)])];
       const profileSkillRoot = kind === "skills" && loaded.agentDir !== resourceRoot ? join(loaded.agentDir, "skills") : undefined;
-      const extensionNames = new Map(packageResources.map(({ path, name }) => [path, name]));
-      const rows: SourceRow[] = (kind === "skills" ? await skillRows(paths, catalogRoot, profileSkillRoot, settings, exclusions) : await extensionRows(paths, exclusions, (loaded.runtimeSettings.profile as { enabledExtensions?: string[] } | undefined)?.enabledExtensions, extensionNames)).map((row) => {
+      const extensionIdentities = new Map(packageResources.flatMap((resource) => "aliases" in resource && Array.isArray(resource.aliases)
+        ? [[resource.path, { name: resource.name, aliases: resource.aliases }] as const]
+        : []));
+      const rows: SourceRow[] = (kind === "skills" ? await skillRows(paths, catalogRoot, profileSkillRoot, settings, exclusions) : await extensionRows(paths, exclusions, (loaded.runtimeSettings.profile as { enabledExtensions?: string[] } | undefined)?.enabledExtensions, extensionIdentities)).map((row) => {
         const packageName = packageResources.find(({ path }) => row[2] === path || isWithin(row[2], path))?.packageName;
         const source = packageName ? `Package: ${packageName}` : (row[2].startsWith(join(resourceRoot, "skills")) ? "Shared" : row[2].includes("/profiles/") ? "Profile" : "Local");
         return [row[0], row[1], source, row[2]];
