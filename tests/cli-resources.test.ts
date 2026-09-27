@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { activeBuiltinTools, updatedBuiltinTools } from "../extensions/lib/builtin-tools.ts";
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
-import { findResource, skillRows, updatedExtensionSettings } from "../extensions/cli-resources.ts";
+import { extensionRows, findResource, skillRows, updatedExtensionSettings } from "../extensions/cli-resources.ts";
 import { packageExtensions } from "../extensions/lib/package-resources.ts";
 import { resolveRootAgentDir, rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
 
@@ -68,6 +68,18 @@ test("cloned profiles copy profile configuration and credentials without state",
     assert.equal(await readFile(join(target, "skills", "source-skill", "SKILL.md"), "utf8"), "---\nname: source-skill\n---\n");
     assert.equal(await readlink(join(target, "models.json")), join(root, "models.json"));
     for (const file of [join(target, "sessions", "session.jsonl"), join(target, "context-memory", "PROFILE.md"), join(target, "application-sessions.json"), join(target, "sequential-workflow.db")]) assert.equal(existsSync(file), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("extension rows support directory extensions with an explicit allowlist", async () => {
+  const root = await mkdtemp(join(tmpdir(), "extension-rows-test-"));
+  try {
+    const extensionDir = join(root, "extensions", "api-server");
+    await mkdir(extensionDir, { recursive: true });
+    await writeFile(join(extensionDir, "index.ts"), "export default () => {};\n");
+    assert.deepEqual(await extensionRows([join(root, "extensions")], [], ["api-server"]), [["api-server", "enabled", extensionDir]]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -224,7 +224,7 @@ export async function skillRows(paths: string[], sharedSkillRoot: string, profil
 
 type ExtensionIdentity = { name: string; aliases: string[] };
 
-async function extensionRows(paths: string[], exclusions: string[], enabledExtensions?: string[], identitiesByPath = new Map<string, ExtensionIdentity>()): Promise<Row[]> {
+export async function extensionRows(paths: string[], exclusions: string[], enabledExtensions?: string[], identitiesByPath = new Map<string, ExtensionIdentity>()): Promise<Row[]> {
   const rows: Row[] = [];
   const enabled = (identity: ExtensionIdentity, path: string) => !enabledExtensions || enabledExtensions.includes("*") || identity.aliases.some((name) => enabledExtensions.includes(name)) ? !isExcluded(path, exclusions) : false;
   for (const path of paths) {
@@ -237,16 +237,19 @@ async function extensionRows(paths: string[], exclusions: string[], enabledExten
     // A configured directory with index.ts/index.js is one extension. Its
     // sibling source/config files are implementation details, not extensions.
     if (existsSync(join(path, "index.ts")) || existsSync(join(path, "index.js"))) {
-      rows.push([basename(path), enabled(basename(path), path) ? "enabled" : "disabled", path]);
+      const identity = identitiesByPath.get(path) ?? { name: basename(path), aliases: [basename(path)] };
+      rows.push([identity.name, enabled(identity, path) ? "enabled" : "disabled", path]);
       continue;
     }
     for (const entry of await readdir(path, { withFileTypes: true })) {
       if (entry.isFile() && [".ts", ".js"].includes(extname(entry.name))) {
         const resourcePath = join(path, entry.name);
-        rows.push([basename(entry.name, extname(entry.name)), enabled(basename(entry.name, extname(entry.name)), resourcePath) ? "enabled" : "disabled", resourcePath]);
+        const identity = identitiesByPath.get(resourcePath) ?? { name: basename(entry.name, extname(entry.name)), aliases: [basename(entry.name, extname(entry.name))] };
+        rows.push([identity.name, enabled(identity, resourcePath) ? "enabled" : "disabled", resourcePath]);
       } else if (entry.isDirectory() && (existsSync(join(path, entry.name, "index.ts")) || existsSync(join(path, entry.name, "index.js")))) {
         const resourcePath = join(path, entry.name);
-        rows.push([entry.name, enabled(entry.name, resourcePath) ? "enabled" : "disabled", resourcePath]);
+        const identity = identitiesByPath.get(resourcePath) ?? { name: entry.name, aliases: [entry.name] };
+        rows.push([identity.name, enabled(identity, resourcePath) ? "enabled" : "disabled", resourcePath]);
       }
     }
   }
