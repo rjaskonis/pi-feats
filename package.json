@@ -29,6 +29,7 @@
     "scripts",
     "schemas",
     "skills",
+    "themes",
     "README.md",
     "LICENSE",
     "THIRD_PARTY_NOTICES.md",
@@ -105,6 +106,9 @@
     ],
     "skills": [
       "./skills"
+    ],
+    "themes": [
+      "./themes/*.json"
     ],
     "image": "https://raw.githubusercontent.com/rjaskonis/pi-feats/v0.1.4/assets/pi-feats-preview.png"
   },

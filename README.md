@@ -540,7 +540,11 @@ npm install
 npm run build:web
 ```
 
-The root `package.json` is the package manifest. Its `pi.extensions` field explicitly exports every extension; the package does not rely on directory auto-discovery.
+The root `package.json` is the package manifest. Its `pi.extensions` and `pi.themes` fields explicitly export every extension and theme; the package does not rely on directory auto-discovery.
+
+### Themes
+
+The package includes `legacy-dark`, which preserves Pi's pre-`bf8e4b95` dark palette. After updating or installing `pi-feats`, select it in `/settings` → **Theme**, or set `"theme": "legacy-dark"` in `<agent-dir>/settings.json` and run `/reload`.
 
 ## Security
 
@@ -565,6 +569,8 @@ pi-feats/
 │   ├── cli-resources.ts
 │   ├── profiles.ts
 │   └── sequential-workflow.ts
+├── themes/
+│   └── legacy-dark.json          # Pre-bf8e4b95 Pi dark palette
 └── README.md
 ```
 
