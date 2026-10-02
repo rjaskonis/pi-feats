@@ -7,6 +7,7 @@ import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { BUILTIN_TOOLS, activeBuiltinTools, updatedBuiltinTools } from "./lib/builtin-tools.ts";
 import { packageExtensions, type InstalledPackage } from "./lib/package-resources.ts";
+import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
 
 type ListKind = "tools" | "skills" | "extensions";
 type Row = [string, string, string];
@@ -520,7 +521,8 @@ export default async function (pi: ExtensionAPI) {
     default: false,
   });
 
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
+  const args = withoutTuiModeArgs(rawArgs);
   // Remote commands must reach the profiles extension before this extension
   // creates its local --no-session helper process. The remote Pi will process
   // resource commands on its own host/runtime.
@@ -539,7 +541,7 @@ export default async function (pi: ExtensionAPI) {
     const profile = requestedProfile();
     const root = process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
     const target = profile ? join(root, "profiles", profile) : process.env.PI_CODING_AGENT_DIR;
-    const child = spawn(process.execPath, [process.argv[1], "--no-session", ...args], {
+    const child = spawn(process.execPath, [process.argv[1], "--no-session", ...rawArgs], {
       stdio: "inherit",
       env: { ...process.env, PI_CLI_RESOURCES: "1", PI_CODING_AGENT_DIR: target, PI_PROFILE_ROOT: root, ...(profile ? { PI_ACTIVE_PROFILE: profile } : {}) },
     });

@@ -10,6 +10,7 @@ import { ensureNonoAvailable, ensureProfileSandbox, isSandboxEnabled, migrateLeg
 import { profileEnvironment } from "./lib/profile-env.ts";
 import { packageExtensions } from "./lib/package-resources.ts";
 import { handleRemoteCli, REMOTE_COMMAND_NAMES } from "./lib/remote-hosts.ts";
+import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
 
 type ProfilePolicy = {
   enabledTools?: string[];
@@ -330,11 +331,11 @@ function commandArgs(raw: string[]): string[] {
   const result: string[] = [];
   for (let index = 0; index < raw.length; index += 1) {
     const value = raw[index];
-    if (value === "--extension" || value === "--session-dir") { index += 1; continue; }
-    if (value.startsWith("--extension=") || value.startsWith("--session-dir=")) continue;
+    if (value === "--extension" || value === "--session-dir" || value === "--tui-mode") { index += 1; continue; }
+    if (value.startsWith("--extension=") || value.startsWith("--session-dir=") || value.startsWith("--tui-mode=")) continue;
     result.push(value);
   }
-  return result;
+  return withoutTuiModeArgs(result);
 }
 
 function extractResumeCommand(args: string[]) {

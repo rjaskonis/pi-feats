@@ -241,8 +241,8 @@ export function profileSshCommandArgs(raw: string[]): string[] {
   const args: string[] = [];
   for (let index = 0; index < raw.length; index += 1) {
     const value = raw[index];
-    if (value === "--extension" || value === "--session-dir") { index += 1; continue; }
-    if (value.startsWith("--extension=") || value.startsWith("--session-dir=")) continue;
+    if (value === "--extension" || value === "--session-dir" || value === "--tui-mode") { index += 1; continue; }
+    if (value.startsWith("--extension=") || value.startsWith("--session-dir=") || value.startsWith("--tui-mode=")) continue;
     args.push(value);
   }
   return args;

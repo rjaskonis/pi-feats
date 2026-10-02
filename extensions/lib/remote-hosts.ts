@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline/promises";
+import { isPiFeatsNonInteractiveCli, withRegularTuiMode } from "./cli-tui-mode.ts";
 
 export const REMOTE_COMMAND_NAMES = ["remote", "add", "remove", "delete", "list"] as const;
 
@@ -367,11 +368,12 @@ async function connectRemote(root: string, name: string, args: string[]) {
     const exists = await runSsh(root, remote, password, profileExistsCommand(remote, profile));
     if (exists.code !== 0) fail(`profile '${profile}' does not exist on remote '${name}'.`);
   }
-  const command = args[0] === "bash"
-    ? runtimeBashCommand(remote, args.slice(1))
-    : profile && profileResourceCommands.has(args[2] ?? "")
-      ? profileRuntimeCommand(remote, profile, args.slice(2))
-      : runtimeCommand(remote, args);
+  const remoteArgs = isPiFeatsNonInteractiveCli(args) ? withRegularTuiMode(args) : args;
+  const command = remoteArgs[0] === "bash"
+    ? runtimeBashCommand(remote, remoteArgs.slice(1))
+    : profile && profileResourceCommands.has(remoteArgs[2] ?? "")
+      ? profileRuntimeCommand(remote, profile, remoteArgs.slice(2))
+      : runtimeCommand(remote, remoteArgs);
   const result = await runSsh(root, remote, password, command, { interactive: true });
   process.exit(result.code);
 }

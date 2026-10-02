@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { PulseStore } from "./store.ts";
 import { ApplicationStore } from "../api-server/application-store.ts";
+import { withoutTuiModeArgs } from "../lib/cli-tui-mode.ts";
 
 const root = () => process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const dbPath = () => join(root(), "pulse.db");
@@ -140,7 +141,7 @@ async function tick() {
 }
 export async function handlePulseCli(args: string[], selectedProfile?: string): Promise<boolean> { if (args[0] !== "pulse") return false; const profileIndex = args.indexOf("--profile"); const profile = selectedProfile ?? (profileIndex >= 0 ? args[profileIndex + 1] : undefined); if (args[1] === "tick" && process.env.PI_PULSE_TICK === "1") { await tick(); return true; } switch (args[1]) { case "start": await start(); break; case "stop": await stop(); break; case "restart": await restart(); break; case "status": await status(); break; case "list": table(profile); break; case "recover": { const recovered = new PulseStore(dbPath()).recoverExpiredClaims(profile); console.log(`Recovered ${recovered} expired Pulse claim(s).`); break; } case "enable": case "disable": { const name = args[2]; if (!name) throw new Error("Usage: pi pulse enable|disable <name>"); new PulseStore(dbPath()).setEnabled(name, args[1] === "enable", profile); console.log(`Pulse '${name}' ${args[1]}d.`); break; } default: console.error("Usage: pi pulse start | stop | restart | status | list | recover | enable <name> | disable <name>"); process.exitCode = 1; } return true; }
 export default async function (pi: ExtensionAPI) {
-  if (await handlePulseCli(process.argv.slice(2))) process.exit();
+  if (await handlePulseCli(withoutTuiModeArgs(process.argv.slice(2)))) process.exit();
   pi.on("before_agent_start", async (event) => ({ systemPrompt: `${event.systemPrompt}\n\nWhen the user asks to schedule, automate, remind, run future work, or manage an existing schedule, use the schedule tool. Do not ask for a thread or session ID: creation binds the schedule to this conversation automatically.` }));
   pi.registerTool({
     name: "schedule",

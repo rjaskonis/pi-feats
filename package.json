@@ -90,6 +90,7 @@
   },
   "pi": {
     "extensions": [
+      "./extensions/cli-tui-mode.ts",
       "./extensions/api-server",
       "./extensions/browser-harness",
       "./extensions/cli-resources.ts",

@@ -342,6 +342,8 @@ Context Memory keeps compact, durable facts separate from a session transcript a
 
 The following commands are the operational entry points added by `pi-feats`. Commands can target the default profile, a named local profile, or a remote host.
 
+Finite `pi-feats` CLI commands run with Pi's regular TUI mode so their output remains in the terminal scrollback. This does not change profile settings or affect interactive launches; pass `--tui-mode fullscreen` explicitly to override it for one command.
+
 ### Profiles
 
 ```bash
