@@ -2,7 +2,6 @@ import { chmod, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 const agentDir = () => process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const modelsPath = () => join(agentDir(), "models.json");
@@ -22,11 +21,14 @@ export async function writeModelsConfig(content: unknown) {
   const path = modelsPath();
   const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
   try {
+    let parsed: unknown;
+    try { parsed = JSON.parse(content); }
+    catch (error) { throw new Error(`Invalid models.json: ${error instanceof Error ? error.message : String(error)}`); }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Invalid models.json: the root value must be an object.");
+    const providers = (parsed as { providers?: unknown }).providers;
+    if (!providers || typeof providers !== "object" || Array.isArray(providers)) throw new Error("Invalid models.json: providers must be an object.");
     await writeFile(temporary, content.endsWith("\n") ? content : `${content}\n`, { encoding: "utf8", mode: 0o600 });
     await chmod(temporary, 0o600);
-    const runtime = await ModelRuntime.create({ modelsPath: temporary, refreshOnCreate: false });
-    const error = runtime.getError();
-    if (error) throw new Error(error.replace(/\n\nFile: .*$/, ""));
     await rename(temporary, path);
     await chmod(path, 0o600);
     return readModelsConfig();
