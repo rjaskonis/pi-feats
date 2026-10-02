@@ -1,6 +1,4 @@
 import { SessionManager, type ExtensionAPI, type SessionInfo } from "@earendil-works/pi-coding-agent";
-import { Box, render, Text } from "ink";
-import React from "react";
 import { existsSync } from "node:fs";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
@@ -65,61 +63,29 @@ const actionFromArgs = (args: string[]): ParsedAction | undefined => {
 const clean = (value: string) => value.replaceAll("\n", " ").replaceAll("\t", " ");
 const clip = (value: string, width: number) => value.length <= width ? value : `${value.slice(0, Math.max(0, width - 1))}…`;
 
-function ResourceTable({ title, headers, rows, highlightStatus = false }: { title: string; headers: Row; rows: Row[]; highlightStatus?: boolean }) {
-  const terminalWidth = Math.max(80, process.stdout.columns ?? 80);
-  const available = terminalWidth - 10;
-  const widths: [number, number, number] = [
-    Math.max(12, Math.floor(available * 0.23)),
-    Math.max(12, Math.floor(available * 0.18)),
-    0,
-  ];
+function ResourceTable({ title, headers, rows }: { title: string; headers: Row; rows: Row[]; highlightStatus?: boolean }): string {
+  const available = Math.max(80, process.stdout.columns ?? 80) - 10;
+  const widths: [number, number, number] = [Math.max(12, Math.floor(available * 0.23)), Math.max(12, Math.floor(available * 0.18)), 0];
   widths[2] = available - widths[0] - widths[1];
   const cell = (value: string, width: number) => clip(clean(value), width).padEnd(width);
   const line = `┼${"─".repeat(widths[0] + 2)}┼${"─".repeat(widths[1] + 2)}┼${"─".repeat(widths[2] + 2)}┼`;
-  const top = line.replaceAll("┼", "┬").replace(/^┬/, "┌").replace(/┬$/, "┐");
-  const bottom = line.replaceAll("┼", "┴").replace(/^┴/, "└").replace(/┴$/, "┘");
+  const top = line.replaceAll("┼", "┬").replace(/^┬/, "┌").replace(/┬$/, "┐"), bottom = line.replaceAll("┼", "┴").replace(/^┴/, "└").replace(/┴$/, "┘");
   const row = (values: Row) => `│ ${cell(values[0], widths[0])} │ ${cell(values[1], widths[1])} │ ${cell(values[2], widths[2])} │`;
-
-  const renderedRow = (values: Row, index: number) => {
-    const statusColor = values[1] === "enabled" ? "green" : "#f5c2d7";
-    return React.createElement(
-      Box,
-      { flexDirection: "row", key: `${values.join("\0")}-${index}` },
-      React.createElement(Text, { color: "gray" }, "│ "),
-      React.createElement(Text, { color: "white" }, cell(values[0], widths[0])),
-      React.createElement(Text, { color: "gray" }, " │ "),
-      React.createElement(Text, { color: highlightStatus ? statusColor : "white" }, cell(values[1], widths[1])),
-      React.createElement(Text, { color: "gray" }, " │ "),
-      React.createElement(Text, { color: "white" }, cell(values[2], widths[2])),
-      React.createElement(Text, { color: "gray" }, " │"),
-    );
-  };
-
-  return React.createElement(
-    Box,
-    { flexDirection: "column" },
-    React.createElement(Text, { color: "cyan", bold: true }, title),
-    React.createElement(Text, { color: "gray" }, top),
-    React.createElement(Text, { color: "cyan", bold: true }, row(headers)),
-    React.createElement(Text, { color: "gray" }, line),
-    ...rows.map(renderedRow),
-    React.createElement(Text, { color: "gray" }, bottom),
-  );
+  return [title, top, row(headers), line, ...rows.map(row), bottom].join("\n");
 }
 
 type SourceRow = [string, string, string, string];
-function SourceTable({ title, detailHeader, rows }: { title: string; detailHeader: string; rows: SourceRow[] }) {
+function SourceTable({ title, detailHeader, rows }: { title: string; detailHeader: string; rows: SourceRow[] }): string {
   const available = Math.max(80, process.stdout.columns ?? 80) - 13, widths: [number, number, number, number] = [Math.max(14, Math.floor(available * .20)), 10, Math.max(18, Math.floor(available * .27)), 0];
   widths[3] = available - widths[0] - widths[1] - widths[2];
   const cell = (value: string, width: number) => clip(clean(value), width).padEnd(width);
   const line = `┼${"─".repeat(widths[0] + 2)}┼${"─".repeat(widths[1] + 2)}┼${"─".repeat(widths[2] + 2)}┼${"─".repeat(widths[3] + 2)}┼`;
   const top = line.replaceAll("┼", "┬").replace(/^┬/, "┌").replace(/┬$/, "┐"), bottom = line.replaceAll("┼", "┴").replace(/^┴/, "└").replace(/┴$/, "┘");
   const row = (values: SourceRow) => `│ ${cell(values[0], widths[0])} │ ${cell(values[1], widths[1])} │ ${cell(values[2], widths[2])} │ ${cell(values[3], widths[3])} │`;
-  const renderedRow = (values: SourceRow, index: number) => React.createElement(Box, { flexDirection: "row", key: `${values.join("\0")}-${index}` }, React.createElement(Text, { color: "gray" }, "│ "), React.createElement(Text, { color: "white" }, cell(values[0], widths[0])), React.createElement(Text, { color: "gray" }, " │ "), React.createElement(Text, { color: values[1] === "enabled" ? "green" : "#f5c2d7" }, cell(values[1], widths[1])), React.createElement(Text, { color: "gray" }, " │ "), React.createElement(Text, { color: "white" }, cell(values[2], widths[2])), React.createElement(Text, { color: "gray" }, " │ "), React.createElement(Text, { color: "white" }, cell(values[3], widths[3])), React.createElement(Text, { color: "gray" }, " │"));
-  return React.createElement(Box, { flexDirection: "column" }, React.createElement(Text, { color: "cyan", bold: true }, title), React.createElement(Text, { color: "gray" }, top), React.createElement(Text, { color: "cyan", bold: true }, row(["NAME", "STATUS", "SOURCE", detailHeader])), React.createElement(Text, { color: "gray" }, line), ...rows.map(renderedRow), React.createElement(Text, { color: "gray" }, bottom));
+  return [title, top, row(["NAME", "STATUS", "SOURCE", detailHeader]), line, ...rows.map(row), bottom].join("\n");
 }
 
-function SessionTable({ sessions }: { sessions: SessionInfo[] }) {
+function SessionTable({ sessions }: { sessions: SessionInfo[] }): string {
   const terminalWidth = Math.max(80, process.stdout.columns ?? 80);
   const available = terminalWidth - 13;
   const widths = {
@@ -140,20 +106,7 @@ function SessionTable({ sessions }: { sessions: SessionInfo[] }) {
     hour12: false,
   }).format(date);
 
-  return React.createElement(
-    Box,
-    { flexDirection: "column" },
-    React.createElement(Text, { color: "cyan", bold: true }, "SESSIONS"),
-    React.createElement(Text, { color: "gray" }, top),
-    React.createElement(Text, { color: "cyan", bold: true }, row(["ID", "SESSION", "LAST ACTIVITY", "PATH"])),
-    React.createElement(Text, { color: "gray" }, line),
-    ...sessions.map((session) => React.createElement(
-      Text,
-      { color: "white", key: session.path },
-      row([session.id, session.name ?? session.firstMessage, formatActivity(session.modified), session.path]),
-    )),
-    React.createElement(Text, { color: "gray" }, bottom),
-  );
+  return ["SESSIONS", top, row(["ID", "SESSION", "LAST ACTIVITY", "PATH"]), line, ...sessions.map((session) => row([session.id, session.name ?? session.firstMessage, formatActivity(session.modified), session.path])), bottom].join("\n");
 }
 
 function requestedProfile(): string | undefined {
@@ -333,10 +286,8 @@ async function applyPackageAction(action: PackageAction) {
   console.log(`Package "${name}" ${action.action === "enable" ? "enabled" : "disabled"} in ${join(agentDir, "settings.json")}. Use /reload to apply.`);
 }
 
-async function renderAndClose(element: React.ReactElement) {
-  const app = render(element, { stdout: process.stdout, stdin: process.stdin, exitOnCtrlC: false, patchConsole: false });
-  await new Promise((resolveRender) => setTimeout(resolveRender, 25));
-  app.unmount();
+async function writeTable(table: string) {
+  await new Promise<void>((resolveWrite, reject) => process.stdout.write(`${table}\n`, (error) => error ? reject(error) : resolveWrite()));
 }
 
 function setExclusion(entries: string[], resourcePath: string, disable: boolean) {
@@ -594,10 +545,10 @@ export default async function (pi: ExtensionAPI) {
     if (sessionRequested) {
       const sessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
       const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
-      await renderAndClose(React.createElement(SessionTable, { sessions }));
+      await writeTable(SessionTable({ sessions }));
     } else if (packageRequested) {
       const { resourceRoot, runtimeSettings } = await readSettings();
-      await renderAndClose(React.createElement(ResourceTable, { title: "PACKAGES", headers: ["NAME", "STATUS", "VERSION / DESCRIPTION"], rows: await packageRows(resourceRoot, runtimeSettings), highlightStatus: true }));
+      await writeTable(ResourceTable({ title: "PACKAGES", headers: ["NAME", "STATUS", "VERSION / DESCRIPTION"], rows: await packageRows(resourceRoot, runtimeSettings), highlightStatus: true }));
     } else if (kind === "tools") {
       const active = new Set(pi.getActiveTools());
       const { resourceRoot, runtimeSettings } = await readSettings();
@@ -605,7 +556,7 @@ export default async function (pi: ExtensionAPI) {
       const rows: SourceRow[] = pi.getAllTools()
         .map((tool) => [tool.name, active.has(tool.name) ? "enabled" : "disabled", (BUILTIN_TOOLS as readonly string[]).includes(tool.name) ? "Built-in" : sources.has(tool.name) ? `npm: ${sources.get(tool.name)}` : "Extension", tool.description] as SourceRow)
         .sort((a, b) => a[0].localeCompare(b[0]));
-      await renderAndClose(React.createElement(SourceTable, { title: "TOOLS", detailHeader: "DESCRIPTION", rows }));
+      await writeTable(SourceTable({ title: "TOOLS", detailHeader: "DESCRIPTION", rows }));
     } else {
       const loaded = await readSettings();
       const resourceRoot = loaded.resourceRoot;
@@ -630,7 +581,7 @@ export default async function (pi: ExtensionAPI) {
         const source = packageName ? `Package: ${packageName}` : (row[2].startsWith(join(resourceRoot, "skills")) ? "Shared" : row[2].includes("/profiles/") ? "Profile" : "Local");
         return [row[0], row[1], source, row[2]];
       });
-      await renderAndClose(React.createElement(SourceTable, { title: kind.toUpperCase(), detailHeader: "PATH", rows }));
+      await writeTable(SourceTable({ title: kind.toUpperCase(), detailHeader: "PATH", rows }));
     }
     // This command always runs in an ephemeral child process.
     process.exit(0);
