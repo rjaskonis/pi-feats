@@ -49,6 +49,7 @@
     "test:extensions": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.85.1",
     "@codemirror/lang-javascript": "^6.2.5",
     "@codemirror/lang-json": "^6.0.2",
     "@codemirror/lang-markdown": "^6.5.2",
