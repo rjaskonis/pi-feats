@@ -503,6 +503,13 @@ export default async function (pi: ExtensionAPI) {
     process.exit(code);
   }
 
+  if (sessionRequested) {
+    const sessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
+    const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
+    await writeTable(SessionTable({ sessions }));
+    process.exit(0);
+  }
+
   if (sessionRename) {
     try {
       if (!sessionRename.name) throw new Error("Session name cannot be empty.");
@@ -542,11 +549,7 @@ export default async function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async () => {
-    if (sessionRequested) {
-      const sessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
-      const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
-      await writeTable(SessionTable({ sessions }));
-    } else if (packageRequested) {
+    if (packageRequested) {
       const { resourceRoot, runtimeSettings } = await readSettings();
       await writeTable(ResourceTable({ title: "PACKAGES", headers: ["NAME", "STATUS", "VERSION / DESCRIPTION"], rows: await packageRows(resourceRoot, runtimeSettings), highlightStatus: true }));
     } else if (kind === "tools") {
