@@ -93,6 +93,18 @@ function resourceKind(value: string): ResourceKind {
 }
 function skillSourceIdentifier(value: string): string { return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^[^a-z]+/, "").replace(/^-+|-+$/g, "").slice(0, 64).replace(/-+$/g, ""); }
 
+function activityFromAgentEvent(event: Record<string, any>): Record<string, unknown> | undefined {
+  if (event.type === "tool_execution_start") return { id: String(event.toolCallId), kind: "tool", status: "started", name: String(event.toolName), parentToolCallId: event.parentToolCallId, summary: `Running ${String(event.toolName)}…` };
+  if (event.type === "tool_execution_update") return { id: String(event.toolCallId), kind: "tool", status: "running", name: String(event.toolName), parentToolCallId: event.parentToolCallId, summary: `Running ${String(event.toolName)}…` };
+  if (event.type === "tool_execution_end") return { id: String(event.toolCallId), kind: "tool", status: event.isError ? "failed" : "completed", name: String(event.toolName), parentToolCallId: event.parentToolCallId, summary: event.isError ? `${String(event.toolName)} failed.` : `${String(event.toolName)} completed.` };
+  if (event.type === "agent_start") return { id: "agent", kind: "agent", status: "running", name: "Pi", summary: "Pi is working…" };
+  if (event.type === "agent_settled") return { id: "agent", kind: "agent", status: "completed", name: "Pi", summary: "Pi completed its work." };
+  const update = event.type === "message_update" ? event.assistantMessageEvent as Record<string, unknown> | undefined : undefined;
+  if (update?.type === "thinking_start" || update?.type === "thinking_delta") return { id: `thinking-${String(update.contentIndex ?? 0)}`, kind: "thinking", status: "running", name: "Thinking", summary: "Pi is thinking…" };
+  if (update?.type === "thinking_end") return { id: `thinking-${String(update.contentIndex ?? 0)}`, kind: "thinking", status: "completed", name: "Thinking", summary: "Pi finished thinking." };
+  return undefined;
+}
+
 function textFromMessage(message: unknown): string {
   const content = (message as { content?: unknown })?.content;
   if (typeof content === "string") return content;
@@ -430,7 +442,7 @@ class ApiServer {
     return isSandboxEnabled(this.profileDirectory(profile), profile === "default");
   }
 
-  private async runSandboxedPrompt(profile: string, id: string, message: string, onData?: (text: string) => void, handoff?: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<string> {
+  private async runSandboxedPrompt(profile: string, id: string, message: string, onData?: (text: string) => void, handoff?: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }, onEvent?: (event: Record<string, unknown>) => void): Promise<string> {
     const key = `${profile}:${id}`;
     if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
     this.sandboxBusy.add(key);
@@ -444,15 +456,27 @@ class ApiServer {
       const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolveRun, reject) => {
         // Supply the native file path, not only its ID. The session manager
         // otherwise scopes an ID lookup to the API worker CWD (`/` in Docker).
-        const child = spawn(process.execPath, [process.argv[1], "profile", profile, "--session", session.path, "--print", message], {
+        const child = spawn(process.execPath, [process.argv[1], "profile", profile, "--session", session.path, ...(onEvent ? ["--mode", "json"] : ["--print"]), message], {
           // The sandboxed agent sees its profile directory as CWD, never the
           // HTTP server's CWD or the caller's project directory.
-          cwd: this.profileDirectory(profile),
-          env: workerEnv,
-          stdio: ["ignore", "pipe", "pipe"],
+          cwd: this.profileDirectory(profile), env: workerEnv, stdio: ["ignore", "pipe", "pipe"],
         });
-        let stdout = ""; let stderr = "";
-        child.stdout.on("data", (chunk) => { const text = String(chunk); stdout += text; onData?.(text); });
+        let stdout = ""; let stderr = ""; let jsonBuffer = ""; let finalResponse = "";
+        child.stdout.on("data", (chunk) => {
+          const text = String(chunk);
+          if (!onEvent) { stdout += text; onData?.(text); return; }
+          jsonBuffer += text;
+          const lines = jsonBuffer.split("\n"); jsonBuffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const event = JSON.parse(line) as Record<string, unknown>; onEvent(event);
+              if (event.type === "message_update") { const update = event.assistantMessageEvent as Record<string, unknown> | undefined; if (update?.type === "text_delta" && typeof update.delta === "string") onData?.(update.delta); }
+              if (event.type === "message_end" && (event.message as Record<string, unknown> | undefined)?.role === "assistant") finalResponse = textFromMessage(event.message);
+            } catch { stderr += `Invalid JSON event from sandboxed Pi: ${line}\n`; }
+          }
+          stdout = finalResponse;
+        });
         child.stderr.on("data", (chunk) => { stderr += String(chunk); });
         child.once("error", reject);
         child.once("exit", (code) => resolveRun({ stdout, stderr, code: code ?? 1 }));
@@ -493,7 +517,7 @@ class ApiServer {
       reply.raw.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
       reply.raw.write(`event: session\ndata: ${JSON.stringify({ profile, sessionId: id })}\n\n`);
       try {
-        const response = await this.runSandboxedPrompt(profile, id, message, (text) => reply.raw.write(`event: token\ndata: ${JSON.stringify({ text })}\n\n`), undefined, applicationContext);
+        const response = await this.runSandboxedPrompt(profile, id, message, (text) => reply.raw.write(`event: token\ndata: ${JSON.stringify({ text })}\n\n`), undefined, applicationContext, (event) => { const activity = activityFromAgentEvent(event); if (activity) reply.raw.write(`event: activity\ndata: ${JSON.stringify(activity)}\n\n`); });
         reply.raw.write(`event: done\ndata: ${JSON.stringify({ response, sessionId: id, profile })}\n\n`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -521,9 +545,10 @@ class ApiServer {
         });
         response.write(`event: session\ndata: ${JSON.stringify({ profile, sessionId: id })}\n\n`);
         unsubscribe = handle.session.subscribe((event) => {
-          if (!closed && event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-            response.write(`event: token\ndata: ${JSON.stringify({ text: event.assistantMessageEvent.delta })}\n\n`);
-          }
+          if (closed) return;
+          const activity = activityFromAgentEvent(event as unknown as Record<string, any>);
+          if (activity) response.write(`event: activity\ndata: ${JSON.stringify(activity)}\n\n`);
+          if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") response.write(`event: token\ndata: ${JSON.stringify({ text: event.assistantMessageEvent.delta })}\n\n`);
         });
         response.once("close", () => { closed = true; void handle.session.abort(); });
       }
