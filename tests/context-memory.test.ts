@@ -50,6 +50,21 @@ test("identity mode has no fallback to PROFILE.md", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("direct Context Memory is transient and bypasses the configured personal source", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-context-memory-"));
+  try {
+    const profile = join(root, "profiles", "support");
+    await mkdir(join(profile, "context-memory"), { recursive: true });
+    await writeFile(join(profile, "settings.json"), JSON.stringify({ profile: { contextMemory: { mode: "file", target: "profile" } } }));
+    await writeFile(join(profile, "context-memory", "OPERATIONAL.md"), "Operational fact");
+    await writeFile(join(profile, "context-memory", "PROFILE.md"), "Persistent profile fact");
+    const memory = await resolveContextMemory(root, profile, { profile: "support", directContextMemory: "Request-only fact" });
+    assert.equal(memory.operational, "Operational fact");
+    assert.equal(memory.personal, "Request-only fact");
+    assert.equal(await readFile(join(profile, "context-memory", "PROFILE.md"), "utf8"), "Persistent profile fact");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("updates are isolated to the current identity", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-context-memory-"));
   try {

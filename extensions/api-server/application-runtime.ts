@@ -8,9 +8,10 @@ import { inspect } from "node:util";
 import { ApplicationLogStore } from "./application-log-store.ts";
 
 type RecordValue = Record<string, any>;
-export type Settings = { responseMode: "ack" | "result"; transformHandlers?: string[]; inboundHandler: string; outboundHandler?: string; defaultProfile?: string | null; messageCoalescing?: { enabled?: boolean; silenceDebounceSeconds?: number } };
+export type Settings = { responseMode: "ack" | "result"; transformHandlers?: string[]; inboundHandler: string; outboundHandler?: string; defaultProfile?: string | null; directMode?: { enabled?: boolean }; messageCoalescing?: { enabled?: boolean; silenceDebounceSeconds?: number } };
+export type DirectRequest = { identityKey: string; message: string; sessionId?: string; contextMemory?: string; responseWebhookUrl?: string; profile: string; sessionPrefix: string };
 type Handler = (payload: RecordValue, headers?: RecordValue | null, query?: RecordValue | null, context?: RecordValue | null, state?: RecordValue | null, env?: Record<string, string | undefined>) => Promise<any> | any;
-type ApplicationApi = { agentSettings(): Promise<Record<string, unknown>>; listSessions(profile: string): Promise<Array<Record<string, unknown>>>; createSession(profile: string, input: unknown): Promise<Record<string, unknown>>; getSessionConversation(profile: string, sessionId: string): Promise<Record<string, unknown>>; complete(profile: string, prompt: string): Promise<string>; prompt(profile: string, sessionId: string, message: string, handoff?: string, applicationContext?: { application: string; identityKey: string }): Promise<{ profile: string; sessionId: string; response: string }>; getIdentityMapping(application: string, identityKey: string): Promise<{ profile: string | null; sessionMode: "fixed" | "automatic" | "ignore"; sessionPrefix: string | null } | undefined>; automaticApplicationSessionPrefix(application: string, identityKey: string): Promise<string>;  getApplicationSession(application: string, profile: string, prefix: string): Promise<{ sessionId: string } | undefined>; getActiveApplicationSession(application: string, profile: string, prefix: string): Promise<{ sessionId: string } | undefined>; nextApplicationSessionId(application: string, profile: string, prefix: string): Promise<string>; recordApplicationSession(application: string, profile: string, prefix: string, sessionId: string, rollover: boolean): Promise<void>; touchApplicationSession(application: string, profile: string, prefix: string, sessionId: string, from?: string): Promise<void>;  retargetPulseThreadSessions(profile: string, fromSessionId: string, toSessionId: string): Promise<void>; handlerEnvironment(profile: string): Promise<Record<string, string | undefined>> };
+type ApplicationApi = { agentSettings(): Promise<Record<string, unknown>>; listSessions(profile: string): Promise<Array<Record<string, unknown>>>; createSession(profile: string, input: unknown): Promise<Record<string, unknown>>; getSessionConversation(profile: string, sessionId: string): Promise<Record<string, unknown>>; complete(profile: string, prompt: string): Promise<string>; prompt(profile: string, sessionId: string, message: string, handoff?: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<{ profile: string; sessionId: string; response: string }>; getIdentityMapping(application: string, identityKey: string): Promise<{ profile: string | null; sessionMode: "fixed" | "automatic" | "ignore"; sessionPrefix: string | null } | undefined>; automaticApplicationSessionPrefix(application: string, identityKey: string): Promise<string>;  getApplicationSession(application: string, profile: string, prefix: string): Promise<{ sessionId: string } | undefined>; getActiveApplicationSession(application: string, profile: string, prefix: string): Promise<{ sessionId: string } | undefined>; nextApplicationSessionId(application: string, profile: string, prefix: string): Promise<string>; recordApplicationSession(application: string, profile: string, prefix: string, sessionId: string, rollover: boolean): Promise<void>; touchApplicationSession(application: string, profile: string, prefix: string, sessionId: string, from?: string): Promise<void>;  retargetPulseThreadSessions(profile: string, fromSessionId: string, toSessionId: string): Promise<void>; handlerEnvironment(profile: string): Promise<Record<string, string | undefined>> };
 type Handoff = { sourceSessionId: string | null; summary: string; createdAt: string; targetCreatedAt: string };
 type WorkingSession = { sessionId: string; updatedAt: string; reason: "message" | "rollover" };
 type CoalescedEntry = { call: ReturnType<ApplicationLogStore["start"]>; stage: ReturnType<ApplicationLogStore["stage"]>; message: string; state: RecordValue; version: number; dispatch: (message: string, state: RecordValue) => Promise<unknown>; resolve: (output: unknown) => void; reject: (error: unknown) => void };
@@ -243,7 +244,63 @@ export class ApplicationRuntime {
     this.coalescingBuffers.clear();
   }
 
-  async process(payload: unknown, headers: RecordValue, query: RecordValue): Promise<unknown> {
+  isDirectRequest(payload: unknown): boolean {
+    return this.settings.directMode?.enabled !== false && Object.prototype.hasOwnProperty.call(asRecord(payload), "identityKey");
+  }
+
+  async prepareDirectRequest(payload: unknown): Promise<DirectRequest> {
+    const body = asRecord(payload);
+    const identityKey = typeof body.identityKey === "string" ? body.identityKey.trim() : "";
+    const message = typeof body.message === "string" ? body.message.trim() : "";
+    if (!identityKey) throw Object.assign(new Error("identityKey must be a non-empty string for a Direct Mode request."), { status: 400 });
+    if (!message) throw Object.assign(new Error("message must be a non-empty string for a Direct Mode request."), { status: 400 });
+    const sessionId = body.sessionId;
+    if (sessionId !== undefined && (typeof sessionId !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(sessionId))) throw Object.assign(new Error("Invalid sessionId."), { status: 400 });
+    const contextMemory = body.contextMemory;
+    if (contextMemory !== undefined && typeof contextMemory !== "string") throw Object.assign(new Error("contextMemory must be a string."), { status: 400 });
+    if (typeof contextMemory === "string" && Array.from(contextMemory.trim()).length > 1375) throw Object.assign(new Error("contextMemory exceeds its 1375-character limit."), { status: 413 });
+    const responseWebhookUrl = body.responseWebhookUrl;
+    if (this.settings.responseMode === "ack") {
+      if (typeof responseWebhookUrl !== "string" || !responseWebhookUrl.trim()) throw Object.assign(new Error("responseWebhookUrl is required for Direct Mode requests when Response Mode is ack."), { status: 400 });
+      try { const url = new URL(responseWebhookUrl); if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error(); } catch { throw Object.assign(new Error("responseWebhookUrl must be a valid HTTP or HTTPS URL."), { status: 400 }); }
+    }
+    const mapped = await this.api.getIdentityMapping(this.application.slug, identityKey);
+    if (!mapped) throw Object.assign(new Error("No Identity Key mapping was found for this Application."), { status: 422 });
+    if (mapped.sessionMode === "ignore") throw Object.assign(new Error("The Identity Key mapping is configured to ignore requests."), { status: 422 });
+    const profile = mapped.profile ?? undefined;
+    const sessionPrefix = mapped.sessionMode === "automatic" ? await this.api.automaticApplicationSessionPrefix(this.application.slug, identityKey) : mapped.sessionPrefix;
+    if (!profile || !sessionPrefix) throw Object.assign(new Error("The Identity Key mapping has no Application route."), { status: 422 });
+    return { identityKey, message, ...(typeof sessionId === "string" ? { sessionId } : {}), ...(typeof contextMemory === "string" ? { contextMemory } : {}), ...(this.settings.responseMode === "ack" && typeof responseWebhookUrl === "string" ? { responseWebhookUrl: responseWebhookUrl.trim() } : {}), profile, sessionPrefix };
+  }
+
+  private async resolveDirectSession(request: DirectRequest): Promise<string> {
+    if (!request.sessionId) return this.resolveSession(request.profile, request.sessionPrefix);
+    return this.withQueue(`${this.application.slug}:${request.profile}:${request.sessionPrefix}:direct:${request.sessionId}`, async () => {
+      const exists = (await this.api.listSessions(request.profile)).some((session) => session.id === request.sessionId);
+      if (!exists) await this.api.createSession(request.profile, { id: request.sessionId });
+      await this.api.recordApplicationSession(this.application.slug, request.profile, request.sessionPrefix, request.sessionId, false);
+      return request.sessionId;
+    });
+  }
+
+  private async processDirect(payload: unknown, headers: RecordValue, query: RecordValue, prepared?: DirectRequest): Promise<unknown> {
+    const request = prepared ?? await this.prepareDirectRequest(payload);
+    const call = this.logs.start(payload, headers); let active: any;
+    const context = { application: this.application, settings: await this.api.agentSettings(), request: { id: call.id, headers, query }, log: { info: (...values: unknown[]) => active?.stdout.push(values.map(String).join(" ")), error: (...values: unknown[]) => active?.stderr.push(values.map(String).join(" ")) } };
+    const run = async (type: string, label: string, input: unknown, operation: () => Promise<any>) => { active = this.logs.stage(call, type, label, input); try { const output = await operation(); this.logs.complete(call, active, output); return output; } catch (error) { this.logs.fail(call, active, error); throw error; } finally { active = undefined; } };
+    try {
+      const sessionId = await this.resolveDirectSession(request);
+      const result = await run("pi-agent", "Pi agent (Direct Mode)", { profile: request.profile, sessionId, message: request.message }, () => this.api.prompt(request.profile, sessionId, request.message, undefined, { application: this.application.slug, identityKey: request.identityKey, ...(request.contextMemory !== undefined ? { directContextMemory: request.contextMemory } : {}) }));
+      await this.setWorkingSession(request.profile, request.sessionPrefix, sessionId, "message");
+      await this.api.touchApplicationSession(this.application.slug, request.profile, request.sessionPrefix, sessionId, request.identityKey);
+      const output = { ...result, direct: true };
+      this.logs.finish(call, output);
+      return output;
+    } catch (error) { if (call.status !== "error") this.logs.fail(call, undefined, error); throw error; }
+  }
+
+  async process(payload: unknown, headers: RecordValue, query: RecordValue, preparedDirect?: DirectRequest): Promise<unknown> {
+    if (preparedDirect || this.isDirectRequest(payload)) return this.processDirect(payload, headers, query, preparedDirect);
     const call = this.logs.start(payload, headers); let active: any; let current = asRecord(payload); let state: RecordValue = {};
     const context = { application: this.application, settings: await this.api.agentSettings(), request: { id: call.id, headers, query }, log: { info: (...values: unknown[]) => active?.stdout.push(values.map(String).join(" ")), error: (...values: unknown[]) => active?.stderr.push(values.map(String).join(" ")) } };
     const run = async (type: string, label: string, input: unknown, operation: () => Promise<any>) => { active = this.logs.stage(call, type, label, input); try { const output = await operation(); this.logs.complete(call, active, output); return output; } catch (error) { this.logs.fail(call, active, error); throw error; } finally { active = undefined; } };
@@ -278,6 +335,8 @@ export function validateApplicationSettings(raw: unknown): asserts raw is Settin
   if (!safeName(settings.inboundHandler)) throw Object.assign(new Error("Invalid inbound handler."), { status: 400 });
   if (settings.outboundHandler !== undefined && !safeName(settings.outboundHandler)) throw Object.assign(new Error("Invalid outbound handler."), { status: 400 });
   if (settings.transformHandlers !== undefined && (!Array.isArray(settings.transformHandlers) || settings.transformHandlers.some((name) => !safeName(name)))) throw Object.assign(new Error("Invalid transform handlers."), { status: 400 });
+  const directMode = settings.directMode;
+  if (directMode !== undefined && (!directMode || typeof directMode !== "object" || (directMode.enabled !== undefined && typeof directMode.enabled !== "boolean"))) throw Object.assign(new Error("Invalid Direct Mode settings."), { status: 400 });
   const coalescing = settings.messageCoalescing;
   if (coalescing !== undefined && (!coalescing || typeof coalescing !== "object" || (coalescing.enabled !== undefined && typeof coalescing.enabled !== "boolean") || (coalescing.silenceDebounceSeconds !== undefined && (!Number.isInteger(coalescing.silenceDebounceSeconds) || coalescing.silenceDebounceSeconds < 1 || coalescing.silenceDebounceSeconds > 3600)))) throw Object.assign(new Error("Invalid message coalescing settings."), { status: 400 });
 }

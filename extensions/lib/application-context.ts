@@ -16,6 +16,8 @@ export type ApplicationExecutionContext = {
   identityKey: string;
   profile: string;
   sessionId: string;
+  /** Non-persistent personal context supplied by an Application Direct Mode request. */
+  directContextMemory?: string;
   onContextMemoryExecution?: (event: ContextMemoryExecutionLog) => void;
 };
 

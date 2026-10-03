@@ -430,14 +430,14 @@ class ApiServer {
     return isSandboxEnabled(this.profileDirectory(profile), profile === "default");
   }
 
-  private async runSandboxedPrompt(profile: string, id: string, message: string, onData?: (text: string) => void, handoff?: string, applicationContext?: { application: string; identityKey: string }): Promise<string> {
+  private async runSandboxedPrompt(profile: string, id: string, message: string, onData?: (text: string) => void, handoff?: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<string> {
     const key = `${profile}:${id}`;
     if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
     this.sandboxBusy.add(key);
     try {
       const session = (await this.listProfileSessions(profile)).find((item) => item.id === id);
       if (!session) throw Object.assign(new Error(`No session found matching '${id}'`), { status: 404 });
-      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application, PI_APPLICATION_SESSION_ID: id } : {}) };
+      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application, PI_APPLICATION_SESSION_ID: id, ...(applicationContext.directContextMemory !== undefined ? { PI_APPLICATION_DIRECT_CONTEXT_MEMORY: Buffer.from(applicationContext.directContextMemory, "utf8").toString("base64url") } : {}) } : {}) };
       // The HTTP gateway is an API worker itself. Its children are agent
       // runtimes, not additional HTTP servers.
       delete workerEnv.PI_API_WORKER;
@@ -470,7 +470,7 @@ class ApiServer {
     } finally { this.sandboxBusy.delete(key); }
   }
 
-  async prompt(profile: string, id: string, message: string, handoff?: string, applicationContext?: { application: string; identityKey: string }): Promise<{ profile: string; sessionId: string; response: string }> {
+  async prompt(profile: string, id: string, message: string, handoff?: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<{ profile: string; sessionId: string; response: string }> {
     if (await this.sandboxed(profile)) return { profile, sessionId: id, response: await this.runSandboxedPrompt(profile, id, message, undefined, handoff, applicationContext) };
     const handle = await this.getSession(profile, id);
     if (handle.busy || !handle.session.isIdle) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
@@ -1020,7 +1020,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.post("/api/applications", async (request, reply) => {
       if (!guard(request, reply)) return; const body = objectBody(request.body);
       if (typeof body.name !== "string" || typeof body.slug !== "string") throw Object.assign(new Error("name and slug are required."), { status: 400 });
-      const responseMode = body.responseMode === "result" ? "result" : "ack"; const defaults: ApplicationSettings = { responseMode, inboundHandler: "inbound", transformHandlers: [] }; const record = applicationStore.create({ name: body.name, slug: body.slug, enabled: body.enabled !== false, responseMode, defaultProfile: typeof body.defaultProfile === "string" && body.defaultProfile ? body.defaultProfile : null, routingPolicy: body.routingPolicy === "drop" ? "drop" : "default_as_fallback", settings: body.settings && typeof body.settings === "object" && !Array.isArray(body.settings) ? body.settings as Record<string, unknown> : defaults });
+      const responseMode = body.responseMode === "result" ? "result" : "ack"; const defaults: ApplicationSettings = { responseMode, inboundHandler: "inbound", transformHandlers: [], directMode: { enabled: true } }; const record = applicationStore.create({ name: body.name, slug: body.slug, enabled: body.enabled !== false, responseMode, defaultProfile: typeof body.defaultProfile === "string" && body.defaultProfile ? body.defaultProfile : null, routingPolicy: body.routingPolicy === "drop" ? "drop" : "default_as_fallback", settings: body.settings && typeof body.settings === "object" && !Array.isArray(body.settings) ? body.settings as Record<string, unknown> : defaults });
       await loadApplication(record); return reply.code(201).send({ application: record });
     });
     server.get<{ Params: { slug: string } }>("/api/applications/:slug", async (request, reply) => { if (!guard(request, reply)) return; return { application: registeredApplication(request.params.slug).record }; });
@@ -1070,6 +1070,19 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.post<{ Params: { slug: string } }>("/api/message/app/:slug", async (request, reply) => {
       const application = registeredApplication(request.params.slug); if (!application.record.enabled) return apiError(reply, 404, "NOT_FOUND", "Application is disabled.");
       const headers = Object.fromEntries(Object.entries(request.headers).map(([key, value]) => [key, Array.isArray(value) ? value.join(", ") : value ?? ""])); const query = request.query && typeof request.query === "object" ? request.query as Record<string, unknown> : {};
+      if (application.runtime.isDirectRequest(request.body)) {
+        const direct = await application.runtime.prepareDirectRequest(request.body);
+        if (application.record.responseMode === "ack") {
+          void application.runtime.process(request.body, headers, query, direct).then(async (value) => {
+            const result = value as { profile: string; sessionId: string; response: string };
+            const response = await fetch(direct.responseWebhookUrl!, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ application: application.record.slug, identityKey: direct.identityKey, profile: result.profile, sessionId: result.sessionId, response: result.response }), signal: AbortSignal.timeout(15_000) });
+            if (!response.ok) throw new Error(`Response webhook returned HTTP ${response.status}.`);
+          }).catch((error) => console.error(`[application:${application.record.slug}] Direct Mode response webhook failed:`, error));
+          return reply.code(202).send({ ok: true, accepted: true });
+        }
+        // In wait mode responseWebhookUrl is intentionally ignored.
+        return application.runtime.process(request.body, headers, query, direct);
+      }
       if (application.record.responseMode === "ack") { void application.runtime.process(request.body, headers, query).catch((error) => console.error(`[application:${application.record.slug}]`, error)); return reply.code(202).send({ ok: true, accepted: true }); }
       return application.runtime.process(request.body, headers, query);
     });

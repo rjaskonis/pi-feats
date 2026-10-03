@@ -10,7 +10,12 @@ const agentRoot = () => process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGE
 const profileDirectory = () => process.env.PI_CODING_AGENT_DIR ?? agentRoot();
 function executionContext() {
   const application = applicationExecutionContext.getStore();
-  return { application: application?.application ?? process.env.PI_APPLICATION_SLUG, identityKey: application?.identityKey ?? process.env.PI_APPLICATION_IDENTITY_KEY, profile: application?.profile ?? process.env.PI_ACTIVE_PROFILE ?? "default", sessionId: application?.sessionId ?? process.env.PI_APPLICATION_SESSION_ID };
+  const encodedDirectMemory = process.env.PI_APPLICATION_DIRECT_CONTEXT_MEMORY;
+  let directContextMemory = application?.directContextMemory;
+  if (directContextMemory === undefined && encodedDirectMemory) {
+    try { directContextMemory = Buffer.from(encodedDirectMemory, "base64url").toString("utf8"); } catch { /* validation happens during context resolution */ }
+  }
+  return { application: application?.application ?? process.env.PI_APPLICATION_SLUG, identityKey: application?.identityKey ?? process.env.PI_APPLICATION_IDENTITY_KEY, profile: application?.profile ?? process.env.PI_ACTIVE_PROFILE ?? "default", sessionId: application?.sessionId ?? process.env.PI_APPLICATION_SESSION_ID, directContextMemory };
 }
 
 export default function registerContextMemory(pi: ExtensionAPI): void {

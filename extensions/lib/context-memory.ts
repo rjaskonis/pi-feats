@@ -13,7 +13,7 @@ export type ContextMemoryConfig =
 export type ContextMemoryTarget = "operational" | "profile" | "user";
 export type ContextMemoryToolTarget = "operational" | "personal";
 export type ContextMemoryAction = "read" | "insert" | "update" | "remove" | "replace";
-export type MemoryExecutionContext = { application?: string; identityKey?: string; profile: string; sessionId?: string };
+export type MemoryExecutionContext = { application?: string; identityKey?: string; profile: string; sessionId?: string; directContextMemory?: string };
 export const CONTEXT_MEMORY_LIMITS = { operational: 2750, profile: 1375, user: 1375 } as const;
 const MAX_FILE_BYTES = 64 * 1024;
 const sensitive = /\b(password|passphrase|api[_ -]?key|secret|access[_ -]?token|refresh[_ -]?token|private[_ -]?key|cpf|credit[_ -]?card)\b/i;
@@ -116,6 +116,11 @@ async function handlerMemory(agentDir: string, profileDir: string, context: Memo
 export async function resolveContextMemory(agentDir: string, profileDir: string, context: MemoryExecutionContext): Promise<{ operational: string; personal: string; source?: string; handlerExecution?: ContextMemoryExecutionLog }> {
   const operational = await readMemory(memoryPath(agentDir, profileDir, "operational"));
   if (contextMemoryCharacters(operational) > CONTEXT_MEMORY_LIMITS.operational) throw new Error("OPERATIONAL.md exceeds 2750 characters.");
+  if (context.directContextMemory !== undefined) {
+    const personal = context.directContextMemory.trim();
+    if (contextMemoryCharacters(personal) > CONTEXT_MEMORY_LIMITS.user) throw new Error("Direct Context Memory exceeds 1375 characters.");
+    return { operational, personal, source: "direct" };
+  }
   const config = await profileMemoryConfig(profileDir);
   if (!config) return { operational, personal: "" };
   if (config.mode === "file" && config.target === "profile") { const personal = await readMemory(memoryPath(agentDir, profileDir, "profile")); if (contextMemoryCharacters(personal) > CONTEXT_MEMORY_LIMITS.profile) throw new Error("PROFILE.md exceeds 1375 characters."); return { operational, personal, source: "profile" }; }
