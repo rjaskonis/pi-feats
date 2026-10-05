@@ -128,6 +128,11 @@ Applications are the integration boundary between Pi and external systems. Use o
 - Normalize provider-specific payloads in an inbound handler, enrich or redact data through transforms, and shape integration responses in an outbound handler.
 - Route each external identity to a profile and session strategy through explicit Identity Key mappings. Mappings may use automatic sessions or fixed prefixes, or intentionally ignore an identity (`None` in the Console) after inbound handling without calling Pi. Exact mappings take precedence, so an ignore mapping can exclude an identity even when a single `*` wildcard fallback exists.
 - Choose acknowledgement mode for asynchronous webhook-style work or result mode when an integration needs the completed response.
+- Use **Direct Mode** (enabled by default) for integrations that already provide an Identity Key and message. Direct requests bypass transform, inbound, and outbound handlers and route exclusively through the configured Identity Key mapping.
+- When a Direct Mode request omits `sessionId`, Pi reuses the active Application session for the resolved profile and session prefix; if none exists, it creates one. This is scoped to the Application route, profile, and identity-derived prefix—not the Application's globally most recent session.
+- Provide `sessionId` in a Direct Mode request to explicitly create or adopt that session for the resolved route. A session cannot be associated with another Application route.
+- Pass transient `contextMemory` in a Direct Mode request to supply personal context only when initializing that request's session. It is not persisted in profile or identity memory.
+- In `ack` response mode, Direct Mode requires `responseWebhookUrl`; Pi immediately acknowledges the request and POSTs the completed response to that URL. In `result` mode, Pi returns the completed response synchronously and ignores `responseWebhookUrl`.
 - Inspect active sessions, roll over a conversation, preserve private handoff context, test handlers with a JSON payload, and stream or clear application logs from the Console or API.
 - Include an Evolution API adapter implementation while keeping Applications structurally independent from adapters.
 
@@ -145,10 +150,23 @@ curl -X POST \
 curl -H "Authorization: Bearer $PI_API_TOKEN" \
   http://127.0.0.1:8767/api/applications/support-inbox/handlers
 
-# Deliver an integration payload to an enabled Application
+# Deliver a conventional integration payload to an enabled Application
 curl -X POST \
   -H "Content-Type: application/json" \
   -d '{"message":"A customer needs help with an order."}' \
+  http://127.0.0.1:8767/api/message/app/support-inbox
+
+# Direct Mode: route through the Identity Key mapping and return the result.
+# Omit sessionId to use/create the active session for that identity route.
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"identityKey":"customer@example.com","message":"Where is my order?"}' \
+  http://127.0.0.1:8767/api/message/app/support-inbox
+
+# In ack mode, provide a webhook for the completed response.
+curl -X POST \
+  -H "Content-Type: application/json" \
+  -d '{"identityKey":"customer@example.com","message":"Where is my order?","responseWebhookUrl":"https://integration.example.com/pi-response"}' \
   http://127.0.0.1:8767/api/message/app/support-inbox
 ```
 
@@ -179,7 +197,7 @@ curl \
 
 What the API exposes:
 
-- Persistent chat and streaming chat sessions, including profile-specific sessions.
+- Persistent chat and streaming chat sessions, including profile-specific sessions. Streaming chat reports real-time agent activity such as tool execution, thinking state, completion, and failures alongside response tokens.
 - Profile lifecycle, settings, default model selection, `SOUL.md`, environment variables, Guardrails, Context Memory, tools, Skills, and sessions.
 - Runtime-wide extension and package inventory and configuration.
 - Pulse schedules and execution history.
@@ -191,7 +209,7 @@ The service generates and stores its bearer token in `api-server.json`, supports
 
 ### Pi Console WebUI and terminal
 
-The Pi Console WebUI is an operations cockpit, not merely a settings page. It gives administrators a visual way to operate the same runtime exposed by the CLI and API: inspect activity, configure profiles, edit application handlers, manage schedules, examine logs, and open a real terminal when direct command-line access is needed.
+The Pi Console WebUI is an operations cockpit, not merely a settings page. It gives administrators a visual way to operate the same runtime exposed by the CLI and API: inspect activity, configure profiles, edit application handlers, manage schedules, examine logs, and open a real terminal when direct command-line access is needed. During a chat response, it renders the agent's live tool and work activity before the final answer is complete.
 
 ```bash
 # Start, inspect, restart, and stop the WebUI
