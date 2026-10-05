@@ -317,6 +317,9 @@ class ApiServer {
     const info = sessions.find((session) => session.id === id);
     if (!info) throw Object.assign(new Error("Session not found"), { status: 404 });
     const session = SessionManager.open(info.path, this.sessionDirectory(profile), this.options.cwd);
+    // Pi can persist an empty assistant message while initializing a new
+    // session (for example after model settings change). It has no visible
+    // conversation content and must not become an empty chat bubble.
     const entries = session.getBranch().filter((entry) => entry.type !== "session_info").map((entry) => {
       if (entry.type === "message") {
         const message = entry.message as { role?: string; content?: unknown; toolName?: string; isError?: boolean; timestamp?: number };
@@ -330,7 +333,7 @@ class ApiServer {
       }
       if (entry.type === "compaction" || entry.type === "branch_summary") return { id: entry.id, type: entry.type, timestamp: entry.timestamp, summary: (entry as any).summary };
       return { id: entry.id, type: entry.type, timestamp: entry.timestamp };
-    });
+    }).filter((entry: any) => entry.type !== "message" || entry.role !== "assistant" || entry.content.length > 0 || entry.tools.length > 0 || !!entry.toolName);
     const limit = Math.max(1, Math.min(16, Math.floor(requestedLimit) || 16));
     const end = before ? entries.findIndex((entry) => entry.id === before) : entries.length;
     if (before && end < 0) throw Object.assign(new Error("Conversation cursor not found."), { status: 400 });
