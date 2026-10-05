@@ -333,7 +333,7 @@ class ApiServer {
       }
       if (entry.type === "compaction" || entry.type === "branch_summary") return { id: entry.id, type: entry.type, timestamp: entry.timestamp, summary: (entry as any).summary };
       return { id: entry.id, type: entry.type, timestamp: entry.timestamp };
-    }).filter((entry: any) => entry.type !== "message" || entry.role !== "assistant" || entry.content.length > 0 || entry.tools.length > 0 || !!entry.toolName);
+    }).filter((entry: any) => entry.type !== "message" || entry.role !== "assistant" || entry.content.some((block: { text?: unknown }) => typeof block.text === "string" && block.text.trim().length > 0) || entry.tools.length > 0 || !!entry.toolName);
     const limit = Math.max(1, Math.min(16, Math.floor(requestedLimit) || 16));
     const end = before ? entries.findIndex((entry) => entry.id === before) : entries.length;
     if (before && end < 0) throw Object.assign(new Error("Conversation cursor not found."), { status: 400 });
