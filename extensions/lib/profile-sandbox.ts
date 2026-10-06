@@ -11,13 +11,18 @@ export type ProfileSandboxSettings = { sandbox?: boolean; profile?: { skillSourc
 const managedDescription = "Pi profile runtime sandbox";
 export const nonoConfigPath = (profileDir: string) => join(profileDir, "nono.json");
 
-function runtimePaths(runtimeEntry: string) {
+export function runtimePaths(runtimeEntry: string) {
   // Pi may be installed by pi-node, a system package manager, or a managed
   // Node distribution (for example, Hermes). Grant only the active runtime
   // and its package root instead of assuming the pi-node installation path.
   const paths = new Set<string>(["$HOME/.local/share/pi-node/node-*", dirname(process.execPath)]);
   const entry = (() => { try { return realpathSync(runtimeEntry); } catch { return runtimeEntry; } })();
-  const nodeModules = entry.indexOf("/lib/node_modules/");
+  // Managed Pi releases place the CLI under
+  // <release>/node_modules/@earendil-works/pi-coding-agent/..., whereas
+  // global Node installations typically use <prefix>/lib/node_modules/....
+  // Allow the directory containing the active node_modules tree in both
+  // layouts, so Node can load the CLI and every runtime dependency.
+  const nodeModules = entry.lastIndexOf("/node_modules/");
   if (nodeModules > 0) paths.add(entry.slice(0, nodeModules));
   return [...paths];
 }
