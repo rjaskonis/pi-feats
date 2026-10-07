@@ -22,6 +22,7 @@ import { applicationExecutionContext, type ContextMemoryExecutionLog } from "../
 import { contextMemoryCharacters, contextMemoryConfig, contextMemoryLimit, memoryPath, readMemory } from "../lib/context-memory.ts";
 import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
+import { piCommand } from "../lib/pi-command.ts";
 import { PulseStore } from "../pulse/store.ts";
 import { SkillSourceStore } from "../skill-sources/store.ts";
 
@@ -345,7 +346,8 @@ class ApiServer {
     const environment = { ...(await profileEnvironment(agentDir)), PI_PROFILE_ROOT: this.options.agentDir, PI_PROFILE_DISCOVER_TOOLS: "1" };
     const output = await new Promise<{ stdout: string; stderr: string }>((resolveRun, reject) => {
       delete environment.PI_API_WORKER;
-      const child = spawn(process.execPath, [process.argv[1], "profile", profile, "--no-session", "--print", ""], {
+      const pi = piCommand();
+      const child = spawn(pi.command, [...pi.args, "profile", profile, "--no-session", "--print", ""], {
         cwd: agentDir,
         env: environment,
         stdio: ["ignore", "pipe", "pipe"],
@@ -371,7 +373,8 @@ class ApiServer {
       const environment = { ...(await profileEnvironment(agentDir)), PI_PROFILE_ROOT: this.options.agentDir };
       delete environment.PI_API_WORKER;
       return new Promise<string>((resolveRun, reject) => {
-        const child = spawn(process.execPath, [process.argv[1], "profile", profile, "--no-session", "--print", prompt], { cwd: agentDir, env: environment, stdio: ["ignore", "pipe", "pipe"] });
+        const pi = piCommand();
+        const child = spawn(pi.command, [...pi.args, "profile", profile, "--no-session", "--print", prompt], { cwd: agentDir, env: environment, stdio: ["ignore", "pipe", "pipe"] });
         let stdout = "", stderr = "";
         child.stdout.on("data", (chunk) => { stdout += String(chunk); }); child.stderr.on("data", (chunk) => { stderr += String(chunk); });
         child.once("error", reject); child.once("exit", (code) => code === 0 ? resolveRun(stdout.trim()) : reject(new Error(stderr.trim() || `Handoff completion exited with ${code ?? "unknown"}`)));
@@ -458,7 +461,8 @@ class ApiServer {
       const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolveRun, reject) => {
         // Supply the native file path, not only its ID. The session manager
         // otherwise scopes an ID lookup to the API worker CWD (`/` in Docker).
-        const child = spawn(process.execPath, [process.argv[1], "profile", profile, "--session", session.path, ...(onEvent ? ["--mode", "json"] : ["--print"]), message], {
+        const pi = piCommand();
+        const child = spawn(pi.command, [...pi.args, "profile", profile, "--session", session.path, ...(onEvent ? ["--mode", "json"] : ["--print"]), message], {
           // The sandboxed agent sees its profile directory as CWD, never the
           // HTTP server's CWD or the caller's project directory.
           cwd: this.profileDirectory(profile), env: workerEnv, stdio: ["ignore", "pipe", "pipe"],
@@ -629,13 +633,14 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     };
     const profileName = (request: FastifyRequest<{ Params: { profile: string } }>) => request.params.profile;
     const pulseTick = async (action: "start" | "stop" | "status") => new Promise<string>((resolveRun, reject) => {
-      const child = spawn(process.execPath, [process.argv[1], "pulse", action], { cwd: options.cwd, env: { ...process.env, PI_API_WORKER: "" }, stdio: ["ignore", "pipe", "pipe"] });
+      const pi = piCommand();
+      const child = spawn(pi.command, [...pi.args, "pulse", action], { cwd: options.cwd, env: { ...process.env, PI_API_WORKER: "" }, stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = ""; child.stdout.on("data", (chunk) => stdout += String(chunk)); child.stderr.on("data", (chunk) => stderr += String(chunk));
       child.once("error", reject); child.once("exit", (code) => code === 0 ? resolveRun(stdout.trim()) : reject(new Error(stderr.trim() || `Pulse command exited with ${code}`)));
     });
     const pulseTickStatus = async () => {
-      try { const state = JSON.parse(await readFile(join(options.agentDir, "pulse-tick.state.json"), "utf8")) as { pid?: unknown; startedAt?: unknown }; const pid = typeof state.pid === "number" ? state.pid : 0; let running = false; try { process.kill(pid, 0); running = pid > 0; } catch {} return { running, status: running ? `Pulse tick running (PID ${pid}).` : "Pulse tick stopped." }; }
-      catch { return { running: false, status: "Pulse tick stopped." }; }
+      try { const state = JSON.parse(await readFile(join(options.agentDir, "pulse-tick.state.json"), "utf8")) as { pid?: unknown; startedAt?: unknown; lastHeartbeatAt?: unknown }; const pid = typeof state.pid === "number" ? state.pid : 0, heartbeat = typeof state.lastHeartbeatAt === "string" ? Date.parse(state.lastHeartbeatAt) : NaN; let running = false; try { process.kill(pid, 0); running = pid > 0; } catch {} if (!running) return { running: false, status: `Pulse tick abandoned (PID ${pid} is not running).`, state: "abandoned", lastHeartbeatAt: state.lastHeartbeatAt ?? null }; if (!Number.isNaN(heartbeat) && Date.now() - heartbeat > 2 * 60_000) return { running: false, status: `Pulse tick stale (last heartbeat ${state.lastHeartbeatAt}).`, state: "stale", lastHeartbeatAt: state.lastHeartbeatAt }; return { running: true, status: `Pulse tick running (PID ${pid}).`, state: "healthy", lastHeartbeatAt: state.lastHeartbeatAt ?? null }; }
+      catch { return { running: false, status: "Pulse tick stopped.", state: "stopped", lastHeartbeatAt: null }; }
     };
     server.get("/api/pulse/tick/status", async (request, reply) => {
       if (!guard(request, reply)) return;
@@ -901,6 +906,13 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw Object.assign(new Error("The 'limit' query parameter must be an integer from 1 to 100."), { status: 400 });
       try { return { runs: api.pulses.runs(profile, request.params.name, start, end, limit) }; }
       catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 404 }); }
+    });
+    server.post<{ Params: { profile: string; name: string; runId: string } }>("/api/profiles/:profile/pulses/:name/runs/:runId/finalize", async (request, reply) => {
+      if (!guard(request, reply)) return;
+      const status = objectBody(request.body).status;
+      if (status !== "success" && status !== "error") throw Object.assign(new Error("The 'status' field must be 'success' or 'error'."), { status: 400 });
+      try { return { run: api.pulses.finalizeRunning(request.params.name, profileName(request), request.params.runId, status) }; }
+      catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 409 }); }
     });
     server.get<{ Params: { profile: string } }>("/api/profiles/:profile/pulses/history", async (request, reply) => {
       if (!guard(request, reply)) return;

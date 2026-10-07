@@ -123,3 +123,16 @@ test("releases a claimed pulse after an execution failure", async () => {
     assert.equal(store.due("2030-01-01T00:00:00.000Z").length, 1);
   });
 });
+
+test("an operator can finalize only an active Pulse run", async () => {
+  await withStore((path, store) => {
+    const pulse = store.create({ name: "manual-report", description: "Report", schedule: "@once:2030-01-01T00:00:00Z", prompt: "Run", profile: "support", thread_session_id: "session" });
+    new DatabaseSync(path).prepare("UPDATE pulse_control SET next_run_at=? WHERE pulse_id=?").run("2020-01-01T00:00:00.000Z", pulse.id);
+    const [claimed] = store.claimDue("2026-01-01T00:00:00.000Z", "tick-a");
+    const run = store.finalizeRunning("manual-report", "support", claimed.runId, "success");
+    assert.equal(run.status, "success");
+    assert.equal(run.response, "Manually finalized as successful.");
+    assert.equal(store.get("manual-report", "support")?.lastRunAt, run.finishedAt);
+    assert.throws(() => store.finalizeRunning("manual-report", "support", claimed.runId, "error"), /not running/);
+  });
+});

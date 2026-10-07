@@ -9,24 +9,29 @@ import { spawn } from "node:child_process";
 import { PulseStore } from "./store.ts";
 import { ApplicationStore } from "../api-server/application-store.ts";
 import { withoutTuiModeArgs } from "../lib/cli-tui-mode.ts";
+import { piCommand } from "../lib/pi-command.ts";
 
 const root = () => process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const dbPath = () => join(root(), "pulse.db");
 const statePath = () => join(root(), "pulse-tick.state.json");
 const logPath = () => join(root(), "pulse-tick.log");
 const TICK_INTERVAL_MS = 60_000;
-type State = { pid: number; owner?: string; startedAt: string };
+type State = { pid: number; owner?: string; startedAt: string; lastHeartbeatAt?: string };
 const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 async function json<T>(path: string): Promise<T | undefined> { try { return JSON.parse(await readFile(path, "utf8")) as T; } catch { return undefined; } }
 async function write(path: string, value: unknown, exclusive = false) { await mkdir(root(), { recursive: true }); await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600, flag: exclusive ? "wx" : "w" }); }
+function tickLog(message: string) { console.error(`[${new Date().toISOString()}] Pulse Tick: ${message}`); }
 
 /** The SQLite lease is the singleton authority; the state file is diagnostic only. */
-async function acquireTickLock(store: PulseStore): Promise<{ owner: string; release: () => Promise<void> } | undefined> {
+async function acquireTickLock(store: PulseStore): Promise<{ owner: string; heartbeat: () => Promise<void>; release: () => Promise<void> } | undefined> {
   const owner = randomUUID();
   if (!store.claimTickLease(owner)) return undefined;
-  const state: State = { pid: process.pid, owner, startedAt: new Date().toISOString() };
+  const state: State = { pid: process.pid, owner, startedAt: new Date().toISOString(), lastHeartbeatAt: new Date().toISOString() };
   await write(statePath(), state);
-  return { owner, release: async () => {
+  return { owner, heartbeat: async () => {
+    const current = await json<State>(statePath());
+    if (current?.owner === owner) await write(statePath(), { ...current, lastHeartbeatAt: new Date().toISOString() });
+  }, release: async () => {
     store.releaseTickLease(owner);
     const current = await json<State>(statePath());
     if (current?.owner === owner) await unlink(statePath()).catch(() => {});
@@ -68,7 +73,7 @@ async function appendPulseResult(profile: string, sessionId: string, content: st
 }
 
 function table(profile?: string) { const rows = new PulseStore(dbPath()).list(profile); const columns: Array<[string, number]> = [["STATUS", 8], ["TYPE", 9], ["NAME", 20], ["SCHEDULE", 20], ["THREAD SESSION", 24], ["NEXT RUN", 20], ["LAST RUN", 20]]; const clip = (v: string, n: number) => v.length > n ? `${v.slice(0, n - 1)}…` : v; const row = (values: string[]) => `│ ${values.map((v, i) => clip(v, columns[i][1]).padEnd(columns[i][1])).join(" │ ")} │`; const line = `┼${columns.map(([, n]) => "─".repeat(n + 2)).join("┼")}┼`; console.log(line.replaceAll("┼", "┬").replace(/^┬/, "┌").replace(/┬$/, "┐")); console.log(row(columns.map(([n]) => n))); console.log(line); for (const item of rows) { const color = item.enabled ? "\x1b[32m" : "\x1b[38;2;245;194;215m"; console.log(`${color}${row([item.enabled ? "enabled" : "disabled", item.type, item.name, item.schedule, item.thread_session_id, item.nextRunAt ?? "—", item.lastRunAt ?? "—"])}\x1b[0m`); } if (!rows.length) console.log(row(["—", "—", "No pulses configured", "—", "—", "—", "—"])); console.log(line.replaceAll("┼", "┴").replace(/^┴/, "└").replace(/┴$/, "┘")); }
-async function start() { const current = await json<State>(statePath()); if (current && alive(current.pid)) return console.log(`Pulse tick is already running (PID ${current.pid}).`); const fd = openSync(logPath(), "a"); const child = spawn("sh", ["-c", "tail -f /dev/null | \"$@\"", "pi-pulse-tick", process.execPath, process.argv[1], "pulse", "tick"], { cwd: process.cwd(), detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, PI_PULSE_TICK: "1" } }); child.unref(); console.log(`Pulse tick starting (PID ${child.pid}).`); }
+async function start() { const current = await json<State>(statePath()); if (current && alive(current.pid)) return console.log(`Pulse tick is already running (PID ${current.pid}).`); if (current) console.error(`Pulse tick found abandoned state for PID ${current.pid}; its last heartbeat was ${current.lastHeartbeatAt ?? "unknown"}.`); const fd = openSync(logPath(), "a"), pi = piCommand(); const child = spawn(pi.command, [...pi.args, "pulse", "tick"], { cwd: process.cwd(), detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, PI_PULSE_TICK: "1" } }); child.unref(); console.log(`Pulse tick starting (PID ${child.pid}).`); }
 async function stop() { const current = await json<State>(statePath()); if (!current || !alive(current.pid)) return console.log("Pulse tick is not running."); try { process.kill(-current.pid, "SIGTERM"); } catch { process.kill(current.pid, "SIGTERM"); } console.log(`Pulse tick stopping (PID ${current.pid}).`); }
 async function restart() {
   const current = await json<State>(statePath());
@@ -77,8 +82,9 @@ async function restart() {
   if (current && alive(current.pid)) throw new Error(`Pulse tick (PID ${current.pid}) did not stop within 5 seconds.`);
   await start();
 }
-async function status() { const state = await json<State>(statePath()); const store = new PulseStore(dbPath()); const enabled = store.list().filter((item) => item.enabled).length; console.log(!state || !alive(state.pid) ? `Pulse tick: stopped (${enabled} enabled pulses)` : `Pulse tick: running (PID ${state.pid}, ${enabled} enabled pulses, since ${state.startedAt})`); }
+async function status() { const state = await json<State>(statePath()); const store = new PulseStore(dbPath()); const enabled = store.list().filter((item) => item.enabled).length; if (!state) return console.log(`Pulse tick: stopped (${enabled} enabled pulses)`); if (!alive(state.pid)) return console.log(`Pulse tick: abandoned (PID ${state.pid} is not running; last heartbeat ${state.lastHeartbeatAt ?? "unknown"})`); console.log(`Pulse tick: running (PID ${state.pid}, ${enabled} enabled pulses, since ${state.startedAt}; last heartbeat ${state.lastHeartbeatAt ?? "unknown"})`); }
 async function executePulse(store: PulseStore, pulse: Awaited<ReturnType<PulseStore["claimDue"]>>[number], owner: string) {
+  const startedAt = Date.now(); tickLog(`Starting Pulse '${pulse.pulse.name}' (${pulse.runId}).`);
   const renew = setInterval(() => { store.renewClaim(pulse.pulse.id, pulse.runId, owner); store.claimTickLease(owner); }, 30_000);
   try {
     const handoff = pulse.pulse.type === "heartbeat" ? store.handoff(pulse.pulse.id) : "";
@@ -89,7 +95,8 @@ async function executePulse(store: PulseStore, pulse: Awaited<ReturnType<PulseSt
     store.setRunSession(pulse.runId, execution.id);
     const modelArgs = await profileModelArgs(pulse.pulse.profile);
     const result = await new Promise<string>((resolve, reject) => {
-      const child = spawn(process.execPath, [process.argv[1], "profile", pulse.pulse.profile, "--session", execution.file, ...modelArgs, "--print", message], { cwd: source?.cwd ?? process.cwd(), env: { ...process.env, PI_PULSE_TICK: "1" }, stdio: ["ignore", "pipe", "pipe"] });
+      const pi = piCommand();
+      const child = spawn(pi.command, [...pi.args, "profile", pulse.pulse.profile, "--session", execution.file, ...modelArgs, "--print", message], { cwd: source?.cwd ?? process.cwd(), env: { ...process.env, PI_PULSE_TICK: "1" }, stdio: ["ignore", "pipe", "pipe"] });
       let output = "", error = "";
       child.stdout.on("data", (data) => output += String(data)); child.stderr.on("data", (data) => error += String(data));
       child.once("exit", (code) => code === 0 ? resolve(output.trim()) : reject(new Error(error.trim() || `Pi exited with ${code}`)));
@@ -106,14 +113,16 @@ async function executePulse(store: PulseStore, pulse: Awaited<ReturnType<PulseSt
       }
     }
     store.complete(pulse.pulse, pulse.runId, result, pulse.pulse.type === "heartbeat" ? result.slice(-8000) : undefined, owner);
-  } catch (error) { store.fail(pulse.pulse, pulse.runId, error instanceof Error ? error.message : String(error), owner); }
+    tickLog(`Pulse '${pulse.pulse.name}' (${pulse.runId}) completed in ${Date.now() - startedAt}ms.`);
+  } catch (error) { const message = error instanceof Error ? error.message : String(error); tickLog(`Pulse '${pulse.pulse.name}' (${pulse.runId}) failed after ${Date.now() - startedAt}ms: ${message}`); store.fail(pulse.pulse, pulse.runId, message, owner); }
   finally { clearInterval(renew); }
 }
 async function tick() {
   const store = new PulseStore(dbPath());
   const lock = await acquireTickLock(store);
   if (!lock) return console.log("Pulse tick is already running.");
-  const { owner, release } = lock;
+  const { owner, heartbeat, release } = lock;
+  tickLog(`Started (PID ${process.pid}, owner ${owner}).`);
   const expiredClaims = store.expiredClaims();
   if (expiredClaims) console.error(`Pulse tick found ${expiredClaims} expired active claim(s). Run 'pi pulse recover' only after confirming their workers are gone.`);
   let stopped = false, wake: (() => void) | undefined;
@@ -123,11 +132,15 @@ async function tick() {
     task = executePulse(store, pulse, owner).catch((error) => console.error(`Unexpected failure in Pulse '${pulse.pulse.name}': ${error instanceof Error ? error.message : String(error)}`)).finally(() => active.delete(task));
     active.add(task);
   };
-  const close = () => { stopped = true; wake?.(); };
-  process.once("SIGTERM", close); process.once("SIGINT", close);
+  const close = (signal: string) => { tickLog(`Received ${signal}; waiting for ${active.size} active Pulse(s).`); stopped = true; wake?.(); };
+  process.once("SIGTERM", () => close("SIGTERM")); process.once("SIGINT", () => close("SIGINT"));
+  process.once("unhandledRejection", (reason) => { tickLog(`Unhandled rejection: ${reason instanceof Error ? reason.stack ?? reason.message : String(reason)}`); close("unhandled rejection"); });
+  process.once("uncaughtException", (error) => { tickLog(`Uncaught exception: ${error.stack ?? error.message}`); close("uncaught exception"); });
+  process.once("exit", (code) => tickLog(`Exiting with code ${code}.`));
   try {
     while (!stopped) {
-      if (!store.claimTickLease(owner)) { console.error("Pulse tick lost its SQLite lease; stopping."); break; }
+      if (!store.claimTickLease(owner)) { tickLog("Lost the SQLite lease; stopping."); break; }
+      await heartbeat();
       // Claiming is atomic and exclusive per Pulse. Workers are intentionally
       // launched independently so unrelated scheduled work can overlap.
       for (const pulse of store.claimDue(undefined, owner)) { if (stopped) break; launch(pulse); }
@@ -137,6 +150,7 @@ async function tick() {
     // Do not release the scheduler lease while this tick still owns work.
     await Promise.allSettled([...active]);
     await release();
+    tickLog("Stopped cleanly.");
   }
 }
 export async function handlePulseCli(args: string[], selectedProfile?: string): Promise<boolean> { if (args[0] !== "pulse") return false; const profileIndex = args.indexOf("--profile"); const profile = selectedProfile ?? (profileIndex >= 0 ? args[profileIndex + 1] : undefined); if (args[1] === "tick" && process.env.PI_PULSE_TICK === "1") { await tick(); return true; } switch (args[1]) { case "start": await start(); break; case "stop": await stop(); break; case "restart": await restart(); break; case "status": await status(); break; case "list": table(profile); break; case "recover": { const recovered = new PulseStore(dbPath()).recoverExpiredClaims(profile); console.log(`Recovered ${recovered} expired Pulse claim(s).`); break; } case "enable": case "disable": { const name = args[2]; if (!name) throw new Error("Usage: pi pulse enable|disable <name>"); new PulseStore(dbPath()).setEnabled(name, args[1] === "enable", profile); console.log(`Pulse '${name}' ${args[1]}d.`); break; } default: console.error("Usage: pi pulse start | stop | restart | status | list | recover | enable <name> | disable <name>"); process.exitCode = 1; } return true; }

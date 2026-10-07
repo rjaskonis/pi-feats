@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { withoutTuiModeArgs } from "../lib/cli-tui-mode.ts";
+import { piCommand } from "../lib/pi-command.ts";
 
 type ApiSettings = { host?: string; port?: number; apiToken?: string; cors?: { origin?: string } };
 type LegacySettings = Record<string, unknown> & { api?: ApiSettings };
@@ -43,7 +44,8 @@ async function start() {
   const api = await getApiSettings(); await clearStaleState(); const current = await readState();
   if (current && isAlive(current.pid)) return console.log(`API is already running (PID ${current.pid}) at http://${current.host}:${current.port}`);
   const fd = openSync(logPath(), "a");
-  const child = spawn("sh", ["-c", "tail -f /dev/null | \"$@\"", "pi-api-worker", process.execPath, process.argv[1], "--mode", "rpc", "--no-session"], { cwd: process.cwd(), detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, PI_API_WORKER: "1" } });
+  const pi = piCommand();
+  const child = spawn(pi.command, [...pi.args, "--mode", "rpc", "--no-session"], { cwd: process.cwd(), detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, PI_API_WORKER: "1" } });
   child.unref(); await writeJson(statePath(), { pid: child.pid!, host: api.host, port: api.port, startedAt: new Date().toISOString() });
   console.log(`API started at http://${api.host}:${api.port} (PID ${child.pid}).`); console.log(`The token is stored in ${configPath()}.`);
 }

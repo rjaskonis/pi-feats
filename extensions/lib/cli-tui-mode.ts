@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { piCommand } from "./pi-command.ts";
 
 const profileManagementActions = new Set(["add", "create", "delete", "list", "open", "remove", "resume"]);
 const profileResourceCommands = new Set(["extensions", "packages", "sessions", "skills", "tools"]);
@@ -58,7 +59,8 @@ export function isPiFeatsNonInteractiveCli(raw: string[]): boolean {
 export async function reexecCliWithRegularTui(): Promise<boolean> {
   const args = process.argv.slice(2);
   if (!isPiFeatsNonInteractiveCli(args) || hasTuiModeArg(args)) return false;
-  const child = spawn(process.execPath, [process.argv[1], ...withRegularTuiMode(args)], {
+  const pi = piCommand();
+  const child = spawn(pi.command, [...pi.args, ...withRegularTuiMode(args)], {
     stdio: "inherit",
     env: process.env,
   });

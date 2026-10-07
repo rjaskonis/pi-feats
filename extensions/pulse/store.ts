@@ -187,6 +187,21 @@ export class PulseStore {
       this.db.exec("COMMIT");
     } catch (cause) { this.db.exec("ROLLBACK"); throw cause; }
   }
+  finalizeRunning(name: string, profile: string, runId: string, status: "success" | "error"): PulseRun {
+    const pulse = this.get(name, profile); if (!pulse) throw new Error("Pulse not found.");
+    const now = iso(), result = status === "success" ? "Manually finalized as successful." : "Manually finalized as failed.", next = status === "success" ? nextRun(pulse.schedule)?.toISOString() ?? null : nextRun(pulse.schedule, new Date(Date.now() + 60_000))?.toISOString() ?? null;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const run = this.db.prepare("UPDATE pulse_runs SET finished_at=?,status=?,response=?,error=? WHERE id=? AND pulse_id=? AND status='running'").run(now, status, status === "success" ? result : null, status === "error" ? result : null, runId, pulse.id);
+      if (!run.changes) throw new Error("Pulse run is not running.");
+      const control = this.db.prepare("UPDATE pulse_control SET last_run_at=?,next_run_at=?,claimed_at=NULL,active_run_id=NULL,claim_owner=NULL,lease_expires_at=NULL,updated_at=? WHERE pulse_id=? AND active_run_id=?").run(now, next, now, pulse.id, runId);
+      if (!control.changes) throw new Error("Pulse run is no longer active.");
+      if (status === "success") this.db.prepare("UPDATE pulses SET result=? WHERE id=?").run(result, pulse.id);
+      this.db.exec("COMMIT");
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+    const row = this.db.prepare("SELECT id,session_id,started_at,finished_at,status,response,error FROM pulse_runs WHERE id=?").get(runId) as Row;
+    return { id: String(row.id), sessionId: row.session_id == null ? null : String(row.session_id), startedAt: String(row.started_at), finishedAt: row.finished_at == null ? null : String(row.finished_at), status: row.status as PulseRun["status"], response: row.response == null ? null : String(row.response), error: row.error == null ? null : String(row.error) };
+  }
   claimTickLease(owner: string, leaseMs = 90_000): boolean {
     const now = iso(), expiresAt = new Date(Date.now() + leaseMs).toISOString();
     this.db.exec("BEGIN IMMEDIATE");
