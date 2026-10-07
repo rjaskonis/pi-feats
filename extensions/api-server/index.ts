@@ -16,6 +16,7 @@ const configPath = () => join(agentDir(), "api-server.json");
 const legacySettingsPath = () => join(agentDir(), "settings.json");
 const statePath = () => join(agentDir(), "api-server.state.json");
 const logPath = () => join(agentDir(), "api-server.log");
+const persistentCommand = "dir=$(mktemp -d) || exit 1; fifo=$dir/stdin; mkfifo \"$fifo\" || { rmdir \"$dir\"; exit 1; }; cleanup() { kill \"$tail_pid\" 2>/dev/null || true; wait \"$tail_pid\" 2>/dev/null || true; rm -f \"$fifo\"; rmdir \"$dir\"; }; trap cleanup EXIT HUP INT TERM; tail -f /dev/null >\"$fifo\" & tail_pid=$!; \"$@\" <\"$fifo\"; exit $?";
 
 async function readJson<T>(path: string): Promise<T | undefined> { try { return JSON.parse(await readFile(path, "utf8")) as T; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw new Error(`could not read ${path}: ${error instanceof Error ? error.message : String(error)}`); } }
 async function writeJson(path: string, value: unknown) { await mkdir(agentDir(), { recursive: true }); await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8"); }
@@ -45,7 +46,7 @@ async function start() {
   if (current && isAlive(current.pid)) return console.log(`API is already running (PID ${current.pid}) at http://${current.host}:${current.port}`);
   const fd = openSync(logPath(), "a");
   const pi = piCommand();
-  const child = spawn(pi.command, [...pi.args, "--mode", "rpc", "--no-session"], { cwd: process.cwd(), detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, PI_API_WORKER: "1" } });
+  const child = spawn("sh", ["-c", persistentCommand, "pi-api-worker", pi.command, ...pi.args, "--mode", "rpc", "--no-session"], { cwd: process.cwd(), detached: true, stdio: ["ignore", fd, fd], env: { ...process.env, PI_API_WORKER: "1" } });
   child.unref(); await writeJson(statePath(), { pid: child.pid!, host: api.host, port: api.port, startedAt: new Date().toISOString() });
   console.log(`API started at http://${api.host}:${api.port} (PID ${child.pid}).`); console.log(`The token is stored in ${configPath()}.`);
 }
