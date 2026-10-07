@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { PulseStore, pulseId } from "../extensions/pulse/store.ts";
-import { profileModelArgs, pulseSessionId } from "../extensions/pulse/index.ts";
+import { profileModelArgs, pulseMessage, pulseSessionId } from "../extensions/pulse/index.ts";
 
 async function withStore(run: (path: string, store: PulseStore) => void | Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "pi-pulse-")), path = join(directory, "pulse.db");
@@ -29,6 +29,14 @@ test("names Pulse records and execution sessions with their type and UTC minute"
   assert.equal(pulseId("heartbeat", timestamp), "pulse-heartbeat_2026-09-18-01-01");
   assert.equal(pulseSessionId("cron", timestamp), "pulse-cron_2026-09-18-01-01");
   assert.equal(pulseSessionId("heartbeat", timestamp), "pulse-heartbeat_2026-09-18-01-01");
+});
+
+test("appends an internal non-empty completion contract to every Pulse prompt", () => {
+  const message = pulseMessage("send-audio", "Send only an audio to WhatsApp.", "Previous result.");
+  assert.match(message, /^\[Pulse: send-audio\]\nSend only an audio to WhatsApp\./);
+  assert.match(message, /Previous heartbeat state \(private\):\nPrevious result\./);
+  assert.match(message, /always return a non-empty final response/);
+  assert.match(message, /do not send it to an external recipient/);
 });
 
 test("records Pulse results in active API sessions by default unless disabled explicitly", async () => {
