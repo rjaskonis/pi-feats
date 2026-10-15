@@ -14,6 +14,9 @@ body:has(.terminal-page) { background: #0d1117; }
 .terminal-host .xterm { width: 100%; max-width: 100%; height: 100%; overflow: hidden; }
 .terminal-host .xterm-viewport { background-color: #0d1117 !important; }
 button, input, textarea, select { font: inherit; }
+/* Form labels are emphasized; entered and selected values remain regular weight. */
+label { font-weight: 600; }
+input, textarea, select, .cm-editor, .w-md-editor { font-weight: 400; }
 select, select option { background-color: #ffffff !important; }
 .bg-zinc-950, .bg-zinc-900 { background-color: #ffffff !important; }
 .bg-zinc-800 { background-color: #e4e4e7 !important; }
