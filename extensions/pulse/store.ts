@@ -112,13 +112,15 @@ export class PulseStore {
     this.db.prepare("UPDATE pulse_control SET enabled=?, next_run_at=?, updated_at=? WHERE pulse_id=?").run(enabled ? 1 : 0, next, iso(), pulse.id);
     return this.get(name, profile)!;
   }
-  update(name: string, profile: string | undefined, input: Pick<Pulse, "description" | "schedule" | "prompt" | "thread_session_id" | "insertIntoApiSession">): Pulse {
+  update(name: string, profile: string | undefined, input: Pick<Pulse, "description" | "schedule" | "prompt" | "thread_session_id" | "insertIntoApiSession"> & { name?: string }): Pulse {
     const pulse = this.get(name, profile); if (!pulse) throw new Error("Pulse not found.");
+    const nextName = input.name ?? pulse.name;
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(nextName)) throw new Error("Invalid pulse name.");
     if (!validSchedule(input.schedule)) throw new Error("Invalid schedule. Use a five-field UTC cron expression or @once:<ISO-8601>.");
     const type = pulseType(input.schedule);
-    this.db.prepare("UPDATE pulses SET description=?, type=?, schedule=?, prompt=?, thread_session_id=?, insert_into_api_session=? WHERE id=?").run(input.description, type, input.schedule, input.prompt, input.thread_session_id, input.insertIntoApiSession ? 1 : 0, pulse.id);
+    this.db.prepare("UPDATE pulses SET name=?, description=?, type=?, schedule=?, prompt=?, thread_session_id=?, insert_into_api_session=? WHERE id=?").run(nextName, input.description, type, input.schedule, input.prompt, input.thread_session_id, input.insertIntoApiSession ? 1 : 0, pulse.id);
     this.db.prepare("UPDATE pulse_control SET next_run_at=?, updated_at=? WHERE pulse_id=?").run(pulse.enabled ? nextRun(input.schedule)?.toISOString() ?? null : null, iso(), pulse.id);
-    return this.get(name, profile)!;
+    return this.get(nextName, profile)!;
   }
   delete(name: string, profile?: string): void { const pulse = this.get(name, profile); if (!pulse) throw new Error("Pulse not found."); this.db.prepare("DELETE FROM pulses WHERE id=?").run(pulse.id); }
   deleteProfile(profile: string): void { this.db.prepare("DELETE FROM pulses WHERE id IN (SELECT pulse_id FROM pulse_control WHERE profile=?)").run(profile); }

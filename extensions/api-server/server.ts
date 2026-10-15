@@ -936,14 +936,14 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     });
     server.put<{ Params: { profile: string; name: string } }>("/api/profiles/:profile/pulses/:name", async (request, reply) => {
       if (!guard(request, reply)) return;
-      const body = objectBody(request.body), fields = ["description", "schedule", "prompt"] as const;
+      const body = objectBody(request.body), fields = ["name", "description", "schedule", "prompt"] as const;
       for (const field of fields) if (typeof body[field] !== "string" || !String(body[field]).trim()) throw Object.assign(new Error(`The '${field}' field must be a non-empty string.`), { status: 400 });
       const sessionId = typeof body.thread_session_id === "string" ? body.thread_session_id : "";
       if (sessionId && !(await api.listSessions(profileName(request))).some((session) => session.id === sessionId)) throw Object.assign(new Error("The thread_session_id session was not found."), { status: 404 });
       try {
         const profile = profileName(request), current = api.pulses.get(request.params.name, profile);
         if (!current) throw new Error("Pulse not found.");
-        return { pulse: api.pulses.update(request.params.name, profile, { description: body.description as string, schedule: body.schedule as string, prompt: body.prompt as string, thread_session_id: sessionId, insertIntoApiSession: typeof body.insertIntoApiSession === "boolean" ? body.insertIntoApiSession : current.insertIntoApiSession }) };
+        return { pulse: api.pulses.update(request.params.name, profile, { name: body.name as string, description: body.description as string, schedule: body.schedule as string, prompt: body.prompt as string, thread_session_id: sessionId, insertIntoApiSession: typeof body.insertIntoApiSession === "boolean" ? body.insertIntoApiSession : current.insertIntoApiSession }) };
       }
       catch (error) { throw Object.assign(error instanceof Error ? error : new Error(String(error)), { status: 400 }); }
     });

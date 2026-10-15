@@ -44,7 +44,11 @@ test("records Pulse results in active API sessions by default unless disabled ex
     const pulse = store.create({ name: "api-report", description: "Report", schedule: "0 9 * * *", prompt: "Run", profile: "support", thread_session_id: "session" });
     assert.match(pulse.id, /^pulse-cron_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}$/);
     assert.equal(pulse.insertIntoApiSession, true);
-    assert.equal(store.update("api-report", "support", { description: "Report", schedule: "0 9 * * *", prompt: "Run", thread_session_id: "session", insertIntoApiSession: false }).insertIntoApiSession, false);
+    const updated = store.update("api-report", "support", { name: "renamed-report", description: "Report", schedule: "0 9 * * *", prompt: "Run", thread_session_id: "session", insertIntoApiSession: false });
+    assert.equal(updated.name, "renamed-report");
+    assert.equal(updated.insertIntoApiSession, false);
+    assert.equal(store.get("api-report", "support"), undefined);
+    assert.equal(store.get("renamed-report", "support")?.id, pulse.id);
   });
 });
 
