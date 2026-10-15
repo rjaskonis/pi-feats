@@ -50,7 +50,22 @@ export class SkillSourceStore {
     return this.db.prepare("SELECT source_identifier,source_relative_path,target_path FROM skill_source_installations WHERE profile=? AND skill_name=?").get(profile, skillName) as Row | undefined;
   }
 
-  async publish(identifier: string, profile: string, skillName: string, skillPath: string) {
+  private async replacePublishedSkill(source: string, target: string): Promise<void> {
+    const temporary = `${target}.publish-${randomUUID()}`, backup = `${target}.backup-${randomUUID()}`;
+    try {
+      await rm(temporary, { recursive: true, force: true });
+      await cp(source, temporary, { recursive: true, filter: (path) => !path.split("/").includes("node_modules") && !path.split("/").includes(".git") });
+      if (existsSync(target)) await rename(target, backup);
+      await rename(temporary, target);
+      await rm(backup, { recursive: true, force: true });
+    } catch (error) {
+      await rm(temporary, { recursive: true, force: true });
+      if (!existsSync(target) && existsSync(backup)) await rename(backup, target);
+      throw error;
+    }
+  }
+
+  async publish(identifier: string, profile: string, skillName: string, skillPath: string, confirmOverwrite = false) {
     const previous = this.publishing.get(identifier) ?? Promise.resolve();
     let release!: () => void;
     const queued = new Promise<void>((resolveRun) => { release = resolveRun; });
@@ -66,17 +81,21 @@ export class SkillSourceStore {
       await this.validateSkillDirectory(local);
       const installation = this.installation(profile, skillName);
       if (installation && String(installation.source_identifier) !== identifier) throw Object.assign(new Error("This skill was imported from a different Skill Source. Publish it there or create a new local skill."), { status: 409 });
-      const targetRelative = installation ? String(installation.source_relative_path) : join(source.basePath, skillName).replaceAll("\\", "/");
-      if (targetRelative.split("/").includes("..") || targetRelative.startsWith("/")) throw Object.assign(new Error("Invalid skill destination."), { status: 400 });
-      const sameName = this.skills(identifier).filter((item) => item.name === skillName && item.relativePath !== targetRelative && item.status === "synced");
-      if (sameName.length) throw Object.assign(new Error(`A different skill named '${skillName}' already exists in this Skill Source. Publish by its original path or rename the local skill.`), { status: 409 });
       const refreshed = await this.sync(identifier);
       if (refreshed.status !== "succeeded") throw Object.assign(new Error(refreshed.error ?? "Unable to synchronize the Skill Source before publishing."), { status: 502 });
+      const available = this.skills(identifier).filter((item) => item.status === "synced");
+      const matching = available.filter((item) => item.name === skillName);
+      if (!installation && matching.length > 1) throw Object.assign(new Error(`Multiple Skills named '${skillName}' exist in this Skill Source. Rename the local Skill before publishing.`), { status: 409 });
+      const sourceRelative = installation ? String(installation.source_relative_path) : matching[0]?.relativePath ?? skillName;
+      if (sourceRelative.split("/").includes("..") || sourceRelative.startsWith("/")) throw Object.assign(new Error("Invalid skill destination."), { status: 400 });
+      const existing = available.find((item) => item.relativePath === sourceRelative);
+      if (installation && !existing) throw Object.assign(new Error("The Skill no longer exists in its Skill Source. Import it again or publish it as a new local Skill."), { status: 409 });
+      const targetRelative = join(source.basePath, sourceRelative).replaceAll("\\", "/");
+      if (existing && !confirmOverwrite) return { action: "confirmation_required" as const, source: identifier, relativePath: targetRelative, description: existing.description, commitHash: existing.commitHash };
       const repository = resolve(this.root, ".git-cache", identifier), target = resolve(repository, targetRelative);
       if (!target.startsWith(`${repository}/`)) throw Object.assign(new Error("Invalid skill destination."), { status: 400 });
-      await rm(target, { recursive: true, force: true });
       await mkdir(dirname(target), { recursive: true });
-      await cp(local, target, { recursive: true, filter: (path) => !path.split("/").includes("node_modules") && !path.split("/").includes(".git") });
+      await this.replacePublishedSkill(local, target);
       const token = String((this.db.prepare("SELECT credential_token FROM skill_sources WHERE identifier=?").get(identifier) as Row).credential_token);
       const askpass = join(this.root, `.git-askpass-publish-${randomUUID()}`), env: NodeJS.ProcessEnv = {
         ...process.env,
@@ -101,9 +120,9 @@ export class SkillSourceStore {
       } finally { await rm(askpass, { force: true }); }
       const synced = await this.sync(identifier);
       if (synced.status !== "succeeded") throw Object.assign(new Error(synced.error ?? "The Skill Source was pushed but could not be synchronized."), { status: 502 });
-      const published = this.skills(identifier).find((item) => item.relativePath === targetRelative);
-      if (published) this.db.prepare("INSERT INTO skill_source_installations VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(profile,skill_name) DO UPDATE SET source_identifier=excluded.source_identifier,source_relative_path=excluded.source_relative_path,source_commit_hash=excluded.source_commit_hash,source_content_hash=excluded.source_content_hash,target_path=excluded.target_path,installed_at=excluded.installed_at").run(profile,skillName,identifier,targetRelative,published.commitHash,published.contentHash,local,now());
-      return { action: installation ? "updated" as const : "created" as const, source: identifier, relativePath: targetRelative, commitHash: synced.commitHash };
+      const published = this.skills(identifier).find((item) => item.relativePath === sourceRelative);
+      if (published) this.db.prepare("INSERT INTO skill_source_installations VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(profile,skill_name) DO UPDATE SET source_identifier=excluded.source_identifier,source_relative_path=excluded.source_relative_path,source_commit_hash=excluded.source_commit_hash,source_content_hash=excluded.source_content_hash,target_path=excluded.target_path,installed_at=excluded.installed_at").run(profile,skillName,identifier,sourceRelative,published.commitHash,published.contentHash,local,now());
+      return { action: existing ? "updated" as const : "created" as const, source: identifier, relativePath: targetRelative, commitHash: synced.commitHash };
     } finally { release(); if (this.publishing.get(identifier) === chain) this.publishing.delete(identifier); }
   }
 
