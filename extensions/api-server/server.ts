@@ -174,7 +174,7 @@ class ApiServer {
   async getApplicationSession(application: string, profile: string, prefix: string) { return this.applications.session(application, profile, prefix); }
   async getActiveApplicationSession(application: string, profile: string, prefix: string) { return this.applications.activeSession(application, profile, prefix); }
   async nextApplicationSessionId(application: string, profile: string, prefix: string) { return this.applications.nextSessionId(application, profile, prefix); }
-  async recordApplicationSession(application: string, profile: string, prefix: string, sessionId: string, rollover: boolean) { this.applications.createSession(application, profile, prefix, sessionId, rollover); }
+  async recordApplicationSession(application: string, profile: string, prefix: string, sessionId: string, rollover: boolean, sessionType: "stateful" | "stateless" = "stateful") { this.applications.createSession(application, profile, prefix, sessionId, rollover, sessionType); }
   async touchApplicationSession(application: string, profile: string, prefix: string, sessionId: string, identityKey?: string) { this.applications.touchSession(application, profile, prefix, sessionId, identityKey); }
   async getApplicationWorkingSessions(profile: string, application: string) { return this.profiles.readApplicationWorkingSessions(profile, application); }
   async setApplicationWorkingSession(profile: string, application: string, key: string, session: { sessionId: string; updatedAt: string; reason: "message" | "rollover" }): Promise<void> { await this.profiles.setApplicationWorkingSession(profile, application, key, session); }
@@ -386,6 +386,19 @@ class ApiServer {
       let runtime = this.runtimes.get(agentDir); if (!runtime) { runtime = ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") }); this.runtimes.set(agentDir, runtime); }
       const { session } = await createAgentSession({ cwd: this.options.cwd, agentDir, sessionManager: SessionManager.inMemory(this.options.cwd), settingsManager, resourceLoader: loader, modelRuntime: await runtime });
       try { await session.prompt(prompt, { source: "rpc" }); return textFromMessage([...session.messages].reverse().find((item) => item.role === "assistant")); } finally { session.dispose(); }
+    });
+  }
+
+  async promptStateless(profile: string, id: string, history: Array<{ role: "user" | "assistant"; content: string }>, message: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<{ profile: string; sessionId: string; response: string }> {
+    if (await this.sandboxed(profile)) throw Object.assign(new Error("Stateless sessions are not yet available for sandboxed profiles."), { status: 501 });
+    const agentDir = this.profileDirectory(profile); await this.profiles.readSettings(profile);
+    return this.withProfileEnvironment(agentDir, async () => {
+      const settingsManager = SettingsManager.create(this.options.cwd, agentDir); const loader = new DefaultResourceLoader({ cwd: this.options.cwd, agentDir, settingsManager }); await loader.reload();
+      let runtime = this.runtimes.get(agentDir); if (!runtime) { runtime = ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") }); this.runtimes.set(agentDir, runtime); }
+      const manager = SessionManager.inMemory(this.options.cwd);
+      for (const item of history) manager.appendMessage({ role: item.role, content: item.content, timestamp: Date.now() } as any);
+      const { session } = await createAgentSession({ cwd: this.options.cwd, agentDir, sessionManager: manager, settingsManager, resourceLoader: loader, modelRuntime: await runtime });
+      try { const run = () => session.prompt(message, { source: "rpc" }); if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, run); else await run(); return { profile, sessionId: id, response: textFromMessage([...session.messages].reverse().find((entry) => entry.role === "assistant")) }; } finally { session.dispose(); }
     });
   }
 

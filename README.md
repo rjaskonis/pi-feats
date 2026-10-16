@@ -133,6 +133,7 @@ Applications are the integration boundary between Pi and external systems. Use o
 - Provide `sessionId` in a Direct Mode request to explicitly create or adopt that session for the resolved route. A session cannot be associated with another Application route.
 - Pass transient `contextMemory` in a Direct Mode request to supply personal context only when initializing that request's session. It is not persisted in profile or identity memory.
 - In `ack` response mode, Direct Mode requires `responseWebhookUrl`; Pi immediately acknowledges the request and POSTs the completed response to that URL. In `result` mode, Pi returns the completed response synchronously and ignores `responseWebhookUrl`.
+- Direct Mode defaults to `sessionType: "stateful"`. Use `sessionType: "stateless"` with an optional client-supplied `history` array to keep the Application session ID and routing while rebuilding the Pi context in memory for each request; no Pi session transcript is written or reused. Stateless sessions are currently unavailable for sandboxed profiles.
 - Inspect active sessions, roll over a conversation, preserve private handoff context, test handlers with a JSON payload, and stream or clear application logs from the Console or API.
 - Include an Evolution API adapter implementation while keeping Applications structurally independent from adapters.
 
@@ -161,6 +162,11 @@ curl -X POST \
 curl -X POST \
   -H "Content-Type: application/json" \
   -d '{"identityKey":"customer@example.com","message":"Where is my order?"}' \
+  http://127.0.0.1:8767/api/message/app/support-inbox
+
+# Stateless Direct Mode: history belongs entirely to the caller. Omit history for an empty context.
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"identityKey":"customer@example.com","sessionType":"stateless","history":[{"role":"user","content":"Hello"},{"role":"assistant","content":"How can I help?"}],"message":"Continue."}' \
   http://127.0.0.1:8767/api/message/app/support-inbox
 
 # In ack mode, provide a webhook for the completed response.
