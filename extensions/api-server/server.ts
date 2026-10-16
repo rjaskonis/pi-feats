@@ -171,7 +171,7 @@ class ApiServer {
 
   async getIdentityMapping(application: string, identityKey: string) { return this.applications.identityMapping(application, identityKey); }
   async automaticApplicationSessionPrefix(application: string, identityKey: string) { return this.applications.automaticPrefix(application, identityKey); }
-  async getApplicationSession(application: string, profile: string, prefix: string) { return this.applications.session(application, profile, prefix); }
+  async getApplicationSession(application: string, profile: string, prefix: string, sessionType: "stateful" | "stateless" = "stateful") { return this.applications.session(application, profile, prefix, sessionType); }
   async getActiveApplicationSession(application: string, profile: string, prefix: string) { return this.applications.activeSession(application, profile, prefix); }
   async nextApplicationSessionId(application: string, profile: string, prefix: string) { return this.applications.nextSessionId(application, profile, prefix); }
   async recordApplicationSession(application: string, profile: string, prefix: string, sessionId: string, rollover: boolean, sessionType: "stateful" | "stateless" = "stateful") { this.applications.createSession(application, profile, prefix, sessionId, rollover, sessionType); }
