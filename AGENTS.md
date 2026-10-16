@@ -27,6 +27,10 @@ Keep all source code, comments, commit messages, scripts, documentation, user-fa
 - Commands such as `pi profile support skills list`, `extensions list`, and `packages list` must work through the shared runtime while operating on the selected profile's state.
 - `cli-resources.ts` and `api-server/profile-store.ts` must treat extensions/packages as default-runtime resources. Skills and tool policy remain profile-scoped.
 
+## Remote server changes
+
+Never deploy, update packages, restart services, or otherwise modify a remote server or container without the user's explicit request for that specific change. Read-only investigation and diagnostics do not authorize remote modifications.
+
 ## Sandbox and security
 
 - Named profiles use Nono; the default profile remains unsandboxed.
