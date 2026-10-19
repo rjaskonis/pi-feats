@@ -8,7 +8,7 @@ import { useToast } from "@/components/toast";
 
 type Provider = { id: string; models: Array<{ id: string; name: string }> };
 type ModelCatalog = { providers: Provider[] };
-type ApplicationSession = { application: string; sessionPrefix: string; sessionId: string };
+type ApplicationSession = { application: string; sessionPrefix: string; sessionId: string; sessionType: "stateful" | "stateless" };
 
 export function ProfileModelForm({ profile, initial }: { profile: string; initial?: ModelCatalog & { settings?: Record<string, unknown> } }) {
   const { toast } = useToast();
@@ -32,7 +32,7 @@ export function ProfileModelForm({ profile, initial }: { profile: string; initia
       const sessionsBody = await sessionsResponse.json();
       if (!sessionsResponse.ok) throw new Error(sessionsBody.error ?? "Model saved, but active sessions could not be loaded.");
       const unique = new Map<string, ApplicationSession>();
-      for (const session of sessionsBody.sessions as ApplicationSession[]) unique.set(`${session.application}:${session.sessionPrefix}`, session);
+      for (const session of sessionsBody.sessions as ApplicationSession[]) if (session.sessionType === "stateful") unique.set(`${session.application}:${session.sessionPrefix}`, session);
       setActiveSessions([...unique.values()]);
       setRolloverDialog(true);
     } catch (error) { toast((error as Error).message, "error"); } finally { setSaving(false); }
