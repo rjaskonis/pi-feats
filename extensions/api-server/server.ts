@@ -398,7 +398,7 @@ class ApiServer {
       const manager = SessionManager.inMemory(this.options.cwd);
       for (const item of history) manager.appendMessage({ role: item.role, content: item.content, timestamp: Date.now() } as any);
       const { session } = await createAgentSession({ cwd: this.options.cwd, agentDir, sessionManager: manager, settingsManager, resourceLoader: loader, modelRuntime: await runtime });
-      try { const run = () => session.prompt(message, { source: "rpc" }); if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, run); else await run(); return { profile, sessionId: id, response: textFromMessage([...session.messages].reverse().find((entry) => entry.role === "assistant")) }; } finally { session.dispose(); }
+      try { const run = () => session.prompt(message, { source: "rpc" }); if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, run); else await run(); return { profile, sessionId: id, response: session.getLastAssistantText() }; } finally { session.dispose(); }
     });
   }
 
