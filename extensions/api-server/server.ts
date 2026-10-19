@@ -221,6 +221,12 @@ class ApiServer {
     return SessionManager.listAll(sessionDir);
   }
 
+  private isPulseOnlySession(profile: string, session: { path: string; cwd: string }): boolean {
+    const entries = SessionManager.open(session.path, this.sessionDirectory(profile), session.cwd).getBranch() as Array<{ type?: string }>;
+    const relevant = entries.filter((entry) => entry.type !== "session_info");
+    return relevant.length > 0 && relevant.some((entry) => entry.type === "pulse") && relevant.every((entry) => entry.type === "pulse");
+  }
+
   async deleteProfile(profile: string): Promise<void> {
     if (profile === "default") throw Object.assign(new Error("The default profile cannot be deleted"), { status: 400 });
     await this.profiles.readSettings(profile);
@@ -235,13 +241,15 @@ class ApiServer {
     this.pulses.deleteProfile(profile);
   }
 
-  async listSessions(profile: string, includePulseExecutions = false): Promise<Array<Record<string, unknown>>> {
+  async listSessions(profile: string, includePulseSessions = false): Promise<Array<Record<string, unknown>>> {
     await this.profiles.readSettings(profile);
     const pulseExecutions = this.pulses.executionSessions(profile);
-    const sessions = (await this.listProfileSessions(profile)).filter((session) => includePulseExecutions || !pulseExecutions.has(session.id));
-    return sessions.map((session) => {
-      const pulse = pulseExecutions.get(session.id);
-      return {
+    const sessions = await this.listProfileSessions(profile);
+    return sessions.flatMap((session) => {
+      const execution = pulseExecutions.get(session.id), pulseOnly = !execution && this.isPulseOnlySession(profile, session);
+      if (!includePulseSessions && (execution || pulseOnly)) return [];
+      const pulse = execution ? { id: execution.pulseId, name: execution.pulseName, type: execution.pulseType, runId: execution.runId, status: execution.status, startedAt: execution.startedAt, finishedAt: execution.finishedAt, source: "execution" } : pulseOnly ? { source: "injected-result" } : undefined;
+      return [{
         id: session.id,
         name: session.name,
         cwd: session.cwd,
@@ -249,9 +257,9 @@ class ApiServer {
         updatedAt: session.modified.toISOString(),
         messageCount: session.messageCount,
         preview: session.firstMessage,
-        kind: pulse ? "pulse-execution" : "conversation",
-        ...(pulse ? { pulse: { id: pulse.pulseId, name: pulse.pulseName, type: pulse.pulseType, runId: pulse.runId, status: pulse.status, startedAt: pulse.startedAt, finishedAt: pulse.finishedAt } } : {}),
-      };
+        kind: execution ? "pulse-execution" : pulseOnly ? "pulse-only" : "conversation",
+        ...(pulse ? { pulse } : {}),
+      }];
     });
   }
 
@@ -883,9 +891,9 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       return { content };
     });
 
-    server.get<{ Params: { profile: string }; Querystring: { includePulseExecutions?: string } }>("/api/profiles/:profile/sessions", async (request, reply) => {
+    server.get<{ Params: { profile: string }; Querystring: { includePulseSessions?: string; includePulseExecutions?: string } }>("/api/profiles/:profile/sessions", async (request, reply) => {
       if (!guard(request, reply)) return;
-      return { sessions: await api.listSessions(profileName(request), request.query.includePulseExecutions === "true") };
+      return { sessions: await api.listSessions(profileName(request), request.query.includePulseSessions === "true" || request.query.includePulseExecutions === "true") };
     });
     server.post<{ Params: { profile: string } }>("/api/profiles/:profile/sessions", async (request, reply) => {
       if (!guard(request, reply)) return;

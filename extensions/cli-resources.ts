@@ -112,7 +112,9 @@ function SessionTable({ sessions }: { sessions: SessionInfo[] }): string {
   return ["SESSIONS", top, row(["ID", "SESSION", "LAST ACTIVITY", "PATH"]), line, ...sessions.map((session) => row([session.id, session.name ?? session.firstMessage, formatActivity(session.modified), session.path])), bottom].join("\n");
 }
 
-function PulseSessionTable(sessions: Array<SessionInfo & { pulse: PulseExecutionSession }>): string { if (!sessions.length) return "PULSE EXECUTION SESSIONS\nNo Pulse execution sessions found."; return `PULSE EXECUTION SESSIONS\nID  TYPE  PULSE  STATUS  LAST ACTIVITY\n${sessions.map((session) => `${session.id}  ${session.pulse.pulseType}  ${session.pulse.pulseName}  ${session.pulse.status}  ${session.modified.toISOString()}`).join("\n")}`; }
+type PulseListedSession = SessionInfo & { source: "execution" | "injected-result"; pulse?: PulseExecutionSession };
+function isPulseOnlySession(session: SessionInfo, sessionDir: string | undefined): boolean { const entries = SessionManager.open(session.path, sessionDir, session.cwd).getBranch() as Array<{ type?: string }>; const relevant = entries.filter((entry) => entry.type !== "session_info"); return relevant.length > 0 && relevant.some((entry) => entry.type === "pulse") && relevant.every((entry) => entry.type === "pulse"); }
+function PulseSessionTable(sessions: PulseListedSession[]): string { if (!sessions.length) return "PULSE SESSIONS\nNo Pulse sessions found."; return `PULSE SESSIONS\nID  SOURCE  TYPE  PULSE  STATUS  LAST ACTIVITY\n${sessions.map((session) => `${session.id}  ${session.source}  ${session.pulse?.pulseType ?? "—"}  ${session.pulse?.pulseName ?? "Pulse result"}  ${session.pulse?.status ?? "—"}  ${session.modified.toISOString()}`).join("\n")}`; }
 
 function ApplicationSessionTable(root: string, profile: string): string {
   const path = join(root, "applications.db"); if (!existsSync(path)) return "";
@@ -523,9 +525,10 @@ export default async function (pi: ExtensionAPI) {
     const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
     const profile = process.env.PI_ACTIVE_PROFILE ?? requestedProfile() ?? "default", root = process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
     const pulseExecutions = new PulseStore(join(root, "pulse.db")).executionSessions(profile);
-    const pulseSessions = sessions.filter((session) => pulseExecutions.has(session.id)).map((session) => ({ ...session, pulse: pulseExecutions.get(session.id)! }));
+    const pulseSessions: PulseListedSession[] = sessions.flatMap((session) => { const pulse = pulseExecutions.get(session.id); if (pulse) return [{ ...session, source: "execution", pulse }]; return isPulseOnlySession(session, sessionDir) ? [{ ...session, source: "injected-result" }] : []; });
+    const pulseSessionIds = new Set(pulseSessions.map((session) => session.id));
     if (sessionFilter === "pulses") await writeTable(PulseSessionTable(pulseSessions));
-    else await writeTable([SessionTable({ sessions: sessions.filter((session) => !pulseExecutions.has(session.id)) }), ApplicationSessionTable(root, profile)].filter(Boolean).join("\n\n"));
+    else await writeTable([SessionTable({ sessions: sessions.filter((session) => !pulseSessionIds.has(session.id)) }), ApplicationSessionTable(root, profile)].filter(Boolean).join("\n\n"));
     process.exit(0);
   }
 
