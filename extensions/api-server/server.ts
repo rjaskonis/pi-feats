@@ -398,7 +398,8 @@ class ApiServer {
       const manager = SessionManager.inMemory(this.options.cwd);
       for (const item of history) manager.appendMessage({ role: item.role, content: item.content, timestamp: Date.now() } as any);
       const { session } = await createAgentSession({ cwd: this.options.cwd, agentDir, sessionManager: manager, settingsManager, resourceLoader: loader, modelRuntime: await runtime });
-      try { const run = () => session.prompt(message, { source: "rpc" }); if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, run); else await run(); return { profile, sessionId: id, response: session.getLastAssistantText() }; } finally { session.dispose(); }
+      let response = ""; const unsubscribe = session.subscribe((event) => { if (event.type === "message_end" && event.message.role === "assistant") response = textFromMessage(event.message); });
+      try { const run = () => session.prompt(message, { source: "rpc" }); if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, run); else await run(); response ||= session.getLastAssistantText() ?? ""; if (!response) throw new Error("Stateless Pi execution completed without an assistant response."); return { profile, sessionId: id, response }; } finally { unsubscribe(); session.dispose(); }
     });
   }
 
