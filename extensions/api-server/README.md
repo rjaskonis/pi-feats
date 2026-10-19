@@ -62,6 +62,26 @@ Request body:
 
 `/chat/stream` uses Server-Sent Events: `session`, `token`, and `done`.
 
+## Application Direct Mode
+
+`POST /api/message/app/:slug` supports Direct Mode for integrations that supply an Identity Key and a message. It resolves the Application's Identity Key mapping and bypasses application handlers.
+
+```json
+{
+  "identityKey": "customer@example.com",
+  "sessionType": "stateless",
+  "history": [
+    { "role": "user", "content": "My name is Ada." },
+    { "role": "assistant", "content": "Hello, Ada." }
+  ],
+  "message": "What is my name?"
+}
+```
+
+`sessionType` defaults to `stateful`, which creates or resumes a persistent Pi JSONL session. With `sessionType: "stateless"`, the server creates an in-memory Pi session for the request only and disposes it after responding. The optional `history` is supplied and owned by the caller; omitting it starts with no conversational context. A stateless `sessionId` is a logical identifier for Application routing, logs, and metrics only, not a transcript. Stateless mode is unavailable for sandboxed profiles.
+
+The Application message endpoint accepts complete HTTP request bodies up to 200 MiB. Account for base64 expansion when embedding file data in JSON.
+
 ## Sessions and profiles
 
 Sessions are created in the same persistent location used by the CLI. For example, a session created through the API can be resumed with:
