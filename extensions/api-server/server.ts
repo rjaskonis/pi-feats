@@ -405,7 +405,7 @@ class ApiServer {
   }
 
   async promptStateless(profile: string, id: string, history: Array<{ role: "user" | "assistant"; content: string }>, message: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<{ profile: string; sessionId: string; response: string }> {
-    if (await this.sandboxed(profile)) throw Object.assign(new Error("Stateless sessions are not yet available for sandboxed profiles."), { status: 501 });
+    if (await this.sandboxed(profile)) return { profile, sessionId: id, response: await this.runSandboxedStatelessPrompt(profile, id, history, message, applicationContext) };
     const agentDir = this.profileDirectory(profile); await this.profiles.readSettings(profile);
     return this.withProfileEnvironment(agentDir, async () => {
       const settingsManager = SettingsManager.create(this.options.cwd, agentDir); const loader = new DefaultResourceLoader({ cwd: this.options.cwd, agentDir, settingsManager }); await loader.reload();
@@ -525,6 +525,33 @@ class ApiServer {
         return false;
       }).join("\n").trim();
       if (result.code !== 0) throw new Error(stderr || `Sandboxed Pi exited with ${result.code}`);
+      return result.stdout.trim();
+    } finally { this.sandboxBusy.delete(key); }
+  }
+
+  private async runSandboxedStatelessPrompt(profile: string, id: string, history: Array<{ role: "user" | "assistant"; content: string }>, message: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<string> {
+    const key = `${profile}:${id}`;
+    if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
+    this.sandboxBusy.add(key);
+    try {
+      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, PI_STATELESS_APPLICATION_HISTORY: JSON.stringify(history), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application, PI_APPLICATION_SESSION_ID: id, ...(applicationContext.directContextMemory !== undefined ? { PI_APPLICATION_DIRECT_CONTEXT_MEMORY: Buffer.from(applicationContext.directContextMemory, "utf8").toString("base64url") } : {}) } : {}) };
+      delete workerEnv.PI_API_WORKER;
+      const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolveRun, reject) => {
+        const pi = piCommand();
+        const child = spawn(pi.command, [...pi.args, "profile", profile, "--no-session", "--print", message], { cwd: this.profileDirectory(profile), env: workerEnv, stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = "", stderr = "";
+        child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+        child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+        child.once("error", reject);
+        child.once("exit", (code) => resolveRun({ stdout, stderr, code: code ?? 1 }));
+      });
+      const stderr = result.stderr.split(/\r?\n/).filter((line) => {
+        if (!line.startsWith("PI_CONTEXT_MEMORY_LOG:")) return true;
+        if (applicationContext) try { this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, JSON.parse(line.slice("PI_CONTEXT_MEMORY_LOG:".length)) as ContextMemoryExecutionLog); } catch { /* Ignore malformed child telemetry. */ }
+        return false;
+      }).join("\n").trim();
+      if (result.code !== 0) throw new Error(stderr || `Sandboxed Pi exited with ${result.code}`);
+      if (!result.stdout.trim()) throw Object.assign(new Error("Pi completed without an assistant response."), { status: 502, code: "STATELESS_RESPONSE_MISSING", stage: "response_extraction" });
       return result.stdout.trim();
     } finally { this.sandboxBusy.delete(key); }
   }
