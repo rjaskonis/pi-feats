@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { BUILTIN_TOOLS, activeBuiltinTools, updatedBuiltinTools } from "./lib/builtin-tools.ts";
 import { packageExtensions, type InstalledPackage } from "./lib/package-resources.ts";
 import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
@@ -108,6 +109,12 @@ function SessionTable({ sessions }: { sessions: SessionInfo[] }): string {
   }).format(date);
 
   return ["SESSIONS", top, row(["ID", "SESSION", "LAST ACTIVITY", "PATH"]), line, ...sessions.map((session) => row([session.id, session.name ?? session.firstMessage, formatActivity(session.modified), session.path])), bottom].join("\n");
+}
+
+function ApplicationSessionTable(root: string, profile: string): string {
+  const path = join(root, "applications.db"); if (!existsSync(path)) return "";
+  const db = new DatabaseSync(path, { readOnly: true });
+  try { const rows = db.prepare("SELECT s.application_slug,s.session_prefix,s.session_id,s.session_type,s.message_count,s.updated_at FROM application_session_state st JOIN application_sessions s ON s.session_id=st.current_session_id WHERE st.profile=? ORDER BY s.updated_at DESC").all(profile) as Array<Record<string, unknown>>; if (!rows.length) return ""; const lines = rows.map((row) => `${String(row.session_id)}  ${String(row.session_type)}  ${Number(row.message_count)} ${String(row.session_type) === "stateless" ? "requests" : "messages"}  ${String(row.application_slug)}/${String(row.session_prefix)}`); return `APPLICATION SESSIONS\nID  TYPE  COUNT  ROUTE\n${lines.join("\n")}`; } finally { db.close(); }
 }
 
 function requestedProfile(): string | undefined {
@@ -508,7 +515,7 @@ export default async function (pi: ExtensionAPI) {
   if (sessionRequested) {
     const sessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
     const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
-    await writeTable(SessionTable({ sessions }));
+    const profile = process.env.PI_ACTIVE_PROFILE ?? requestedProfile() ?? "default"; const root = process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"); await writeTable([SessionTable({ sessions }), ApplicationSessionTable(root, profile)].filter(Boolean).join("\n\n"));
     process.exit(0);
   }
 
