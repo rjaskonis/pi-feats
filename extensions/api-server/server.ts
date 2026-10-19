@@ -17,6 +17,7 @@ import { existsSync } from "node:fs";
 import { ProfileStore, RESOURCE_KINDS, type ProfileSettings, type ResourceKind } from "./profile-store.ts";
 import { ApplicationRuntime, type Settings as ApplicationSettings } from "./application-runtime.ts";
 import { ApplicationStore, type ApplicationRecord } from "./application-store.ts";
+import { buildStatelessPrompt } from "./stateless-prompt.ts";
 import { applicationHandlerTemplate } from "../lib/application-handler-templates.ts";
 import { applicationExecutionContext, type ContextMemoryExecutionLog } from "../lib/application-context.ts";
 import { contextMemoryCharacters, contextMemoryConfig, contextMemoryLimit, memoryPath, readMemory } from "../lib/context-memory.ts";
@@ -405,16 +406,15 @@ class ApiServer {
   }
 
   async promptStateless(profile: string, id: string, history: Array<{ role: "user" | "assistant"; content: string }>, message: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<{ profile: string; sessionId: string; response: string }> {
-    if (await this.sandboxed(profile)) return { profile, sessionId: id, response: await this.runSandboxedStatelessPrompt(profile, id, history, message, applicationContext) };
+    const prompt = buildStatelessPrompt(history, message);
+    if (await this.sandboxed(profile)) return { profile, sessionId: id, response: await this.runSandboxedStatelessPrompt(profile, id, prompt, applicationContext) };
     const agentDir = this.profileDirectory(profile); await this.profiles.readSettings(profile);
     return this.withProfileEnvironment(agentDir, async () => {
       const settingsManager = SettingsManager.create(this.options.cwd, agentDir); const loader = new DefaultResourceLoader({ cwd: this.options.cwd, agentDir, settingsManager }); await loader.reload();
       let runtime = this.runtimes.get(agentDir); if (!runtime) { runtime = ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") }); this.runtimes.set(agentDir, runtime); }
-      const manager = SessionManager.inMemory(this.options.cwd);
-      for (const item of history) { const timestamp = Date.now(); if (item.role === "user") manager.appendMessage({ role: "user", content: item.content, timestamp }); else manager.appendMessage({ role: "assistant", content: [{ type: "text", text: item.content }], api: "openai-completions", provider: "external-history", model: "external-history", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp } as any); }
-      const { session } = await createAgentSession({ cwd: this.options.cwd, agentDir, sessionManager: manager, settingsManager, resourceLoader: loader, modelRuntime: await runtime });
+      const { session } = await createAgentSession({ cwd: this.options.cwd, agentDir, sessionManager: SessionManager.inMemory(this.options.cwd), settingsManager, resourceLoader: loader, modelRuntime: await runtime });
       let response = ""; const unsubscribe = session.subscribe((event) => { if (event.type === "message_end" && event.message.role === "assistant") response = textFromMessage(event.message); });
-      try { const run = () => session.prompt(message, { source: "rpc" }); if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, run); else await run(); response ||= session.getLastAssistantText() ?? ""; if (!response) throw Object.assign(new Error("Pi completed without an assistant response."), { status: 502, code: "STATELESS_RESPONSE_MISSING", stage: "response_extraction" }); return { profile, sessionId: id, response }; } finally { unsubscribe(); session.dispose(); }
+      try { const run = () => session.prompt(prompt, { source: "rpc" }); if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, run); else await run(); response ||= session.getLastAssistantText() ?? ""; if (!response) throw Object.assign(new Error("Pi completed without an assistant response."), { status: 502, code: "STATELESS_RESPONSE_MISSING", stage: "response_extraction" }); return { profile, sessionId: id, response }; } finally { unsubscribe(); session.dispose(); }
     });
   }
 
@@ -529,16 +529,16 @@ class ApiServer {
     } finally { this.sandboxBusy.delete(key); }
   }
 
-  private async runSandboxedStatelessPrompt(profile: string, id: string, history: Array<{ role: "user" | "assistant"; content: string }>, message: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<string> {
+  private async runSandboxedStatelessPrompt(profile: string, id: string, prompt: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<string> {
     const key = `${profile}:${id}`;
     if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
     this.sandboxBusy.add(key);
     try {
-      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, PI_STATELESS_APPLICATION_HISTORY: JSON.stringify(history), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application, PI_APPLICATION_SESSION_ID: id, ...(applicationContext.directContextMemory !== undefined ? { PI_APPLICATION_DIRECT_CONTEXT_MEMORY: Buffer.from(applicationContext.directContextMemory, "utf8").toString("base64url") } : {}) } : {}) };
+      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application, PI_APPLICATION_SESSION_ID: id, ...(applicationContext.directContextMemory !== undefined ? { PI_APPLICATION_DIRECT_CONTEXT_MEMORY: Buffer.from(applicationContext.directContextMemory, "utf8").toString("base64url") } : {}) } : {}) };
       delete workerEnv.PI_API_WORKER;
       const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolveRun, reject) => {
         const pi = piCommand();
-        const child = spawn(pi.command, [...pi.args, "profile", profile, "--no-session", "--print", message], { cwd: this.profileDirectory(profile), env: workerEnv, stdio: ["ignore", "pipe", "pipe"] });
+        const child = spawn(pi.command, [...pi.args, "profile", profile, "--no-session", "--print", prompt], { cwd: this.profileDirectory(profile), env: workerEnv, stdio: ["ignore", "pipe", "pipe"] });
         let stdout = "", stderr = "";
         child.stdout.on("data", (chunk) => { stdout += String(chunk); });
         child.stderr.on("data", (chunk) => { stderr += String(chunk); });
@@ -835,13 +835,12 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.put<{ Params: { profile: string } }>("/api/profiles/:profile/context-memory", async (request, reply) => {
       if (!guard(request, reply)) return;
       const profile = profileName(request), body = objectBody(request.body);
-      const config = body.config === null ? undefined : contextMemoryConfig(body.config);
-      if (body.config !== null && !config) throw Object.assign(new Error("Invalid Context Memory configuration."), { status: 400 });
+      const config = body.config === null ? { mode: "none" } as const : contextMemoryConfig(body.config);
+      if (!config) throw Object.assign(new Error("Invalid Context Memory configuration."), { status: 400 });
       const settings = await api.profiles.readSettings(profile);
-      const policy = { ...((settings.profile as Record<string, unknown> | undefined) ?? {}) };
-      if (config) policy.contextMemory = config; else delete policy.contextMemory;
+      const policy = { ...((settings.profile as Record<string, unknown> | undefined) ?? {}), contextMemory: config };
       await api.profiles.writeSettings(profile, { ...settings, profile: policy });
-      return { config: config ?? null };
+      return { config };
     });
     for (const target of ["operational", "profile"] as const) {
       server.get<{ Params: { profile: string } }>(`/api/profiles/:profile/context-memory/${target}`, async (request, reply) => {

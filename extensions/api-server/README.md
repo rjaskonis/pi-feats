@@ -78,7 +78,7 @@ Request body:
 }
 ```
 
-`sessionType` defaults to `stateful`, which creates or resumes a persistent Pi JSONL session. With `sessionType: "stateless"`, the server creates an in-memory Pi session for the request only and disposes it after responding. The optional `history` is supplied and owned by the caller; omitting it starts with no conversational context. A stateless `sessionId` is a logical identifier for Application routing, logs, and metrics only, not a transcript. For sandboxed profiles, stateless calls run in an ephemeral Pi process under Nono. The history is initialized in memory and no session transcript is written.
+`sessionType` defaults to `stateful`, which creates or resumes a persistent Pi JSONL session. With `sessionType: "stateless"`, the server creates an in-memory Pi session for the request only and disposes it after responding. The optional caller-owned `history` becomes temporary prompt context, followed by the current user message; omitting it starts with no conversational context. A client-supplied `sessionId` is ignored in stateless mode; the server uses the active logical session for the resolved Application route. For sandboxed profiles, stateless calls run in an ephemeral Pi process under Nono with the same prompt context and no session transcript.
 
 The Application message endpoint accepts complete HTTP request bodies up to 200 MiB. Account for base64 expansion when embedding file data in JSON.
 

@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureDefaultProfileContextMemory, normalizeIdentity, resolveContextMemory, updateContextMemory } from "../extensions/lib/context-memory.ts";
+import { contextMemoryConfig, ensureDefaultProfileContextMemory, normalizeIdentity, resolveContextMemory, updateContextMemory } from "../extensions/lib/context-memory.ts";
 
 test("new profiles default Context Memory to PROFILE.md without replacing an existing choice", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-context-memory-"));
@@ -15,6 +15,25 @@ test("new profiles default Context Memory to PROFILE.md without replacing an exi
     await writeFile(join(profile, "settings.json"), JSON.stringify({ profile: { contextMemory: { mode: "file", target: "identity" } } }));
     await ensureDefaultProfileContextMemory(profile);
     assert.deepEqual(JSON.parse(await readFile(join(profile, "settings.json"), "utf8")).profile.contextMemory, { mode: "file", target: "identity" });
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("an explicit None choice survives session initialization and disables personal memory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-context-memory-"));
+  try {
+    const profile = join(root, "profiles", "support");
+    await mkdir(join(profile, "context-memory"), { recursive: true });
+    const settings = JSON.stringify({ profile: { contextMemory: { mode: "none" } } });
+    await writeFile(join(profile, "settings.json"), settings);
+    await writeFile(join(profile, "context-memory", "OPERATIONAL.md"), "Operational fact");
+    await writeFile(join(profile, "context-memory", "PROFILE.md"), "Must not be included");
+    assert.deepEqual(contextMemoryConfig({ mode: "none" }), { mode: "none" });
+    assert.deepEqual(await ensureDefaultProfileContextMemory(profile), { mode: "none" });
+    assert.equal(await readFile(join(profile, "settings.json"), "utf8"), settings);
+    const memory = await resolveContextMemory(root, profile, { profile: "support" });
+    assert.equal(memory.operational, "Operational fact");
+    assert.equal(memory.personal, "");
+    await assert.rejects(() => updateContextMemory(root, profile, { profile: "support" }, "read", "personal"), /disabled/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

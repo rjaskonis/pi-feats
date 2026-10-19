@@ -256,7 +256,7 @@ export class ApplicationRuntime {
     if (!message) throw Object.assign(new Error("message must be a non-empty string for a Direct Mode request."), { status: 400 });
     const sessionType = body.sessionType === undefined ? "stateful" : body.sessionType; if (sessionType !== "stateful" && sessionType !== "stateless") throw Object.assign(new Error("sessionType must be 'stateful' or 'stateless'."), { status: 400 }); const history = body.history; if (history !== undefined && (!Array.isArray(history) || history.some((item) => !item || typeof item !== "object" || !["user", "assistant"].includes((item as RecordValue).role) || typeof (item as RecordValue).content !== "string"))) throw Object.assign(new Error("history must contain text user or assistant messages."), { status: 400 }); if (history !== undefined && (history.length > 100 || history.reduce((total, item) => total + (item as RecordValue).content.length, 0) > 100_000)) throw Object.assign(new Error("history exceeds the 100-message or 100,000-character limit."), { status: 413 }); if (sessionType === "stateful" && history !== undefined) throw Object.assign(new Error("history is only supported for stateless sessions."), { status: 400 });
     const sessionId = body.sessionId;
-    if (sessionId !== undefined && (typeof sessionId !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(sessionId))) throw Object.assign(new Error("Invalid sessionId."), { status: 400 });
+    if (sessionType === "stateful" && sessionId !== undefined && (typeof sessionId !== "string" || !/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(sessionId))) throw Object.assign(new Error("Invalid sessionId."), { status: 400 });
     const contextMemory = body.contextMemory;
     if (contextMemory !== undefined && typeof contextMemory !== "string") throw Object.assign(new Error("contextMemory must be a string."), { status: 400 });
     if (typeof contextMemory === "string" && Array.from(contextMemory.trim()).length > 1375) throw Object.assign(new Error("contextMemory exceeds its 1375-character limit."), { status: 413 });
@@ -275,12 +275,11 @@ export class ApplicationRuntime {
   }
 
   private async resolveDirectSession(request: DirectRequest): Promise<string> {
-    if (!request.sessionId && request.sessionType === "stateful") return this.resolveSession(request.profile, request.sessionPrefix); if (!request.sessionId) return this.withQueue(`${this.application.slug}:${request.profile}:${request.sessionPrefix}:stateless`, async () => { const current = await this.api.getApplicationSession(this.application.slug, request.profile, request.sessionPrefix, request.sessionType) as any; if (current) { if (current.sessionType !== "stateless") throw Object.assign(new Error("The active Application session is stateful."), { status: 409 }); return current.sessionId; } const id = await this.api.nextApplicationSessionId(this.application.slug, request.profile, request.sessionPrefix); await this.api.recordApplicationSession(this.application.slug, request.profile, request.sessionPrefix, id, false, "stateless"); return id; });
+    if (request.sessionType === "stateless") return this.withQueue(`${this.application.slug}:${request.profile}:${request.sessionPrefix}:stateless`, async () => { const current = await this.api.getApplicationSession(this.application.slug, request.profile, request.sessionPrefix, "stateless") as any; if (current) return current.sessionId; const id = await this.api.nextApplicationSessionId(this.application.slug, request.profile, request.sessionPrefix); await this.api.recordApplicationSession(this.application.slug, request.profile, request.sessionPrefix, id, false, "stateless"); return id; });
+    if (!request.sessionId) return this.resolveSession(request.profile, request.sessionPrefix);
     return this.withQueue(`${this.application.slug}:${request.profile}:${request.sessionPrefix}:direct:${request.sessionId}`, async () => {
-      const current = await this.api.getApplicationSession(this.application.slug, request.profile, request.sessionPrefix, request.sessionType) as any;
-      if (current?.sessionType && current.sessionType !== request.sessionType) throw Object.assign(new Error("sessionId belongs to a different sessionType."), { status: 409 });
-      if (request.sessionType === "stateful") { const exists = (await this.api.listSessions(request.profile)).some((session) => session.id === request.sessionId); if (!exists) await this.api.createSession(request.profile, { id: request.sessionId }); }
-      await this.api.recordApplicationSession(this.application.slug, request.profile, request.sessionPrefix, request.sessionId, false, request.sessionType);
+      const exists = (await this.api.listSessions(request.profile)).some((session) => session.id === request.sessionId); if (!exists) await this.api.createSession(request.profile, { id: request.sessionId });
+      await this.api.recordApplicationSession(this.application.slug, request.profile, request.sessionPrefix, request.sessionId, false, "stateful");
       return request.sessionId;
     });
   }

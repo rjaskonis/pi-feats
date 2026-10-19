@@ -18,7 +18,7 @@ type ProfilePolicy = {
   enabledProfileSkills?: string[];
   enabledExtensions?: string[];
   skillSources?: { shared?: boolean; profile?: boolean };
-  contextMemory?: { mode: "file"; target: "profile" | "identity" } | { mode: "handler"; handler: string };
+  contextMemory?: { mode: "none" } | { mode: "file"; target: "profile" | "identity" } | { mode: "handler"; handler: string };
 };
 
 type ProfileSettings = Record<string, unknown> & { profile?: ProfilePolicy };
@@ -33,6 +33,11 @@ export function resolveRootAgentDir(environment: NodeJS.ProcessEnv = process.env
 
 const rootAgentDir = () => resolveRootAgentDir();
 const profilesDir = () => join(rootAgentDir(), "profiles");
+const PROFILE_REEXEC_CONTEXT_ENV = ["PI_APPLICATION_IDENTITY_KEY", "PI_APPLICATION_SLUG", "PI_APPLICATION_SESSION_ID", "PI_APPLICATION_DIRECT_CONTEXT_MEMORY", "PI_APPLICATION_HANDOFF"] as const;
+
+export function forwardedProfileExecutionEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(PROFILE_REEXEC_CONTEXT_ENV.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]!]]));
+}
 const profileDir = (name: string) => join(profilesDir(), name);
 const validProfileName = (name: string) => /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name);
 const reservedProfileNames = new Set([
@@ -404,6 +409,7 @@ async function reexecWithProfile(name: string, args: string[]) {
   const sandbox = await isSandboxEnabled(target, name === "default");
   const childEnv = {
     ...await profileEnvironment(target),
+    ...forwardedProfileExecutionEnvironment(),
     PI_CODING_AGENT_DIR: target,
     PI_PROFILE_ROOT: root,
     PI_PROFILE_REEXEC: "1",

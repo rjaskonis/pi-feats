@@ -103,8 +103,7 @@
       "./extensions/profile-ssh.ts",
       "./extensions/pulse",
       "./extensions/sequential-workflow.ts",
-      "./extensions/skill-sources",
-      "./extensions/stateless-sandbox-history.ts"
+      "./extensions/skill-sources"
     ],
     "skills": [
       "./skills"

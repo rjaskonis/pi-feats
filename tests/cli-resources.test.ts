@@ -8,11 +8,15 @@ import { activeBuiltinTools, updatedBuiltinTools } from "../extensions/lib/built
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
 import { extensionRows, findResource, skillRows, updatedExtensionSettings } from "../extensions/cli-resources.ts";
 import { packageExtensions } from "../extensions/lib/package-resources.ts";
-import { resolveRootAgentDir, rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
+import { forwardedProfileExecutionEnvironment, resolveRootAgentDir, rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
 
 test("profile root uses the remote agent directory when no reexec root is set", () => {
   assert.equal(resolveRootAgentDir({ PI_CODING_AGENT_DIR: "/home/rj/.pi/agent" }), "/home/rj/.pi/agent");
   assert.equal(resolveRootAgentDir({ PI_CODING_AGENT_DIR: "/home/rj/.pi/agent", PI_PROFILE_ROOT: "/tmp/profile-root" }), "/tmp/profile-root");
+});
+
+test("profile reexec forwards only approved Application execution context", () => {
+  assert.deepEqual(forwardedProfileExecutionEnvironment({ PI_APPLICATION_IDENTITY_KEY: "identity", PI_APPLICATION_SLUG: "support", PI_APPLICATION_SESSION_ID: "session", PI_APPLICATION_DIRECT_CONTEXT_MEMORY: "memory", PI_APPLICATION_HANDOFF: "handoff", PI_STATELESS_APPLICATION_HISTORY: "must-not-pass", UNRELATED: "must-not-pass" }), { PI_APPLICATION_IDENTITY_KEY: "identity", PI_APPLICATION_SLUG: "support", PI_APPLICATION_SESSION_ID: "session", PI_APPLICATION_DIRECT_CONTEXT_MEMORY: "memory", PI_APPLICATION_HANDOFF: "handoff" });
 });
 
 test("profile metadata is listed and can be updated without changing policy", async () => {

@@ -8,6 +8,7 @@ import { profileEnvironment } from "./profile-env.ts";
 import type { ContextMemoryExecutionLog } from "./application-context.ts";
 
 export type ContextMemoryConfig =
+  | { mode: "none" }
   | { mode: "file"; target: "profile" | "identity" }
   | { mode: "handler"; handler: string };
 export type ContextMemoryTarget = "operational" | "profile" | "user";
@@ -21,6 +22,7 @@ const sensitive = /\b(password|passphrase|api[_ -]?key|secret|access[_ -]?token|
 export function contextMemoryConfig(value: unknown): ContextMemoryConfig | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const item = value as Record<string, unknown>;
+  if (item.mode === "none") return { mode: "none" };
   if (item.mode === "file" && (item.target === "profile" || item.target === "identity")) return { mode: "file", target: item.target };
   if (item.mode === "handler" && typeof item.handler === "string" && /^[A-Za-z][A-Za-z0-9_-]*$/.test(item.handler)) return { mode: "handler", handler: item.handler };
   return undefined;
@@ -122,7 +124,7 @@ export async function resolveContextMemory(agentDir: string, profileDir: string,
     return { operational, personal, source: "direct" };
   }
   const config = await profileMemoryConfig(profileDir);
-  if (!config) return { operational, personal: "" };
+  if (!config || config.mode === "none") return { operational, personal: "" };
   if (config.mode === "file" && config.target === "profile") { const personal = await readMemory(memoryPath(agentDir, profileDir, "profile")); if (contextMemoryCharacters(personal) > CONTEXT_MEMORY_LIMITS.profile) throw new Error("PROFILE.md exceeds 1375 characters."); return { operational, personal, source: "profile" }; }
   if (config.mode === "file" && config.target === "identity") {
     if (!context.application || !context.identityKey) return { operational, personal: "" };
@@ -144,6 +146,7 @@ export async function updateContextMemory(agentDir: string, profileDir: string, 
   if (requestedTarget === "personal") {
     if (config?.mode === "file") target = config.target;
     else if (config?.mode === "handler") throw new Error("Personal Context Memory is provided by an Application handler and cannot be edited with this tool.");
+    else if (config?.mode === "none") throw new Error("Personal Context Memory is disabled for this profile.");
     else throw new Error("Personal Context Memory is not configured for this profile.");
   }
   if (target === "user" && (!context.application || !context.identityKey)) throw new Error("User Context Memory requires an Application identity.");
