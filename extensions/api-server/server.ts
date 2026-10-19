@@ -39,7 +39,7 @@ type ChatBody = { message: string };
 type ChatParams = { profile?: string; sessionId: string };
 
 const MAX_BODY_BYTES = 1_048_576;
-const MAX_APPLICATION_BODY_BYTES = 32 * 1024 * 1024;
+const MAX_APPLICATION_BODY_BYTES = 200 * 1024 * 1024;
 let serverPromise: Promise<FastifyInstance> | undefined;
 // Some third-party extensions read PI_CODING_AGENT_DIR while loading.
 // Only bootstrap is serialized so each runtime captures its own profile.
