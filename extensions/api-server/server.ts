@@ -235,18 +235,24 @@ class ApiServer {
     this.pulses.deleteProfile(profile);
   }
 
-  async listSessions(profile: string): Promise<Array<Record<string, unknown>>> {
+  async listSessions(profile: string, includePulseExecutions = false): Promise<Array<Record<string, unknown>>> {
     await this.profiles.readSettings(profile);
-    const sessions = await this.listProfileSessions(profile);
-    return sessions.map((session) => ({
-      id: session.id,
-      name: session.name,
-      cwd: session.cwd,
-      createdAt: session.created.toISOString(),
-      updatedAt: session.modified.toISOString(),
-      messageCount: session.messageCount,
-      preview: session.firstMessage,
-    }));
+    const pulseExecutions = this.pulses.executionSessions(profile);
+    const sessions = (await this.listProfileSessions(profile)).filter((session) => includePulseExecutions || !pulseExecutions.has(session.id));
+    return sessions.map((session) => {
+      const pulse = pulseExecutions.get(session.id);
+      return {
+        id: session.id,
+        name: session.name,
+        cwd: session.cwd,
+        createdAt: session.created.toISOString(),
+        updatedAt: session.modified.toISOString(),
+        messageCount: session.messageCount,
+        preview: session.firstMessage,
+        kind: pulse ? "pulse-execution" : "conversation",
+        ...(pulse ? { pulse: { id: pulse.pulseId, name: pulse.pulseName, type: pulse.pulseType, runId: pulse.runId, status: pulse.status, startedAt: pulse.startedAt, finishedAt: pulse.finishedAt } } : {}),
+      };
+    });
   }
 
   async createSession(profile: string, input: unknown): Promise<Record<string, unknown>> {
@@ -877,9 +883,9 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       return { content };
     });
 
-    server.get<{ Params: { profile: string } }>("/api/profiles/:profile/sessions", async (request, reply) => {
+    server.get<{ Params: { profile: string }; Querystring: { includePulseExecutions?: string } }>("/api/profiles/:profile/sessions", async (request, reply) => {
       if (!guard(request, reply)) return;
-      return { sessions: await api.listSessions(profileName(request)) };
+      return { sessions: await api.listSessions(profileName(request), request.query.includePulseExecutions === "true") };
     });
     server.post<{ Params: { profile: string } }>("/api/profiles/:profile/sessions", async (request, reply) => {
       if (!guard(request, reply)) return;

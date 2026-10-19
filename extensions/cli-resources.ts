@@ -8,6 +8,7 @@ import { BUILTIN_TOOLS, activeBuiltinTools, updatedBuiltinTools } from "./lib/bu
 import { packageExtensions, type InstalledPackage } from "./lib/package-resources.ts";
 import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
 import { piCommand } from "./lib/pi-command.ts";
+import { PulseStore, type PulseExecutionSession } from "./pulse/store.ts";
 
 type ListKind = "tools" | "skills" | "extensions";
 type Row = [string, string, string];
@@ -110,6 +111,8 @@ function SessionTable({ sessions }: { sessions: SessionInfo[] }): string {
 
   return ["SESSIONS", top, row(["ID", "SESSION", "LAST ACTIVITY", "PATH"]), line, ...sessions.map((session) => row([session.id, session.name ?? session.firstMessage, formatActivity(session.modified), session.path])), bottom].join("\n");
 }
+
+function PulseSessionTable(sessions: Array<SessionInfo & { pulse: PulseExecutionSession }>): string { if (!sessions.length) return "PULSE EXECUTION SESSIONS\nNo Pulse execution sessions found."; return `PULSE EXECUTION SESSIONS\nID  TYPE  PULSE  STATUS  LAST ACTIVITY\n${sessions.map((session) => `${session.id}  ${session.pulse.pulseType}  ${session.pulse.pulseName}  ${session.pulse.status}  ${session.modified.toISOString()}`).join("\n")}`; }
 
 function ApplicationSessionTable(root: string, profile: string): string {
   const path = join(root, "applications.db"); if (!existsSync(path)) return "";
@@ -491,8 +494,11 @@ export default async function (pi: ExtensionAPI) {
   const packageRequested = packageRequestedFromArgs(args);
   const packageAction = packageActionFromArgs(args);
   const sessionRename = sessionRenameFromArgs(args);
-  const sessionRequested = args.some((arg) => arg === "--list-sessions" || arg === "--list-sessions=true")
-    || args.some((arg, index) => arg === "sessions" && args[index + 1] === "list");
+  const sessionListIndex = args.findIndex((arg, index) => arg === "sessions" && args[index + 1] === "list");
+  const sessionFilterCandidate = sessionListIndex >= 0 ? args[sessionListIndex + 2] : undefined;
+  const sessionFilter = sessionFilterCandidate?.startsWith("--") ? undefined : sessionFilterCandidate;
+  if (sessionFilter !== undefined && sessionFilter !== "pulses") throw new Error(`Unknown sessions list filter: ${sessionFilter}`);
+  const sessionRequested = args.some((arg) => arg === "--list-sessions" || arg === "--list-sessions=true") || sessionListIndex >= 0;
   if (!kind && !action && !packageRequested && !packageAction && !sessionRequested && !sessionRename) return;
 
   // Run CLI operations in an ephemeral child so they never create an empty session.
@@ -515,7 +521,11 @@ export default async function (pi: ExtensionAPI) {
   if (sessionRequested) {
     const sessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
     const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
-    const profile = process.env.PI_ACTIVE_PROFILE ?? requestedProfile() ?? "default"; const root = process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent"); await writeTable([SessionTable({ sessions }), ApplicationSessionTable(root, profile)].filter(Boolean).join("\n\n"));
+    const profile = process.env.PI_ACTIVE_PROFILE ?? requestedProfile() ?? "default", root = process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+    const pulseExecutions = new PulseStore(join(root, "pulse.db")).executionSessions(profile);
+    const pulseSessions = sessions.filter((session) => pulseExecutions.has(session.id)).map((session) => ({ ...session, pulse: pulseExecutions.get(session.id)! }));
+    if (sessionFilter === "pulses") await writeTable(PulseSessionTable(pulseSessions));
+    else await writeTable([SessionTable({ sessions: sessions.filter((session) => !pulseExecutions.has(session.id)) }), ApplicationSessionTable(root, profile)].filter(Boolean).join("\n\n"));
     process.exit(0);
   }
 
