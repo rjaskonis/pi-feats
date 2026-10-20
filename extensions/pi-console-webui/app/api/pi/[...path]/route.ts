@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
+import { validApiBearerToken } from "@/lib/api-auth";
 import { authenticated } from "@/lib/auth";
 import { getConfig } from "@/lib/config";
 
 async function proxy(request: Request, context: { params: Promise<{ path: string[] }> }) {
-  if (!(await authenticated())) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  const { path } = await context.params;
   const config = await getConfig();
+  if (!(await authenticated()) && !validApiBearerToken(request.headers.get("authorization"), config.apiToken)) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  const { path } = await context.params;
   if (!config.apiToken) return NextResponse.json({ error: "Pi API token is not configured" }, { status: 503 });
   const prefix = path[0] === "profile" ? "/" : "/api/";
   const url = new URL(`${prefix}${path.map(encodeURIComponent).join("/")}`, config.apiUrl);

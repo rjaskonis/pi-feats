@@ -38,6 +38,24 @@ Every endpoint except health requires:
 Authorization: Bearer <apiToken>
 ```
 
+### Console proxy access
+
+A standard Docker deployment exposes the Console proxy at `/api/pi`. It accepts either an authenticated Console session or the same API bearer token, then forwards the request to the local API Server. This makes the complete management API available without exposing the API Server port directly:
+
+```text
+https://pi.example.com/api/pi/profiles
+https://pi.example.com/api/pi/applications
+```
+
+Use the proxy base URL as the remote client base:
+
+```dotenv
+PI_FEATS_API_URL=https://pi.example.com/api/pi
+PI_FEATS_API_TOKEN=...
+```
+
+The API Server itself continues to use `/api/...` paths when accessed directly.
+
 ## Endpoints
 
 ```text
