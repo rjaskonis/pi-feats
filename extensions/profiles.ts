@@ -8,7 +8,7 @@ import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { ensureNonoAvailable, ensureProfileSandbox, isSandboxEnabled, migrateLegacySandboxRuntime, sandboxedCommand } from "./lib/profile-sandbox.ts";
 import { profileEnvironment } from "./lib/profile-env.ts";
-import { packageExtensions } from "./lib/package-resources.ts";
+import { extensionCatalog } from "./lib/extension-catalog.ts";
 import { handleRemoteCli, REMOTE_COMMAND_NAMES } from "./lib/remote-hosts.ts";
 import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
 
@@ -165,41 +165,8 @@ function packageInstallPath(root: string, source: string): string | undefined {
   return existsSync(join(path, "package.json")) ? path : undefined;
 }
 
-const requiredRuntimeExtensions = new Set(["profiles", "api-server", "conversation-search"]);
-
 export async function rootRuntimeSources(root: string, base: ProfileSettings): Promise<string[]> {
-  const sources = new Set<string>();
-  const enabled = base.profile?.enabledExtensions;
-  const extensionName = (path: string) => basename(path).replace(/\.(?:ts|js)$/, "");
-  const add = (path: string, aliases = [extensionName(path)]) => {
-    if (!existsSync(path)) return;
-    // Profiles are workspaces, but these extensions are core runtime
-    // capabilities and must cross the default-runtime boundary even when a
-    // profile limits optional extensions.
-    if (aliases.some((name) => requiredRuntimeExtensions.has(name)) || !enabled || enabled.includes("*") || aliases.some((name) => enabled.includes(name))) sources.add(path);
-  };
-  if (Array.isArray(base.packages)) for (const entry of base.packages) {
-    const source = typeof entry === "object" && entry !== null ? (entry as { source?: unknown }).source : entry;
-    if (typeof source !== "string") continue;
-    const packagePath = packageInstallPath(root, source);
-    if (!packagePath) { add(source.startsWith(".") ? resolve(root, source) : source); continue; }
-    try {
-      const manifest = JSON.parse(await readFile(join(packagePath, "package.json"), "utf8")) as { name?: string; pi?: { extensions?: unknown } };
-      for (const extension of packageExtensions([{ base: packagePath, name: manifest.name ?? basename(packagePath), manifest }])) add(extension.path, extension.aliases);
-    } catch {}
-  }
-  if (Array.isArray(base.extensions)) for (const entry of base.extensions) if (typeof entry === "string") add(entry.startsWith(".") ? resolve(root, entry) : entry);
-  // Pi auto-discovers these for the default profile. Add them explicitly when
-  // re-executing a named profile, where that profile's extensions directory is
-  // intentionally empty.
-  try {
-    for (const entry of await readdir(join(root, "extensions"), { withFileTypes: true })) {
-      const path = join(root, "extensions", entry.name);
-      if (entry.isFile() && [".ts", ".js"].some((extension) => entry.name.endsWith(extension))) add(path);
-      else if (entry.isDirectory() && (existsSync(join(path, "index.ts")) || existsSync(join(path, "index.js")))) add(path);
-    }
-  } catch {}
-  return [...sources];
+  return (await extensionCatalog(root, base)).filter((entry) => entry.enabled).map((entry) => entry.path);
 }
 
 async function profileSettings(root: string, base: ProfileSettings, localSkillsDir: string): Promise<ProfileSettings> {

@@ -4,6 +4,7 @@ import { join, relative, resolve } from "node:path";
 import { ensureProfileSandbox } from "../lib/profile-sandbox.ts";
 import { BUILTIN_TOOLS, activeBuiltinTools, updatedBuiltinTools } from "../lib/builtin-tools.ts";
 import { packageExtensions } from "../lib/package-resources.ts";
+import { extensionCatalog, resolveExtension, updatedExtensionSettings } from "../lib/extension-catalog.ts";
 
 export { BUILTIN_TOOLS } from "../lib/builtin-tools.ts";
 export const RESOURCE_KINDS = ["tools", "skills", "extensions"] as const;
@@ -34,7 +35,6 @@ const policyKey: Record<ResourceKind, PolicyKey> = {
   skills: "enabledSkills",
   extensions: "enabledExtensions",
 };
-const protectedExtensions = new Set(["profiles", "api-server"]);
 
 export class ProfileStore {
   private readonly extensionTools = new Map<string, Set<string>>();
@@ -112,17 +112,6 @@ export class ProfileStore {
     };
     await visit(base);
     return skills.sort((a, b) => a.name.localeCompare(b.name));
-  }
-
-  private async names(kind: Exclude<ResourceKind, "tools" | "skills">): Promise<Array<{ name: string; path: string }>> {
-    const base = join(this.agentDir, kind);
-    if (!existsSync(base)) return [];
-    const entries = await readdir(base, { withFileTypes: true });
-    return entries.flatMap((entry) => {
-      if (entry.isFile() && /\.(?:ts|js)$/.test(entry.name)) return [{ name: entry.name.replace(/\.(?:ts|js)$/, ""), path: join(base, entry.name) }];
-      if (entry.isDirectory() && (existsSync(join(base, entry.name, "index.ts")) || existsSync(join(base, entry.name, "index.js")))) return [{ name: entry.name, path: join(base, entry.name) }];
-      return [];
-    });
   }
 
   private enabled(settings: ProfileSettings, kind: ResourceKind, name: string, path?: string): boolean {
@@ -218,10 +207,15 @@ export class ProfileStore {
       const names = new Set([...extensionTools, ...sources.keys()]);
       return [...BUILTIN_TOOLS.map((name) => ({ name, kind, source: "builtin" as const, enabled: this.enabled(settings, kind, name) })), ...[...names].sort().map((name) => sources.has(name) ? ({ name, kind, source: "package" as const, package: sources.get(name), enabled: this.enabled(settings, kind, name) }) : ({ name, kind, source: "extension" as const, enabled: this.enabled(settings, kind, name) }))];
     }
-    return [...(await this.names("extensions")).map(({ name, path }) => ({ name, kind, path, source: "shared" as const, enabled: protectedExtensions.has(name) ? true : this.enabled(runtimeSettings, kind, name, path), protected: protectedExtensions.has(name) || undefined })), ...(await this.packageExtensions(runtimeSettings)).map(({ name, path, package: packageName }) => ({ name, kind, path, source: "package" as const, package: packageName, enabled: protectedExtensions.has(name) ? true : this.enabled(runtimeSettings, kind, name, path), protected: protectedExtensions.has(name) || undefined }))];
+    return (await extensionCatalog(this.agentDir, runtimeSettings)).map((entry) => ({ name: entry.name, kind, path: entry.path, source: entry.packageName ? "package" as const : "shared" as const, package: entry.packageName, enabled: entry.enabled, protected: entry.protected || undefined }));
   }
 
   async resource(profile: string, kind: ResourceKind, name: string, source?: SkillResourceSource): Promise<Resource> {
+    if (kind === "extensions") {
+      const entry = resolveExtension(await extensionCatalog(this.agentDir, await this.readSettings("default")), name);
+      if (!entry) throw Object.assign(new Error("Resource not found"), { status: 404 });
+      return (await this.resources(profile, kind)).find((item) => item.path === entry.path)!;
+    }
     const resource = (await this.resources(profile, kind)).find((item) => item.name === name && (!source || item.source === source));
     if (!resource) throw Object.assign(new Error("Resource not found"), { status: 404 });
     return resource;
@@ -295,6 +289,13 @@ export class ProfileStore {
   async setResource(profile: string, kind: ResourceKind, name: string, enabled: boolean, source?: SkillResourceSource): Promise<Resource> {
     const current = await this.resource(profile, kind, name, source);
     if (current.protected && !enabled) throw Object.assign(new Error("This extension is required and cannot be disabled."), { status: 422 });
+    if (kind === "extensions") {
+      const settings = await this.readSettings("default");
+      const catalog = await extensionCatalog(this.agentDir, settings);
+      const entry = resolveExtension(catalog, name)!;
+      await this.writeSettings("default", updatedExtensionSettings(settings, entry.path, entry, enabled, this.agentDir, catalog));
+      return this.resource(profile, kind, entry.path);
+    }
     // The default profile uses Pi's defaultTools setting for native tool state
     // unless it already has a legacy explicit enabledTools policy. Named profiles
     // retain their explicit enabledTools policy.
@@ -308,17 +309,14 @@ export class ProfileStore {
         return this.resource(profile, kind, name, source);
       }
     }
-    // Extensions are shared runtime resources, so toggling one always updates
-    // the default runtime rather than materializing it in a profile workspace.
-    const settingsProfile = kind === "extensions" ? "default" : profile;
-    const settings = await this.readSettings(settingsProfile);
+    const settings = await this.readSettings(profile);
     const key: PolicyKey = kind === "skills" ? (current.source === "profile" ? "enabledProfileSkills" : "enabledSkills") : policyKey[kind];
     const allNames = (await this.resources(profile, kind)).filter((item) => kind !== "skills" || item.source === current.source).map((item) => item.name);
     const selected = new Set(settings.profile?.[key]?.includes("*") || !settings.profile?.[key] ? allNames : settings.profile![key]);
     if (enabled) selected.add(name);
     else selected.delete(name);
     settings.profile = { ...(settings.profile ?? {}), [key]: [...selected].sort() };
-    await this.writeSettings(settingsProfile, settings);
+    await this.writeSettings(profile, settings);
     return this.resource(profile, kind, name, source);
   }
 

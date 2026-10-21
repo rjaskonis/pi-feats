@@ -425,8 +425,10 @@ pi skills disable my-skill
 pi skills enable my-skill
 pi extensions disable my-extension
 pi extensions enable my-extension
-# A package with a sole index extension uses its package name. These commands
-# also update an explicit runtime extension allowlist.
+# Generic entrypoints (index, pi, dist, extension) use their owning package's
+# name, including local paths with an ancestor package.json.
+pi extensions disable hindsight-coding-agents
+pi extensions enable @vectorize-io/hindsight-coding-agents
 pi extensions disable pi-mcp-adapter
 pi extensions enable pi-mcp-adapter
 
@@ -437,6 +439,8 @@ pi packages enable npm:some-package
 # Rename a saved session
 pi sessions rename <session-id> "Incident investigation"
 ```
+
+Extension names are shared by the CLI, API/Console, and profile runtime. Scoped package names are accepted as aliases; legacy entrypoint aliases remain valid only when unambiguous. Name collisions require an explicit path and never silently select the first match. The NAME column is not truncated. Disable/enable updates the default runtime, preserves the original resource declaration for re-enabling, and applies to named profiles after reload or restart. Required runtime extensions cannot be disabled through these commands.
 
 ### Guardrails, Pulse, API, and Console
 
