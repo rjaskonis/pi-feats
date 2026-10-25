@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { ensureNonoAvailable, ensureProfileSandbox, isSandboxEnabled, migrateLegacySandboxRuntime, sandboxedCommand } from "./lib/profile-sandbox.ts";
-import { profileEnvironment } from "./lib/profile-env.ts";
+import { profileEnvironment, registerProfileEnvReload } from "./lib/profile-env.ts";
 import { extensionCatalog } from "./lib/extension-catalog.ts";
 import { handleRemoteCli, REMOTE_COMMAND_NAMES } from "./lib/remote-hosts.ts";
 import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
@@ -438,6 +438,8 @@ export default async function (pi: ExtensionAPI) {
   if (process.env.PI_PROFILE_REEXEC !== "1") {
     await reexecWithProfile(requestedProfile?.name ?? "default", requestedProfile?.args ?? args);
   }
+
+  registerProfileEnvReload(pi, activeAgentDir);
 
   pi.on("session_start", async () => {
     if (process.env.PI_PROFILE_DISCOVER_TOOLS === "1") {

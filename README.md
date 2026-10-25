@@ -53,6 +53,7 @@ Pi Coding Agent intentionally keeps its core lightweight and extensible. Pi Feat
 
 - Create, delete, list, open, and resume named Pi profiles.
 - Keep profile-scoped settings, credentials, model catalogs, sessions, `SOUL.md`, Skills, and environment variables under `~/.pi/agent/profiles/<profile>/`.
+- The default profile loads `~/.pi/agent/.env`; named profiles load only their own `.env`. `/reload` rereads the active profile's file before replacement extensions load, updating added/changed variables and removing previously injected variables deleted from the file. `/new` does not reread it. Invalid or unreadable files preserve the previous environment and report an error. Existing child processes are unaffected.
 - Run named profiles through a [Nono](https://github.com/Anthropic/nono) policy while the default profile remains unsandboxed.
 - Preserve native Pi state directly in the profile directory; profiles do not use a disposable credential runtime.
 - Limit profile tools, shared Skills, and profile Skills through profile policy.

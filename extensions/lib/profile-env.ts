@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const INJECTED_KEYS = "PI_PROFILE_ENV_KEYS";
 // Never let a profile use the host user's SSH agent or askpass helper.
@@ -51,6 +52,35 @@ export async function profileEnvironment(agentDir: string, base: NodeJS.ProcessE
   for (const key of HOST_SSH_CREDENTIAL_KEYS) delete environment[key];
   environment[INJECTED_KEYS] = Object.keys(values).filter((key) => !HOST_SSH_CREDENTIAL_KEYS.includes(key as typeof HOST_SSH_CREDENTIAL_KEYS[number])).sort().join(",");
   return environment;
+}
+
+/** Refresh only profile-managed keys, after the entire file has been validated. */
+export async function reloadProfileEnvironment(agentDir: string, environment: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const refreshed = await profileEnvironment(agentDir, environment);
+  const managedKeys = new Set([
+    ...(environment[INJECTED_KEYS] ?? "").split(","),
+    ...(refreshed[INJECTED_KEYS] ?? "").split(","),
+    ...HOST_SSH_CREDENTIAL_KEYS,
+    INJECTED_KEYS,
+  ]);
+  for (const key of managedKeys) {
+    if (!key) continue;
+    if (refreshed[key] === undefined) delete environment[key];
+    else environment[key] = refreshed[key];
+  }
+}
+
+/** Reload before replacement extension factories run, never on /new or /resume. */
+export function registerProfileEnvReload(pi: ExtensionAPI, agentDir: string): void {
+  pi.on("session_shutdown", async (event) => {
+    if (event.reason !== "reload") return;
+    try {
+      await reloadProfileEnvironment(agentDir);
+    } catch {
+      // Parser errors can include secret values; do not expose their messages.
+      throw new Error(`Could not reload ${join(agentDir, ".env")}. Check file permissions and syntax. The previous environment was preserved.`);
+    }
+  });
 }
 
 /** Environment exposed to Application handlers; internal isolation metadata stays private. */
