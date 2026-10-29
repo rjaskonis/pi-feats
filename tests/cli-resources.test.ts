@@ -5,11 +5,45 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { type PulseExecutionSession } from "../extensions/pulse/store.ts";
 import { activeBuiltinTools, updatedBuiltinTools } from "../extensions/lib/builtin-tools.ts";
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
-import { ApplicationSessionTable, optionalSessionMetadata, pulseExecutionSessions, extensionRows, findResource, skillRows, updatedExtensionSettings } from "../extensions/cli-resources.ts";
+import { partitionPulseSessions, ApplicationSessionTable, optionalSessionMetadata, pulseExecutionSessions, extensionRows, findResource, skillRows, updatedExtensionSettings } from "../extensions/cli-resources.ts";
 import { packageExtensions } from "../extensions/lib/package-resources.ts";
 import { forwardedProfileExecutionEnvironment, resolveRootAgentDir, rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
+
+test("session listing hides real and legacy Pulse executions without hiding ordinary conversations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pulse-session-list-"));
+  try {
+    const legacy = "pulse-heartbeat_2026-10-29-19-00";
+    const timestamp = "2026-10-29T19:00:00.000Z";
+    async function fixture(id: string, filename: string, entries: object[]) {
+      await writeFile(join(root, `2026-10-29T19-00-00-000Z_${filename}.jsonl`), [
+        { type: "session", version: 3, id, cwd: root, timestamp },
+        ...entries.map((entry, index) => ({ id: `entry${index}`, parentId: index ? `entry${index - 1}` : null, timestamp, ...entry })),
+      ].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    }
+    const message = { type: "message", message: { role: "user", content: "[Pulse: test] Discuss this text", timestamp: Date.parse(timestamp) } };
+    const injected = { type: "custom_message", customType: "pulse", content: "Pulse result", display: true };
+    await fixture("legacy-real-id", legacy, [message]);
+    await fixture("new-real-id", "new-real-id", [message]);
+    await fixture("normal", "normal", [message]);
+    await fixture("mixed", "mixed", [message, injected]);
+    await fixture("only-results", "only-results", [{ type: "session_info", name: "Results" }, { type: "model_change", provider: "test", modelId: "test" }, injected]);
+    const run = (sessionId: string): PulseExecutionSession => ({ sessionId, pulseId: "pulse", pulseName: "test", pulseType: "heartbeat", runId: sessionId, status: "success", startedAt: timestamp, finishedAt: timestamp });
+    const executions = new Map([legacy, "new-real-id"].map((id) => [id, run(id)]));
+    const sessions = await SessionManager.listAll(root);
+    const listed = partitionPulseSessions(sessions, executions, root);
+    assert.deepEqual(listed.normal.map((s) => s.id).sort(), ["mixed", "normal"]);
+    assert.deepEqual(listed.pulses.map((s) => s.id).sort(), ["legacy-real-id", "new-real-id", "only-results"]);
+    assert.equal(listed.pulses.find((s) => s.id === "legacy-real-id")?.pulse?.sessionId, "legacy-real-id");
+    // Without database evidence, a Pulse-like prompt or filename is not enough.
+    const degraded = partitionPulseSessions(sessions, new Map(), root);
+    assert.equal(degraded.normal.length, 4);
+    assert.equal(degraded.pulses.length, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
 
 test("optional session metadata tolerates missing, inaccessible and incompatible databases", async () => {
   const root = await mkdtemp(join(tmpdir(), "session-metadata-"));
@@ -43,6 +77,9 @@ test("Application session metadata reads WAL and filters profiles without write 
     const table = ApplicationSessionTable(root, "support");
     assert.ok(table.includes("support-id"));
     assert.ok(!table.includes("other-id"));
+    assert.equal(ApplicationSessionTable(root, "support", new Set(["other-id"])), "");
+    assert.equal(ApplicationSessionTable(root, "support", new Set()), "");
+    assert.equal(ApplicationSessionTable(root, "support", new Set(["support-id"])), table);
     assert.equal(optionalSessionMetadata(path, false, (reader) => {
       assert.throws(() => reader.exec("DELETE FROM application_sessions"), /readonly/i);
       return true;

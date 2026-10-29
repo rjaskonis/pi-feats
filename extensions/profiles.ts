@@ -11,6 +11,7 @@ import { profileEnvironment, registerProfileEnvReload } from "./lib/profile-env.
 import { extensionCatalog } from "./lib/extension-catalog.ts";
 import { handleRemoteCli, REMOTE_COMMAND_NAMES } from "./lib/remote-hosts.ts";
 import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
+import { sessionListDirectoryEnvironment } from "./lib/session-list-directory.ts";
 
 type ProfilePolicy = {
   enabledTools?: string[];
@@ -377,6 +378,7 @@ async function reexecWithProfile(name: string, args: string[]) {
   const childEnv = {
     ...await profileEnvironment(target),
     ...forwardedProfileExecutionEnvironment(),
+    ...await sessionListDirectoryEnvironment(args),
     PI_CODING_AGENT_DIR: target,
     PI_PROFILE_ROOT: root,
     PI_PROFILE_REEXEC: "1",

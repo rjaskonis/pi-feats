@@ -2,7 +2,7 @@ import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-age
 import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
 import { openSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
@@ -10,6 +10,7 @@ import { PulseStore } from "./store.ts";
 import { ApplicationStore } from "../api-server/application-store.ts";
 import { withoutTuiModeArgs } from "../lib/cli-tui-mode.ts";
 import { piCommand } from "../lib/pi-command.ts";
+import { findSessionFile, sessionFileHasAlias } from "../lib/session-files.ts";
 
 const root = () => process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 const dbPath = () => join(root(), "pulse.db");
@@ -50,19 +51,22 @@ function sessionDirectory(profile: string): string { return join(root(), profile
 export function pulseSessionId(type: "cron" | "heartbeat", date = new Date()): string { return `pulse-${type}_${date.toISOString().slice(0, 16).replace("T", "-").replace(":", "-")}`; }
 
 async function sessionFile(profile: string, id: string): Promise<{ file: string; cwd: string } | undefined> {
-  const directory = sessionDirectory(profile);
-  const visit = async (path: string): Promise<string | undefined> => { for (const entry of await readdir(path, { withFileTypes: true }).catch(() => [])) { const candidate = join(path, entry.name); if (entry.isDirectory()) { const match = await visit(candidate); if (match) return match; } else if (entry.isFile() && entry.name.endsWith(`_${id}.jsonl`)) return candidate; } };
-  const file = await visit(directory); if (!file) return undefined;
-  const header = JSON.parse((await readFile(file, "utf8")).split("\n", 1)[0]) as { cwd?: string };
-  return { file, cwd: header.cwd || process.cwd() };
+  return findSessionFile(sessionDirectory(profile), id);
 }
-async function createPulseSession(profile: string, type: "cron" | "heartbeat", cwd: string): Promise<{ id: string; file: string }> {
-  const base = pulseSessionId(type); let id = base, suffix = 2;
-  while (await sessionFile(profile, id)) id = `${base}-${String(suffix++).padStart(2, "0")}`;
-  const session = SessionManager.create(cwd, sessionDirectory(profile), { id });
-  session.appendSessionInfo(id);
+export async function createPulseSession(profile: string, type: "cron" | "heartbeat", cwd: string, directory = sessionDirectory(profile), date = new Date()): Promise<{ id: string; file: string }> {
+  const base = pulseSessionId(type, date); let name = base, suffix = 2;
+  const existing = await SessionManager.listAll(directory);
+  while (existing.some((session) => session.name === name || sessionFileHasAlias(session.path, name))) name = `${base}-${String(suffix++).padStart(2, "0")}`;
+  const session = SessionManager.create(cwd, directory);
+  session.appendSessionInfo(name);
+  const id = session.getSessionId();
   const file = session.getSessionFile();
-  if (!file) throw new Error("Unable to create the Pulse execution session.");
+  const header = session.getHeader();
+  if (!file || !header) throw new Error("Unable to create the Pulse execution session.");
+  // Pi defers persistence until the first assistant response. Seed the native
+  // entries before launching the worker, otherwise opening a missing file
+  // creates a different session ID and loses the intended display name.
+  await writeFile(file, [header, ...session.getEntries()].map((entry) => JSON.stringify(entry)).join("\n") + "\n", { flag: "wx", mode: 0o600 });
   return { id, file };
 }
 

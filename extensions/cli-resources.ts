@@ -11,6 +11,8 @@ export { updatedExtensionSettings } from "./lib/extension-catalog.ts";
 import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
 import { piCommand } from "./lib/pi-command.ts";
 import { type PulseExecutionSession } from "./pulse/store.ts";
+import { sessionFileHasAlias } from "./lib/session-files.ts";
+import { sessionListDirectoryEnvironment, sessionsInDirectory } from "./lib/session-list-directory.ts";
 
 type ListKind = "tools" | "skills" | "extensions";
 type Row = [string, string, string];
@@ -115,7 +117,25 @@ function SessionTable({ sessions }: { sessions: SessionInfo[] }): string {
 }
 
 type PulseListedSession = SessionInfo & { source: "execution" | "injected-result"; pulse?: PulseExecutionSession };
-function isPulseOnlySession(session: SessionInfo, sessionDir: string | undefined): boolean { const entries = SessionManager.open(session.path, sessionDir, session.cwd).getBranch() as Array<{ type?: string }>; const relevant = entries.filter((entry) => entry.type !== "session_info"); return relevant.length > 0 && relevant.some((entry) => entry.type === "pulse") && relevant.every((entry) => entry.type === "pulse"); }
+function isPulseOnlySession(session: SessionInfo, sessionDir: string | undefined): boolean {
+  const entries = SessionManager.open(session.path, sessionDir, session.cwd).getBranch() as Array<{ type?: string; customType?: string; message?: { role?: string } }>;
+  const relevant = entries.filter((entry) => entry.type === "pulse" || entry.type === "custom_message" || entry.type === "compaction" || entry.type === "branch_summary" || (entry.type === "message" && entry.message?.role !== "system"));
+  return relevant.length > 0 && relevant.every((entry) => entry.type === "pulse" || (entry.type === "custom_message" && entry.customType === "pulse"));
+}
+
+export function partitionPulseSessions(sessions: SessionInfo[], executions: Map<string, PulseExecutionSession>, sessionDir?: string): { normal: SessionInfo[]; pulses: PulseListedSession[] } {
+  const normal: SessionInfo[] = [], pulses: PulseListedSession[] = [];
+  const runs = [...executions.values()];
+  for (const session of sessions) {
+    // Old Pulse rows stored a filename alias rather than the header's real ID.
+    // Require a database reference: a Pulse-like name or prompt alone is not proof.
+    const pulse = executions.get(session.id) ?? runs.find((run) => sessionFileHasAlias(session.path, run.sessionId));
+    if (pulse) pulses.push({ ...session, source: "execution", pulse: { ...pulse, sessionId: session.id } });
+    else if (isPulseOnlySession(session, sessionDir)) pulses.push({ ...session, source: "injected-result" });
+    else normal.push(session);
+  }
+  return { normal, pulses };
+}
 function PulseSessionTable(sessions: PulseListedSession[]): string { if (!sessions.length) return "PULSE SESSIONS\nNo Pulse sessions found."; return `PULSE SESSIONS\nID  SOURCE  TYPE  PULSE  STATUS  LAST ACTIVITY\n${sessions.map((session) => `${session.id}  ${session.source}  ${session.pulse?.pulseType ?? "—"}  ${session.pulse?.pulseName ?? "Pulse result"}  ${session.pulse?.status ?? "—"}  ${session.modified.toISOString()}`).join("\n")}`; }
 
 export function optionalSessionMetadata<T>(path: string, fallback: T, query: (db: DatabaseSync) => T, warn: (message: string) => void = console.error): T {
@@ -139,9 +159,10 @@ export function pulseExecutionSessions(root: string, profile: string): Map<strin
   });
 }
 
-export function ApplicationSessionTable(root: string, profile: string): string {
+export function ApplicationSessionTable(root: string, profile: string, sessionIds?: ReadonlySet<string>): string {
+  if (sessionIds?.size === 0) return "";
   return optionalSessionMetadata(join(root, "applications.db"), "", (db) => {
-    const rows = db.prepare("SELECT s.application_slug,s.session_prefix,s.session_id,s.session_type,s.message_count,s.updated_at FROM application_session_state st JOIN application_sessions s ON s.session_id=st.current_session_id WHERE st.profile=? ORDER BY s.updated_at DESC").all(profile) as Array<Record<string, unknown>>;
+    const rows = (db.prepare("SELECT s.application_slug,s.session_prefix,s.session_id,s.session_type,s.message_count,s.updated_at FROM application_session_state st JOIN application_sessions s ON s.session_id=st.current_session_id WHERE st.profile=? ORDER BY s.updated_at DESC").all(profile) as Array<Record<string, unknown>>).filter((row) => !sessionIds || sessionIds.has(String(row.session_id)));
     if (!rows.length) return "";
     const lines = rows.map((row) => `${String(row.session_id)}  ${String(row.session_type)}  ${Number(row.message_count)} ${String(row.session_type) === "stateless" ? "requests" : "messages"}  ${String(row.application_slug)}/${String(row.session_prefix)}`);
     return `APPLICATION SESSIONS\nID  TYPE  COUNT  ROUTE\n${lines.join("\n")}`;
@@ -479,7 +500,7 @@ export default async function (pi: ExtensionAPI) {
   const sessionListIndex = args.findIndex((arg, index) => arg === "sessions" && args[index + 1] === "list");
   const sessionFilterCandidate = sessionListIndex >= 0 ? args[sessionListIndex + 2] : undefined;
   const sessionFilter = sessionFilterCandidate?.startsWith("--") ? undefined : sessionFilterCandidate;
-  if (sessionFilter !== undefined && sessionFilter !== "pulses") throw new Error(`Unknown sessions list filter: ${sessionFilter}`);
+  if (sessionFilter !== undefined && sessionFilter !== "pulses" && sessionFilter !== ".") throw new Error(`Unknown sessions list filter: ${sessionFilter}`);
   const sessionRequested = args.some((arg) => arg === "--list-sessions" || arg === "--list-sessions=true") || sessionListIndex >= 0;
   if (!kind && !action && !packageRequested && !packageAction && !sessionRequested && !sessionRename) return;
 
@@ -491,7 +512,7 @@ export default async function (pi: ExtensionAPI) {
     const pi = piCommand();
     const child = spawn(pi.command, [...pi.args, "--no-session", ...rawArgs], {
       stdio: "inherit",
-      env: { ...process.env, PI_CLI_RESOURCES: "1", PI_CODING_AGENT_DIR: target, PI_PROFILE_ROOT: root, ...(profile ? { PI_ACTIVE_PROFILE: profile } : {}) },
+      env: { ...process.env, ...await sessionListDirectoryEnvironment(args), PI_CLI_RESOURCES: "1", PI_CODING_AGENT_DIR: target, PI_PROFILE_ROOT: root, ...(profile ? { PI_ACTIVE_PROFILE: profile } : {}) },
     });
     const code = await new Promise<number>((resolveExit, reject) => {
       child.once("error", reject);
@@ -505,10 +526,11 @@ export default async function (pi: ExtensionAPI) {
     const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
     const profile = process.env.PI_ACTIVE_PROFILE ?? requestedProfile() ?? "default", root = process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
     const pulseExecutions = pulseExecutionSessions(root, profile);
-    const pulseSessions: PulseListedSession[] = sessions.flatMap((session) => { const pulse = pulseExecutions.get(session.id); if (pulse) return [{ ...session, source: "execution", pulse }]; return isPulseOnlySession(session, sessionDir) ? [{ ...session, source: "injected-result" }] : []; });
-    const pulseSessionIds = new Set(pulseSessions.map((session) => session.id));
-    if (sessionFilter === "pulses") await writeTable(PulseSessionTable(pulseSessions));
-    else await writeTable([SessionTable({ sessions: sessions.filter((session) => !pulseSessionIds.has(session.id)) }), ApplicationSessionTable(root, profile)].filter(Boolean).join("\n\n"));
+    const directory = sessionFilter === "." ? process.env.PI_SESSION_LIST_CWD ?? process.cwd() : undefined;
+    const selected = directory === undefined ? sessions : await sessionsInDirectory(sessions, directory);
+    const listed = partitionPulseSessions(selected, pulseExecutions, sessionDir);
+    if (sessionFilter === "pulses") await writeTable(PulseSessionTable(listed.pulses));
+    else await writeTable([SessionTable({ sessions: listed.normal }), ApplicationSessionTable(root, profile, directory === undefined ? undefined : new Set(listed.normal.map((session) => session.id)))].filter(Boolean).join("\n\n"));
     process.exit(0);
   }
 

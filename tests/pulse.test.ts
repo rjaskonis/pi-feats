@@ -1,16 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { PulseStore, pulseId } from "../extensions/pulse/store.ts";
-import { profileModelArgs, pulseMessage, pulseSessionId } from "../extensions/pulse/index.ts";
+import { createPulseSession, profileModelArgs, pulseMessage, pulseSessionId } from "../extensions/pulse/index.ts";
 
 async function withStore(run: (path: string, store: PulseStore) => void | Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "pi-pulse-")), path = join(directory, "pulse.db");
   try { await run(path, new PulseStore(path)); } finally { await rm(directory, { recursive: true, force: true }); }
 }
+
+test("Pulse creation returns the authoritative session ID and keeps a separate readable name", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "pulse-session-id-"));
+  try {
+    const date = new Date("2026-10-29T19:00:00Z");
+    const first = await createPulseSession("support", "heartbeat", directory, directory, date);
+    const header = JSON.parse((await readFile(first.file, "utf8")).split("\n")[0]);
+    assert.equal(first.id, header.id);
+    const reopened = SessionManager.open(first.file, directory, directory);
+    assert.equal(reopened.getSessionId(), first.id);
+    assert.equal(reopened.getSessionName(), pulseSessionId("heartbeat", date));
+    assert.notEqual(first.id, pulseSessionId("heartbeat", date));
+    const second = await createPulseSession("support", "heartbeat", directory, directory, date);
+    assert.notEqual(first.id, second.id);
+    const entries = (await readFile(second.file, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(entries.some((entry) => entry.type === "session_info" && entry.name === "pulse-heartbeat_2026-10-29-19-00-02"));
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
 
 test("resolves the configured model from the pulse profile", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-pulse-model-"));

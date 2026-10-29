@@ -417,7 +417,15 @@ pi tools list
 pi skills list
 pi extensions list
 pi packages list
+# Ordinary conversations (Pulse executions are hidden)
 pi sessions list
+# Only conversations whose workspace is exactly the caller's current directory
+pi sessions list .
+pi profile support sessions list .
+# Pulse execution sessions and sessions containing only injected Pulse results
+pi sessions list pulses
+# The same filters work for named profiles
+pi profile support sessions list pulses
 
 # Change resource availability and reload an active interactive Pi session
 pi tools disable bash
