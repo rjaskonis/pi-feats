@@ -4,11 +4,52 @@ import { mkdtemp, mkdir, readFile, readlink, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { activeBuiltinTools, updatedBuiltinTools } from "../extensions/lib/builtin-tools.ts";
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
-import { extensionRows, findResource, skillRows, updatedExtensionSettings } from "../extensions/cli-resources.ts";
+import { ApplicationSessionTable, optionalSessionMetadata, pulseExecutionSessions, extensionRows, findResource, skillRows, updatedExtensionSettings } from "../extensions/cli-resources.ts";
 import { packageExtensions } from "../extensions/lib/package-resources.ts";
 import { forwardedProfileExecutionEnvironment, resolveRootAgentDir, rootRuntimeSources, sharedResources } from "../extensions/profiles.ts";
+
+test("optional session metadata tolerates missing, inaccessible and incompatible databases", async () => {
+  const root = await mkdtemp(join(tmpdir(), "session-metadata-"));
+  const warnings: string[] = [];
+  try {
+    const missing = join(root, "missing.db");
+    assert.equal(optionalSessionMetadata(missing, "fallback", () => "unexpected", (w) => warnings.push(w)), "fallback");
+    assert.equal(existsSync(missing), false);
+    assert.equal(optionalSessionMetadata(root, "fallback", () => "unexpected", (w) => warnings.push(w)), "fallback");
+    const path = join(root, "incompatible.db");
+    new DatabaseSync(path).close();
+    assert.equal(optionalSessionMetadata(path, "fallback", (db) => db.prepare("SELECT * FROM missing_table").get() as string, (w) => warnings.push(w)), "fallback");
+    assert.equal(warnings.length, 2);
+    assert.ok(warnings.every((w) => w.startsWith("Warning:")));
+    assert.equal(ApplicationSessionTable(root, "support"), "");
+    assert.equal(pulseExecutionSessions(root, "support").size, 0);
+    assert.equal(existsSync(join(root, "pulse.db")), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Application session metadata reads WAL and filters profiles without write access", async () => {
+  const root = await mkdtemp(join(tmpdir(), "application-session-metadata-"));
+  const path = join(root, "applications.db");
+  const db = new DatabaseSync(path);
+  try {
+    db.exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE application_session_state(profile TEXT,current_session_id TEXT); CREATE TABLE application_sessions(application_slug TEXT,session_prefix TEXT,session_id TEXT,session_type TEXT,message_count INTEGER,updated_at TEXT);");
+    for (const profile of ["support", "other"]) {
+      db.prepare("INSERT INTO application_session_state VALUES (?,?)").run(profile, `${profile}-id`);
+      db.prepare("INSERT INTO application_sessions VALUES (?,?,?,?,?,?)").run(profile, "route", `${profile}-id`, "stateful", 3, "2026-10-29");
+    }
+    const table = ApplicationSessionTable(root, "support");
+    assert.ok(table.includes("support-id"));
+    assert.ok(!table.includes("other-id"));
+    assert.equal(optionalSessionMetadata(path, false, (reader) => {
+      assert.throws(() => reader.exec("DELETE FROM application_sessions"), /readonly/i);
+      return true;
+    }), true);
+    assert.equal(db.prepare("SELECT count(*) AS n FROM application_sessions").get()?.n, 2);
+  } finally { db.close(); await rm(root, { recursive: true, force: true }); }
+});
 
 test("profile root uses the remote agent directory when no reexec root is set", () => {
   assert.equal(resolveRootAgentDir({ PI_CODING_AGENT_DIR: "/home/rj/.pi/agent" }), "/home/rj/.pi/agent");

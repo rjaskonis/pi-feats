@@ -10,7 +10,7 @@ import { extensionCatalog, resolveExtension, updatedExtensionSettings } from "./
 export { updatedExtensionSettings } from "./lib/extension-catalog.ts";
 import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
 import { piCommand } from "./lib/pi-command.ts";
-import { PulseStore, type PulseExecutionSession } from "./pulse/store.ts";
+import { type PulseExecutionSession } from "./pulse/store.ts";
 
 type ListKind = "tools" | "skills" | "extensions";
 type Row = [string, string, string];
@@ -118,10 +118,34 @@ type PulseListedSession = SessionInfo & { source: "execution" | "injected-result
 function isPulseOnlySession(session: SessionInfo, sessionDir: string | undefined): boolean { const entries = SessionManager.open(session.path, sessionDir, session.cwd).getBranch() as Array<{ type?: string }>; const relevant = entries.filter((entry) => entry.type !== "session_info"); return relevant.length > 0 && relevant.some((entry) => entry.type === "pulse") && relevant.every((entry) => entry.type === "pulse"); }
 function PulseSessionTable(sessions: PulseListedSession[]): string { if (!sessions.length) return "PULSE SESSIONS\nNo Pulse sessions found."; return `PULSE SESSIONS\nID  SOURCE  TYPE  PULSE  STATUS  LAST ACTIVITY\n${sessions.map((session) => `${session.id}  ${session.source}  ${session.pulse?.pulseType ?? "—"}  ${session.pulse?.pulseName ?? "Pulse result"}  ${session.pulse?.status ?? "—"}  ${session.modified.toISOString()}`).join("\n")}`; }
 
-function ApplicationSessionTable(root: string, profile: string): string {
-  const path = join(root, "applications.db"); if (!existsSync(path)) return "";
-  const db = new DatabaseSync(path, { readOnly: true });
-  try { const rows = db.prepare("SELECT s.application_slug,s.session_prefix,s.session_id,s.session_type,s.message_count,s.updated_at FROM application_session_state st JOIN application_sessions s ON s.session_id=st.current_session_id WHERE st.profile=? ORDER BY s.updated_at DESC").all(profile) as Array<Record<string, unknown>>; if (!rows.length) return ""; const lines = rows.map((row) => `${String(row.session_id)}  ${String(row.session_type)}  ${Number(row.message_count)} ${String(row.session_type) === "stateless" ? "requests" : "messages"}  ${String(row.application_slug)}/${String(row.session_prefix)}`); return `APPLICATION SESSIONS\nID  TYPE  COUNT  ROUTE\n${lines.join("\n")}`; } finally { db.close(); }
+export function optionalSessionMetadata<T>(path: string, fallback: T, query: (db: DatabaseSync) => T, warn: (message: string) => void = console.error): T {
+  let db: DatabaseSync | undefined;
+  try {
+    if (!existsSync(path)) return fallback;
+    db = new DatabaseSync(path, { readOnly: true });
+    return query(db);
+  } catch (error) {
+    warn(`Warning: unable to read optional session metadata from ${path}: ${error instanceof Error ? error.message : String(error)}`);
+    return fallback;
+  } finally {
+    db?.close();
+  }
+}
+
+export function pulseExecutionSessions(root: string, profile: string): Map<string, PulseExecutionSession> {
+  return optionalSessionMetadata(join(root, "pulse.db"), new Map<string, PulseExecutionSession>(), (db) => {
+    const rows = db.prepare("SELECT r.session_id,p.id AS pulse_id,p.name AS pulse_name,p.type AS pulse_type,r.id AS run_id,r.status,r.started_at,r.finished_at FROM pulse_runs r JOIN pulses p ON p.id=r.pulse_id JOIN pulse_control c ON c.pulse_id=p.id WHERE c.profile=? AND r.session_id IS NOT NULL ORDER BY r.started_at DESC").all(profile) as Array<Record<string, unknown>>;
+    return new Map(rows.map((row) => [String(row.session_id), { sessionId: String(row.session_id), pulseId: String(row.pulse_id), pulseName: String(row.pulse_name), pulseType: row.pulse_type as PulseExecutionSession["pulseType"], runId: String(row.run_id), status: row.status as PulseExecutionSession["status"], startedAt: String(row.started_at), finishedAt: row.finished_at == null ? null : String(row.finished_at) }]));
+  });
+}
+
+export function ApplicationSessionTable(root: string, profile: string): string {
+  return optionalSessionMetadata(join(root, "applications.db"), "", (db) => {
+    const rows = db.prepare("SELECT s.application_slug,s.session_prefix,s.session_id,s.session_type,s.message_count,s.updated_at FROM application_session_state st JOIN application_sessions s ON s.session_id=st.current_session_id WHERE st.profile=? ORDER BY s.updated_at DESC").all(profile) as Array<Record<string, unknown>>;
+    if (!rows.length) return "";
+    const lines = rows.map((row) => `${String(row.session_id)}  ${String(row.session_type)}  ${Number(row.message_count)} ${String(row.session_type) === "stateless" ? "requests" : "messages"}  ${String(row.application_slug)}/${String(row.session_prefix)}`);
+    return `APPLICATION SESSIONS\nID  TYPE  COUNT  ROUTE\n${lines.join("\n")}`;
+  });
 }
 
 function requestedProfile(): string | undefined {
@@ -480,7 +504,7 @@ export default async function (pi: ExtensionAPI) {
     const sessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
     const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
     const profile = process.env.PI_ACTIVE_PROFILE ?? requestedProfile() ?? "default", root = process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
-    const pulseExecutions = new PulseStore(join(root, "pulse.db")).executionSessions(profile);
+    const pulseExecutions = pulseExecutionSessions(root, profile);
     const pulseSessions: PulseListedSession[] = sessions.flatMap((session) => { const pulse = pulseExecutions.get(session.id); if (pulse) return [{ ...session, source: "execution", pulse }]; return isPulseOnlySession(session, sessionDir) ? [{ ...session, source: "injected-result" }] : []; });
     const pulseSessionIds = new Set(pulseSessions.map((session) => session.id));
     if (sessionFilter === "pulses") await writeTable(PulseSessionTable(pulseSessions));

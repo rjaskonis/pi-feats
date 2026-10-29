@@ -27,7 +27,7 @@ export function runtimePaths(runtimeEntry: string) {
   return [...paths];
 }
 
-function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { shared: boolean; profile: boolean }, sharedRuntimeSources: string[]) {
+export function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { shared: boolean; profile: boolean }, sharedRuntimeSources: string[]) {
   const agentDir = dirname(dirname(profileDir));
   // This module is distributed inside <package>/extensions/lib. Allow the
   // package root, not only ~/.pi/agent/extensions, so Git and npm packages
@@ -59,6 +59,10 @@ function nonoPolicy(profileDir: string, runtimeEntry: string, skillSources: { sh
         // Application handlers are runtime-owned code. A named Profile may
         // read them when an Application session starts, but never modify them.
         join(agentDir, "applications"),
+        // Session listings consult shared Application metadata without mutating it.
+        join(agentDir, "applications.db"),
+        join(agentDir, "applications.db-wal"),
+        join(agentDir, "applications.db-shm"),
         join(agentDir, "AGENTS.md"),
         // Resource commands need the default runtime's package and extension
         // configuration while operating on the named profile.
