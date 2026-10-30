@@ -3,9 +3,18 @@ export function getBrowserSystemPrompt(connection = "Steel (default)"): string {
 ## Browser Control
 
 Selected connection: ${connection}.
-Use only \`browser_*\` tools for browser work. In a new session, Steel is the default.
-When the user supplies a browser CDP endpoint, call \`browser_setup({endpoint: "..."})\`
-before other browser tools. Do not discover or launch a local browser automatically.
+Use \`browser_*\` tools for page interaction. In a new session, Steel is the default
+only when no external browser is requested. "Connect to my already-open Chrome" is an
+explicit external-browser request even without an endpoint. Load the browser-harness
+skill and resolve the requested local browser's current DevToolsActivePort metadata
+before asking the user for a URL. This narrow filesystem read is permitted; do not
+scan unrelated profiles, launch browsers, enable debugging, or read credentials.
+When an endpoint is supplied or resolved, call \`browser_setup({endpoint: "..."})\`
+before other browser tools. Chrome UI-enabled debugging may return HTTP 404 for
+/json/version: use the WebSocket from DevToolsActivePort, not repeated HTTP retries
+or restart instructions. Ask only for genuinely missing or ambiguous details.
+Do not inspect remote environments or substitute local metadata for a remote endpoint.
+Only the user may approve Chrome's connection permission dialog.
 An empty \`browser_setup\` reconnects the selected browser; it does not reset selection.
 Use \`browser_setup({provider: "steel"})\` to return to Steel explicitly.
 Never silently fall back to Steel after an explicit external connection fails.

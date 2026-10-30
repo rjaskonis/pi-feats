@@ -25,7 +25,12 @@ export async function resolveEndpoint(value: string, timeoutMs = 10_000): Promis
   url.pathname = `${url.pathname.replace(/\/$/, "")}/json/version`;
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs), redirect: "error" });
-    if (!response.ok) return err(cdpError("discovery_failed", `CDP discovery returned HTTP ${response.status}.`));
+    if (!response.ok) {
+      const hint = response.status === 404
+        ? " Chrome UI-enabled remote debugging may expose WebSocket only. For an explicitly requested local Chrome, resolve its DevToolsActivePort and retry with the ws:// endpoint; do not assume a closed port or require a restart. For a remote browser, obtain its WebSocket from that environment instead."
+        : "";
+      return err(cdpError("discovery_failed", `CDP discovery returned HTTP ${response.status}.${hint}`));
+    }
     const body = await response.json() as { webSocketDebuggerUrl?: unknown };
     if (typeof body?.webSocketDebuggerUrl !== "string") throw new Error();
     const ws = new URL(body.webSocketDebuggerUrl);

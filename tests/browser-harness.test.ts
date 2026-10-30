@@ -94,6 +94,21 @@ test("endpoint discovery supports HTTP and direct WebSocket, with safe errors an
   } finally { await browser.close(); }
 });
 
+test("HTTP 404 explains Chrome WebSocket-only debugging without falling back or exposing endpoint secrets", async () => {
+  const browser = await mockBrowser();
+  try {
+    const result = await resolveEndpoint(`${browser.base}/missing?token=private-token`);
+    assert.equal(result.success, false);
+    if (result.success) throw new Error("Expected HTTP discovery failure");
+    assert.match(result.error.message, /HTTP 404/);
+    assert.match(result.error.message, /DevToolsActivePort/);
+    assert.match(result.error.message, /ws:\/\//);
+    assert.match(result.error.message, /remote browser/);
+    assert.equal(result.error.message.includes("private-token"), false);
+    assert.equal(browser.calls.length, 0);
+  } finally { await browser.close(); }
+});
+
 test("CDP event consumers survive initial connection and terminate cleanly on disconnect", async () => {
   const browser = await mockBrowser();
   const transport = createWebSocketTransport(() => resolveEndpoint(browser.base));
