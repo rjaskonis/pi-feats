@@ -26,7 +26,7 @@ const currentOwnedTarget = (
   if (current === undefined || current === null) {
     return err({ kind: "invalid_state", message: "No tab attached." });
   }
-  if (!client.owns(current.targetId)) {
+  if (!client.canControl(current.targetId)) {
     return err({
       kind: "invalid_state",
       message: `Current tab ${current.targetId} is not owned by this harness session.`,

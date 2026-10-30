@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { Type } from "typebox";
+import { allocateRef } from "../util/refs";
 import { Container, Image, type ImageTheme, Markdown, Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { getMarkdownTheme, keyHint } from "@earendil-works/pi-coding-agent";
 import { boxOf } from "./box";
@@ -128,8 +129,8 @@ export const snapshotTool = defineBrowserTool({
     const targets = collectInteractiveTargets(slim);
 
     const refMap = new Map<string, number>();
-    targets.forEach(({ node, backendId }, i) => {
-      const ref = `e${i + 1}`;
+    targets.forEach(({ node, backendId }) => {
+      const ref = allocateRef();
       node.ref = ref;
       refMap.set(ref, backendId);
     });

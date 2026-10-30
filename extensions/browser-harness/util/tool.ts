@@ -9,6 +9,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import type { BrowserClient } from "../client";
+import type { BrowserConnection } from "../connection";
 import type { Result } from "./result";
 
 export type ToolOk = {
@@ -97,7 +98,7 @@ const toToolResult = (
 
 export const registerBrowserTool = (
   pi: ExtensionAPI,
-  client: BrowserClient,
+  connection: BrowserConnection,
   def: AnyBrowserToolDefinition,
 ): void => {
   type S = TSchema;
@@ -128,57 +129,62 @@ export const registerBrowserTool = (
         }
       : {}),
     async execute(_toolCallId, args, signal, onUpdate, extensionCtx) {
-      if (def.ensureAlive !== false) {
-        const alive = await client.ensureAlive();
-        if (!alive.success) {
-          return toToolResult(
-            { success: false, error: { kind: "not_connected", message: alive.error.message } },
-            def.name,
-          );
+      const run = async (client: BrowserClient) => {
+        if (signal?.aborted) {
+          return toToolResult({ success: false, error: { kind: "invalid_state", message: "Tool execution aborted" } }, def.name);
         }
-        // A fresh CDP attachment starts on Steel's default target. Never let a
-        // browser tool inspect or mutate that unowned target.
-        if (!client.current() || !client.owns(client.current()!.targetId)) {
-          const tab = await client.newTab("about:blank");
-          if (!tab.success) {
+        if (def.ensureAlive !== false) {
+          const alive = await client.ensureAlive();
+          if (!alive.success) {
             return toToolResult(
-              { success: false, error: { kind: "not_connected", message: tab.error.message } },
+              { success: false, error: { kind: "not_connected", message: alive.error.message } },
+              def.name,
+            );
+          }
+          // Existing user tabs require explicit authorization before control.
+          if (!client.current() || !client.canControl(client.current()!.targetId)) {
+            const tab = await client.newTab("about:blank");
+            if (!tab.success) {
+              return toToolResult(
+                { success: false, error: { kind: "not_connected", message: tab.error.message } },
+                def.name,
+              );
+            }
+          }
+        }
+        let release: (() => void) | undefined;
+        if (def.concurrency !== "parallel") {
+          release = await client.mutationMutex().acquire();
+          if (signal?.aborted) {
+            release();
+            return toToolResult(
+              { success: false, error: { kind: "invalid_state", message: "Tool execution aborted before entering serialized lane" } },
               def.name,
             );
           }
         }
-      }
-      let release: (() => void) | undefined;
-      if (def.concurrency !== "parallel") {
-        const acquire = await client.mutationMutex().acquire();
-        release = acquire;
-        if (signal?.aborted) {
-          release();
-          return toToolResult(
-            { success: false, error: { kind: "invalid_state", message: "Tool execution aborted before entering serialized lane" } },
-            def.name,
-          );
+        try {
+          const result = await def.handler(args, {
+            client,
+            signal,
+            onUpdate: (u) => {
+              if (onUpdate) {
+                const update: AgentToolResult<OkDetails> = {
+                  content: [{ type: "text", text: u.text }],
+                  details: { ok: true, ...(u.details ?? {}) },
+                };
+                onUpdate(update);
+              }
+            },
+            extensionCtx,
+          });
+          return toToolResult(result, def.name);
+        } finally {
+          release?.();
         }
-      }
-      try {
-        const result = await def.handler(args, {
-          client,
-          signal,
-          onUpdate: (u) => {
-            if (onUpdate) {
-              const update: AgentToolResult<OkDetails> = {
-                content: [{ type: "text", text: u.text }],
-                details: { ok: true, ...(u.details ?? {}) },
-              };
-              onUpdate(update);
-            }
-          },
-          extensionCtx,
-        });
-        return toToolResult(result, def.name);
-      } finally {
-        release?.();
-      }
+      };
+      // Setup owns the exclusive connection gate; normal tools hold shared leases.
+      return def.ensureAlive === false ? run(connection.client()) : connection.withClient(run);
     },
   };
   pi.registerTool(td);

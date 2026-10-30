@@ -1,5 +1,5 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { BrowserClient } from "./client";
+import type { BrowserConnection } from "./connection";
 import { type AnyBrowserToolDefinition, registerBrowserTool } from "./util/tool";
 import { clickTool } from "./domains/click";
 import { typeTool, pressKeyTool, dispatchKeyTool } from "./domains/keyboard";
@@ -21,7 +21,6 @@ import { consoleTool } from "./domains/console";
 import { snapshotTool } from "./domains/snapshot";
 import { executeJsTool } from "./domains/js";
 import { createSetupTool, setupTool } from "./domains/setup";
-import type { ViewerUrlProvider } from "./setup";
 import { webSearchTool } from "./domains/search/web-search";
 import { readPageTool } from "./domains/readpage/read-page";
 
@@ -71,10 +70,9 @@ export const ALL_TOOLS: ReadonlyArray<AnyBrowserToolDefinition> = [
 
 export const registerAllTools = (
   pi: ExtensionAPI,
-  client: BrowserClient,
-  viewerUrl?: ViewerUrlProvider,
+  connection: BrowserConnection,
 ): void => {
   for (const tool of ALL_TOOLS) {
-    registerBrowserTool(pi, client, tool === setupTool ? createSetupTool(viewerUrl) : tool);
+    registerBrowserTool(pi, connection, tool === setupTool ? createSetupTool(connection) : tool);
   }
 };

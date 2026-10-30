@@ -1,17 +1,19 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { BrowserClient } from "./client";
+import type { BrowserConnection, SetupOptions } from "./connection";
 
 export type ViewerUrlProvider = () => string | undefined;
 
 export function registerSetupCommand(
   pi: ExtensionAPI,
-  client: BrowserClient,
-  viewerUrl?: ViewerUrlProvider,
+  connection: BrowserConnection,
 ): void {
   pi.registerCommand("browser-setup", {
-    description: "Start a Steel API session for the active Pi Profile",
-    handler: async (_args, ctx) => {
-      const result = await performSetup(client, ctx, viewerUrl);
+    description: "Connect to Steel (default) or an explicit CDP endpoint: /browser-setup [steel|URL]",
+    handler: async (args, ctx) => {
+      const value = args.trim();
+      const options: SetupOptions = !value ? {} : value === "steel" ? { provider: "steel" } : { endpoint: value };
+      const result = await connection.setup(options);
       ctx.ui.notify(result.success ? result.data : result.error, result.success ? "info" : "error");
     },
   });
@@ -23,14 +25,15 @@ export async function performSetup(
   client: BrowserClient,
   _ctx?: ExtensionContext,
   viewerUrl?: ViewerUrlProvider,
+  label = "Steel",
 ): Promise<SetupResult> {
   const wasConnected = client.status().alive;
   const started = await client.start();
-  if (!started.success) return { success: false, error: `Steel browser connection failed: ${started.error.message}` };
+  if (!started.success) return { success: false, error: `${label} browser connection failed: ${started.error.message}` };
 
-  if (!wasConnected) {
+  if (!client.current() || !client.canControl(client.current()!.targetId)) {
     const tab = await client.newTab("about:blank");
-    if (!tab.success) return { success: false, error: `Steel browser connected but could not open an agent tab: ${tab.error.message}` };
+    if (!tab.success) return { success: false, error: `${label} browser connected but could not open an agent tab: ${tab.error.message}` };
   }
 
   const info = await client.pageInfo();
@@ -39,7 +42,7 @@ export async function performSetup(
   return {
     success: true,
     data: [
-      `Steel browser ${wasConnected ? "already connected" : "connected"}.`,
+      `${label} browser ${wasConnected ? "already connected" : "connected"}.`,
       `Current page: ${page}`,
       ...(viewer ? [`Live viewer: ${viewer}`] : []),
     ].join("\n"),

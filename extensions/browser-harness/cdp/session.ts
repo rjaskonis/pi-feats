@@ -48,6 +48,7 @@ export const createCdpSession = (
   transport: CdpTransport,
   ownership?: OwnershipRegistry,
   createSeedTarget?: SeedTargetProvider,
+  options: { adoptWindowTabs?: boolean } = {},
 ): CdpSession => {
   let sessionId: string | null = null;
   let targetId: string | null = null;
@@ -224,7 +225,7 @@ export const createCdpSession = (
             );
             allPages.forEach((p, i) => {
               const r = windows[i];
-              if (r?.success && r.data === anchorWindowId) {
+              if (options.adoptWindowTabs !== false && r?.success && r.data === anchorWindowId) {
                 ownership.add(p.targetId);
               }
             });

@@ -24,6 +24,7 @@ export type BrowserClientOptions = {
     readonly harnessWindowId?: number;
   };
   readonly profilePin?: ProfilePin | null;
+  readonly allowExistingTabs?: boolean;
   readonly onOwnershipChange?: (snapshot: {
     readonly ownedTargetIds: ReadonlyArray<string>;
     readonly harnessWindowTargetId: string | undefined;
@@ -47,6 +48,8 @@ export type BrowserClient = {
   newTab(url?: string): Promise<Result<string, CdpError>>;
   closeTab(targetId: string): Promise<Result<void, CdpError>>;
   owns(targetId: string): boolean;
+  canControl(targetId: string): boolean;
+  authorizeTab(targetId: string): Promise<Result<void, CdpError>>;
   ownership(): OwnershipRegistry;
   current(): { readonly sessionId: string; readonly targetId: string } | null;
   session(): CdpSession;
@@ -117,10 +120,11 @@ export const createBrowserClient = (opts: BrowserClientOptions): BrowserClient =
       });
     });
   }
+  const authorized = new Set<string>();
   const session = createCdpSession(transport, ownership, async () => {
     const window = await ensureHarnessWindow(api);
     return window.success ? ok(window.data.targetId) : window;
-  });
+  }, { adoptWindowTabs: !opts.allowExistingTabs });
   const mutationMutex = createMutex();
   let lastHealth = 0;
   let pageCaches = new Map<string, { readonly info: PageInfo; readonly at: number }>();
@@ -137,7 +141,7 @@ export const createBrowserClient = (opts: BrowserClientOptions): BrowserClient =
     return ok(undefined);
   };
 
-  const start = async (): Promise<Result<void, CdpError>> => {
+  const startOnce = async (): Promise<Result<void, CdpError>> => {
     if (transport.state() === "open" && session.current()) return ok(undefined);
     let wsUrl: string;
     if (remote?.cdpUrl) {
@@ -169,6 +173,12 @@ export const createBrowserClient = (opts: BrowserClientOptions): BrowserClient =
     lastHealth = Date.now();
     pageCaches.clear();
     return ok(undefined);
+  };
+
+  let starting: Promise<Result<void, CdpError>> | undefined;
+  const start = (): Promise<Result<void, CdpError>> => {
+    starting ??= startOnce().finally(() => { starting = undefined; });
+    return starting;
   };
 
   const stop = async (): Promise<void> => {
@@ -253,8 +263,10 @@ export const createBrowserClient = (opts: BrowserClientOptions): BrowserClient =
         title: t.title,
         url: t.url,
         owned: ownership.has(t.targetId),
+        authorized: authorized.has(t.targetId),
       }));
     const live = new Set(tabs.map((t) => t.targetId));
+    for (const id of authorized) if (!live.has(id)) authorized.delete(id);
     const owned = ownership.list();
     const survivors = owned.filter((id) => live.has(id));
     if (survivors.length !== owned.length) ownership.replaceAll(survivors);
@@ -269,7 +281,7 @@ export const createBrowserClient = (opts: BrowserClientOptions): BrowserClient =
   const switchTab = async (targetId: string): Promise<Result<void, CdpError>> => {
     const r = await session.switchTo(targetId);
     if (!r.success) return r;
-    await session.call("Runtime.evaluate", {
+    if (ownership.has(targetId)) await session.call("Runtime.evaluate", {
       expression: safeJs`if(!document.title.startsWith('🟢'))document.title='🟢 '+document.title`,
     });
     return ok(undefined);
@@ -300,6 +312,7 @@ export const createBrowserClient = (opts: BrowserClientOptions): BrowserClient =
   };
 
   const closeTab = async (targetId: string): Promise<Result<void, CdpError>> => {
+    if (!ownership.has(targetId)) return err(cdpError("remote_error", "Only tabs created by this session may be closed."));
     const r = await session.callBrowser("Target.closeTarget", { targetId });
     if (!r.success) return r;
     ownership.remove(targetId);
@@ -335,6 +348,15 @@ export const createBrowserClient = (opts: BrowserClientOptions): BrowserClient =
     takeDialog: () => session.takeDialog(),
     listTabs, switchTab, newTab, closeTab,
     owns: (id: string) => ownership.has(id),
+    canControl: (id: string) => ownership.has(id) || authorized.has(id),
+    authorizeTab: async (id: string) => {
+      if (!opts.allowExistingTabs) return err(cdpError("remote_error", "Existing tab authorization is available only for explicitly selected external CDP browsers."));
+      const tabs = await listTabs(true);
+      if (!tabs.success) return tabs;
+      if (!tabs.data.some((tab) => tab.targetId === id)) return err(cdpError("remote_error", "The requested tab does not exist."));
+      authorized.add(id);
+      return ok(undefined);
+    },
     ownership: () => ownership,
     current: () => session.current(),
     session: () => session,

@@ -1,88 +1,49 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createBrowserClient, type BrowserClient } from "./client";
+import { createBrowserConnection, type BrowserConnection } from "./connection";
 import { getBrowserSystemPrompt } from "./prompt";
 import { registerSetupCommand } from "./setup";
 import { registerAllTools } from "./registry";
 import { cleanupTempDirs } from "./util/truncate";
-import { createSteelTransport } from "./cdp/steel-transport";
-import { createSteelRuntime, type SteelRuntime } from "./steel";
 
-/** Browser harness backed by the Steel SessionContext of the active Pi Profile. */
-export default function steelBrowserHarnessExtension(pi: ExtensionAPI): void {
-  let client: BrowserClient | undefined;
-  let steel: SteelRuntime | undefined;
+/** Steel by default, with explicit session-scoped external CDP selection. */
+export default function browserHarnessExtension(pi: ExtensionAPI): void {
+  let connection: BrowserConnection | undefined;
 
   pi.registerCommand("browser-status", {
-    description: "Show the Steel browser status for the active Pi Profile",
+    description: "Show the selected browser connection and its status",
     handler: async (_args, ctx) => {
-      const status = client?.status();
-      const steelStatus = steel?.status();
       ctx.ui.notify([
-        `Browser: ${status?.alive ? "connected" : "not connected"}`,
+        `Connection: ${connection?.label() ?? "Steel (default)"}`,
+        `Browser: ${connection?.client().status().alive ? "connected" : "not connected"}`,
         `Pi Profile: ${process.env["PI_ACTIVE_PROFILE"] ?? "default"}`,
-        `Persisted Steel context: ${steelStatus?.hasPersistedContext ? "available" : "not created"}`,
-        `Steel Session: ${steelStatus?.sessionId ?? "none"}`,
-        `Live viewer: ${steelStatus?.viewerUrl ?? "unavailable"}`,
-        `DevTools: ${steelStatus?.debuggerUrl ?? "unavailable"}`,
+        ...(connection?.viewerUrl() ? [`Live viewer: ${connection.viewerUrl()}`] : []),
       ].join("\n"), "info");
     },
   });
-
   pi.registerCommand("browser-viewer", {
-    description: "Show the interactive Steel live viewer for the active browser session",
+    description: "Show the Steel live viewer, if available for the selected connection",
     handler: async (_args, ctx) => {
-      const viewerUrl = steel?.status().viewerUrl;
-      ctx.ui.notify(
-        viewerUrl
-          ? `Open the shared Steel browser viewer:\n${viewerUrl}`
-          : "No active Steel browser session. Run /browser-setup first.",
-        viewerUrl ? "info" : "error",
-      );
+      const viewer = connection?.viewerUrl();
+      ctx.ui.notify(viewer ? `Open the shared Steel browser viewer:\n${viewer}` : "No live viewer is available for the selected connection.", viewer ? "info" : "error");
     },
   });
-
   pi.registerCommand("browser-release", {
-    description: "Disconnect and release the active Steel browser session",
+    description: "Release Steel or disconnect external CDP without closing the user's browser or existing tabs",
     handler: async (_args, ctx) => {
-      if (client) await client.stop();
-      await steel?.release();
-      ctx.ui.notify("Steel browser session released.", "info");
+      await connection?.release();
+      ctx.ui.notify("Browser connection released. The selected provider is retained for reconnection.", "info");
     },
   });
-
   pi.on("session_start", async () => {
-    steel = createSteelRuntime();
-    client = createBrowserClient({
-      namespace: `steel-${process.env["PI_ACTIVE_PROFILE"] ?? "default"}`,
-      transport: createSteelTransport(() => steel!.endpoint()),
-      // The transport resolves the actual session CDP endpoint lazily.
-      remote: { cdpUrl: "steel://active-profile", browserId: "steel" },
-    });
-    const viewerUrl = () => steel?.status().viewerUrl;
-    registerAllTools(pi, client, viewerUrl);
-    registerSetupCommand(pi, client, viewerUrl);
+    connection = createBrowserConnection();
+    registerAllTools(pi, connection);
+    registerSetupCommand(pi, connection);
   });
-
   pi.on("session_shutdown", async () => {
-    if (client) {
-      try {
-        await client.closeOwnedTabs();
-        await client.stop();
-      } catch {}
-    }
-    await steel?.release();
-    await cleanupTempDirs();
-    client = undefined;
-    steel = undefined;
+    try { await connection?.release(); }
+    finally { connection = undefined; await cleanupTempDirs(); }
   });
-
-  pi.on("before_agent_start", async (event) => {
-    if (!client?.status().alive) {
-      return {
-        systemPrompt: `${event.systemPrompt}\n\n## Steel Browser Control\nBrowser tools (browser_*) are available. Use browser_setup when browser interaction is needed; it creates a Steel Session through the Steel API, restores the active Pi Profile's persisted browser context, and returns a live viewer URL that the user can open to interact with the same browser.`,
-
-      };
-    }
-    return { systemPrompt: event.systemPrompt + getBrowserSystemPrompt() };
-  });
+  pi.on("before_agent_start", async (event) => ({
+    systemPrompt: event.systemPrompt + getBrowserSystemPrompt(connection?.label() ?? "Steel (default)"),
+  }));
 }

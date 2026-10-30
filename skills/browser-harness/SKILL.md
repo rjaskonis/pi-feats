@@ -1,17 +1,32 @@
 ---
 name: browser-harness
-description: Use when the user wants to automate, scrape, test, or interact with web pages. Controls the Steel browser assigned to the active Pi Profile through CDP. Prefer browser_snapshot for page structure and browser_execute_js for surgical reads; use browser_screenshot only for visual verification.
+description: Use when the user wants to automate, scrape, test, or interact with web pages. Controls Steel by default or an explicitly supplied external CDP browser. Prefer browser_snapshot for structure and browser_execute_js for surgical reads; use screenshots only for visual verification.
 ---
 
-# Steel Browser Harness
-
-The active Pi Profile owns a persisted Steel SessionContext in its `steel.json`. Steel API creates and releases the live browser session; the harness restores cookies and storage through that API context. Do not ask for, create, select, or launch a local Chrome profile.
+# Browser Harness
 
 ## Connection
 
-Browser control is on demand. Call `browser_setup` when a browser tool reports that it is not connected. It creates a Steel Session through the Steel API, restores the active Pi Profile's persisted context, connects to the session CDP endpoint, and returns the live viewer URL. A person may open that URL and interact with the same tabs at the same time; do not assume exclusive browser control.
+Steel is the default in every new Pi session. Its API creates and releases live sessions,
+restoring the active Pi Profile's persisted SessionContext from `steel.json`.
+`browser_setup()` connects on demand and returns the Steel live viewer when available.
+A person can interact with that same browser; do not assume exclusive control.
 
-Do not type credentials. If authentication, MFA, CAPTCHA, or a payment confirmation is required, stop and ask the user to take over.
+When the user supplies an external browser endpoint, call
+`browser_setup({endpoint: "http://127.0.0.1:9222"})` before other browser tools.
+HTTP(S) base URLs resolve through `/json/version`; browser WebSocket URLs connect directly.
+The user prepares and enables debugging in that browser. Do not launch browsers,
+discover local profiles, or copy credentials automatically.
+
+Selection lasts for the current Pi session only. An empty `browser_setup()` preserves
+that selection and reconnects it. Use `browser_setup({provider: "steel"})` to return
+to Steel. An explicit CDP failure must never silently fall back to Steel.
+External connections do not have a Steel viewer or export their cookies to Pi.
+`/browser-status` identifies the selection; `/browser-release` disconnects it, retaining
+the selection for reconnection. It does not terminate an external browser.
+
+Do not type credentials. Ask the user to handle authentication, MFA, CAPTCHA, or payment
+confirmation. Do not expose endpoint credentials or query tokens in status messages.
 
 ## Tool hierarchy
 
@@ -20,14 +35,23 @@ Do not type credentials. If authentication, MFA, CAPTCHA, or a payment confirmat
 - Reader-mode article text: `browser_read_page`.
 - JavaScript errors: `browser_console`.
 - Requests and responses: `browser_network_requests`.
-- Pixels, layout, colors, or charts: `browser_screenshot` only as a last resort.
+- Pixels, layout, colors, or charts: screenshots only for visual verification.
 
 ## Interaction rules
 
-`browser_snapshot` returns stable element refs such as `[e7]`. Use refs with `browser_click`, `browser_fill`, `browser_select_option`, `browser_focus`, and keyboard tools. Do not use screenshots to locate controls. Do not guess selectors when a ref exists.
+Snapshots return refs such as `[e7]`. Use those refs rather than guessed selectors
+or coordinates. Prefer `browser_fill` for forms and `browser_wait_for` over fixed delays.
+After a mutation, inspect the returned page-change diff. Refresh the snapshot when a
+ref is stale or the browser connection changes; never blindly retry old refs.
 
-After a mutating action, inspect the returned page-change diff. If a ref is stale, take a new snapshot; never retry it blindly. Use `browser_wait_for` instead of fixed delays.
+## Tabs and isolation
 
-## Isolation
+The harness opens dedicated agent tabs by default. `browser_list_tabs` with `scope:'all'`
+can list other tabs. In external CDP mode only, when the user explicitly requests control
+of an existing tab, call `browser_switch_tab({targetId: "...", authorizeExisting: true})`.
+Authorization allows interaction but never allows closing that existing tab.
+`scope:'owned'` includes both created and authorized tabs, marked separately.
 
-Operate only on agent-owned tabs. Browser state is isolated by Pi Profile through its persisted Steel SessionContext. Do not attempt to reuse a tab, session, cookie, or storage state from another Pi Profile.
+Only tabs created by the harness are closed during release or shutdown. Connection
+switches wait for in-flight tools and discard previous references and ownership state.
+Do not reuse sessions or credentials from another Pi Profile without explicit authorization.

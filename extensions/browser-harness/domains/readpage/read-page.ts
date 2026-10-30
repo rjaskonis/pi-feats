@@ -139,8 +139,8 @@ const readOwnedTab = async (
   client: Parameters<typeof openIsolatedTab>[0],
   targetId: string,
 ): Promise<Result<ToolOk, ToolErr>> => {
-  if (!client.owns(targetId)) {
-    return err({ kind: "invalid_state", message: `Tab ${targetId} is not owned by this session.` });
+  if (!client.canControl(targetId)) {
+    return err({ kind: "invalid_state", message: `Tab ${targetId} is not created or authorized by this session.` });
   }
   const attached = await cdpCallBrowser(client, "Target.attachToTarget", { targetId, flatten: true });
   if (!attached.success) return attached;
@@ -154,10 +154,10 @@ export const readPageTool = defineBrowserTool({
   name: "browser_read_page",
   label: "Browser Read Page",
   description:
-    "Read a page as clean article text — main content with nav/ads/boilerplate stripped. Pass a url (opened in an isolated tab, read, then closed) or a targetId of an owned tab. Reader-mode counterpart to browser_web_search.",
+    "Read a page as clean article text — main content with nav/ads/boilerplate stripped. Pass a url (opened in an isolated tab, read, then closed) or a targetId of a created or authorized tab. Reader-mode counterpart to browser_web_search.",
   promptSnippet: "Read a page's main content as clean text",
   promptGuidelines: [
-    "Pass url to read an arbitrary page (opened + closed in its own tab, never disturbing your current tab), or targetId to read an already-open owned tab.",
+    "Pass url to read an arbitrary page (opened + closed in its own tab, never disturbing your current tab), or targetId to read an already-open created or authorized tab.",
     "Returns readable main-article text — use this over browser_snapshot/browser_execute_js when you want an article's content for reading or research.",
     "Boilerplate-heavy or structure-less pages fall back to bounded body text rather than erroring.",
   ],

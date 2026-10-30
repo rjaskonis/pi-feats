@@ -1,4 +1,5 @@
 import type { BrowserClient } from "../client";
+import { allocateRef } from "../util/refs";
 import { type Result, err, ok } from "../util/result";
 import type { ToolErr } from "../util/tool";
 import { type Box, boxOf } from "./box";
@@ -59,17 +60,12 @@ export const interactiveDiff = async (client: BrowserClient): Promise<string> =>
   const priorRefs = session.refMappings();
   const refByBackendId = new Map<number, string>();
   for (const [ref, backendId] of priorRefs) refByBackendId.set(backendId, ref);
-  let nextIndex = 1;
-  for (const ref of priorRefs.keys()) {
-    const digits = /^e(\d+)$/.exec(ref)?.[1];
-    if (digits !== undefined) nextIndex = Math.max(nextIndex, Number(digits) + 1);
-  }
   const refMap = new Map<string, number>();
   const refSig = new Map<string, string>();
   const taken = new Set<string>();
   for (const { node, backendId } of targets) {
     const prior = refByBackendId.get(backendId);
-    const ref = prior !== undefined && !taken.has(prior) ? prior : `e${nextIndex++}`;
+    const ref = prior !== undefined && !taken.has(prior) ? prior : allocateRef();
     taken.add(ref);
     node.ref = ref;
     refMap.set(ref, backendId);

@@ -8,7 +8,7 @@ const ListTabsArgs = Type.Object({
   scope: Type.Optional(
     Type.Union([Type.Literal("owned"), Type.Literal("all")], {
       default: "owned",
-      description: "'owned' (default) shows only tabs this harness session opened; 'all' shows every tab in the browser.",
+      description: "'owned' (default) shows created and explicitly authorized tabs; 'all' shows every tab in the browser.",
     }),
   ),
 });
@@ -16,12 +16,12 @@ const ListTabsArgs = Type.Object({
 export const listTabsTool = defineBrowserTool({
   name: "browser_list_tabs",
   label: "Browser List Tabs",
-  description: "List browser tabs. Defaults to tabs this harness session opened (scope:'owned'). Pass scope:'all' to see the user's other tabs too.",
+  description: "List browser tabs. scope:'owned' (default) includes created and explicitly authorized tabs. Pass scope:'all' to see other existing tabs.",
   promptSnippet: "List browser tabs",
   promptGuidelines: [
-    "Defaults to scope:'owned' — only tabs this session created. Pass scope:'all' to inspect the user's other tabs.",
-    "browser_switch_tab and browser_close_tab refuse non-owned tabs; use browser_new_tab to open one this session controls.",
-    "Each tab shows its full 32-char hex targetId — use the exact value with browser_switch_tab.",
+    "Defaults to scope:'owned' — created and authorized tabs. Pass scope:'all' to list other tabs.",
+    "Use browser_switch_tab with authorizeExisting:true only when the user explicitly requested control of that existing external CDP tab. browser_close_tab only closes created tabs.",
+    "Each tab shows its full targetId — use the exact value with browser_switch_tab.",
     "Internal tabs (chrome://) included by default; pass includeInternal=false to exclude them.",
   ],
   parameters: ListTabsArgs,
@@ -30,14 +30,14 @@ export const listTabsTool = defineBrowserTool({
     const r = await client.listTabs(args.includeInternal ?? true);
     if (!r.success) return err({ kind: "cdp_error", message: r.error.message });
     const scope = args.scope ?? "owned";
-    const filtered = scope === "owned" ? r.data.filter((t) => t.owned) : r.data;
+    const filtered = scope === "owned" ? r.data.filter((t) => t.owned || t.authorized) : r.data;
     const lines = filtered.map((t, i) => {
-      const flag = t.owned ? "★" : " ";
+      const flag = t.owned ? "★" : t.authorized ? "✓" : " ";
       return `  ${flag} [${i}] ${t.targetId} ${t.url}\n      ${t.title}`;
     });
     const header = scope === "owned"
-      ? `Owned tabs (${filtered.length}):`
-      : `All tabs (${filtered.length}, ★ = owned by this session):`;
+      ? `Controllable tabs (${filtered.length}, ★ = created, ✓ = authorized existing):`
+      : `All tabs (${filtered.length}, ★ = created, ✓ = authorized existing):`;
     return ok({
       text: `${header}\n${lines.join("\n")}`,
       details: { tabs: filtered, scope },
@@ -60,36 +60,38 @@ export const currentTabTool = defineBrowserTool({
     if (!ti.success) return ti;
     const info = ti.data.targetInfo;
     const owned = client.owns(info.targetId);
+    const authorized = !owned && client.canControl(info.targetId);
     return ok({
-      text: `Current tab${owned ? " (owned)" : " (NOT owned by this session)"}:\n  ${info.targetId}\n  ${info.url}\n  ${info.title}`,
-      details: { targetId: info.targetId, url: info.url, title: info.title, owned },
+      text: `Current tab (${owned ? "created" : authorized ? "authorized existing" : "not authorized"}):\n  ${info.targetId}\n  ${info.url}\n  ${info.title}`,
+      details: { targetId: info.targetId, url: info.url, title: info.title, owned, authorized },
     });
   },
 });
 
 const SwitchTabArgs = Type.Object({
   targetId: Type.String({ description: "Target ID from browser_list_tabs" }),
+  authorizeExisting: Type.Optional(Type.Boolean({ description: "External CDP only: authorize control of this existing tab when the user explicitly requested it. Does not grant permission to close it." })),
 });
 
 const ownershipDeniedMessage = (id: string, namespace: string): string =>
   `Tab ${id} is not owned by this harness session (namespace: ${namespace}). ` +
-  `Use browser_list_tabs with scope:'all' to see it, or browser_new_tab to open one this session can control.`;
+  `Use browser_new_tab, or authorize an existing external CDP tab with browser_switch_tab and authorizeExisting:true only when the user requested it. Existing tabs cannot be closed.`;
 
 export const switchTabTool = defineBrowserTool({
   name: "browser_switch_tab",
   label: "Browser Switch Tab",
-  description: "Switch to and attach to a different tab by targetId. Only tabs this harness session opened are accepted.",
+  description: "Switch to a created or authorized tab. For an explicitly selected external CDP browser, authorizeExisting:true permits control of a user-requested existing tab without granting permission to close it.",
   promptSnippet: "Switch tabs",
   promptGuidelines: [
     "Get a targetId via browser_list_tabs first.",
     "Accepts exact targetId or a unique prefix of at least 8 hex characters.",
-    "Refuses tabs not owned by this session — use browser_new_tab to open a controllable tab instead.",
+    "Existing external CDP tabs require authorizeExisting:true and the user's explicit request. Authorization never permits closing that tab.",
   ],
   parameters: SwitchTabArgs,
   concurrency: "serialized",
   async handler(args, { client }): Promise<Result<ToolOk, ToolErr>> {
     let resolved = args.targetId;
-    if (!client.owns(resolved)) {
+    if (!client.canControl(resolved)) {
       const isHexPrefix = /^[0-9A-Fa-f]{8,}$/.test(args.targetId);
       if (isHexPrefix) {
         const tabs = await client.listTabs(true);
@@ -110,7 +112,11 @@ export const switchTabTool = defineBrowserTool({
         if (first === undefined) return err({ kind: "invalid_state", message: "no matching tab" });
         resolved = first.targetId;
       }
-      if (!client.owns(resolved)) {
+      if (!client.canControl(resolved) && args.authorizeExisting) {
+        const authorized = await client.authorizeTab(resolved);
+        if (!authorized.success) return err({ kind: "invalid_state", message: authorized.error.message });
+      }
+      if (!client.canControl(resolved)) {
         return err({
           kind: "invalid_state",
           message: ownershipDeniedMessage(resolved, client.namespace),

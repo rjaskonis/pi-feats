@@ -508,7 +508,7 @@ The `remote:<name>` form forwards the rest of the command to the selected remote
 | Extension | Responsibility |
 | --- | --- |
 | API Server | HTTP API, Applications, profile administration, sessions, logs, and terminal tickets. |
-| Browser Harness | Steel Profile-scoped CDP browser automation for active Pi Profiles. |
+| Browser Harness | Profile-scoped Steel automation by default, with explicit external CDP connections. |
 | CLI Resources | Resource, package, session, and profile commands. |
 | Context Memory | Persistent operational and personal context for new sessions. |
 | Guardrails | Input, tool, and output policy stages. |
@@ -518,7 +518,7 @@ The `remote:<name>` form forwards the rest of the command to the selected remote
 | Sequential Workflow | Ordered Action, Collect, and Evaluate workflows. |
 | Skill Sources | Git-backed Skill source catalog and explicit imports. |
 
-### Steel Browser Harness
+### Browser Harness
 
 The Browser Harness maps each Pi Profile to a persisted Steel SessionContext. The Steel API creates and releases live browser sessions; the profile-local context restores cookies and storage for the next session. Configure the Steel endpoint and credential in each profile's `.env`:
 
@@ -527,7 +527,13 @@ STEEL_API_URL=http://127.0.0.1:3000
 STEEL_API_KEY=...
 ```
 
-On first browser use, the harness creates a Steel Session through the API. `browser_setup` and `/browser-setup` return Steel's interactive live viewer URL, so a person can observe and interact with the same browser and tabs while the agent works through CDP. When the session is released, the harness stores the SessionContext in `steel.json` inside that Pi Profile directory. Steel Session identifiers are never persisted. Use `/browser-viewer` to show the current viewer URL, `/browser-status` to inspect the active session, and `/browser-release` to release it.
+On first browser use, the harness creates a Steel Session through the API. `browser_setup` and `/browser-setup` return Steel's interactive live viewer URL, so a person can observe and interact with the same browser and tabs while the agent works through CDP. When the session is released, the harness stores the SessionContext in `steel.json` inside that Pi Profile directory. Steel Session identifiers are never persisted. Use `/browser-viewer` to show the current viewer URL, `/browser-status` to inspect the active connection, and `/browser-release` to release it.
+
+Steel remains the default for every new Pi session. To use an already prepared external Chromium browser instead, call `browser_setup({endpoint: "http://127.0.0.1:9222"})` or run `/browser-setup http://127.0.0.1:9222`. HTTP(S) base URLs resolve through `/json/version`; browser WebSocket URLs (`ws://` or `wss://`) connect directly. The endpoint must be reachable from the Pi process, including its sandbox when applicable. The harness does not discover or launch local browsers, enable debugging, or integrate with browser-manager APIs automatically. A DICloak-provided browser CDP endpoint uses the same connection path.
+
+The selected connection lasts only for the current Pi session. Empty `browser_setup()` or `/browser-setup` calls reconnect that selection. Use `browser_setup({provider: "steel"})` or `/browser-setup steel` to return explicitly to Steel. Failed external connections never fall back silently. `/browser-status` shows the selected provider even after a failed connection. External connections have no Steel viewer and do not export their cookies or storage to Pi.
+
+The harness opens dedicated agent tabs. To control an existing external tab explicitly requested by the user, list tabs with `browser_list_tabs({scope: "all"})`, then call `browser_switch_tab({targetId: "...", authorizeExisting: true})`. Authorization permits interaction, not closing that tab. The default tab list includes both created and authorized tabs, marked separately. Release, connection changes, and shutdown close only agent-created tabs; they never terminate an external browser. Switching waits for active tools and discards prior references and connection state. Treat CDP endpoints as sensitive access to logged-in accounts; keep them local or otherwise protected.
 
 ## Installation
 

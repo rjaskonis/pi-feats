@@ -28,6 +28,7 @@ export type TabInfo = {
   readonly title: string;
   readonly url: string;
   readonly owned?: boolean;
+  readonly authorized?: boolean;
 };
 
 export type PageInfo = {
