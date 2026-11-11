@@ -54,7 +54,11 @@ PI_FEATS_API_URL=https://pi.example.com/api/pi
 PI_FEATS_API_TOKEN=...
 ```
 
-The API Server itself continues to use `/api/...` paths when accessed directly.
+Management endpoints use `/api/...` paths when accessed directly. The [OpenAI-compatible profile API](OPENAI.md) uses `/v1/...` directly or `/api/pi/v1/...` through the Console proxy.
+
+## OpenAI-compatible profile API
+
+`GET /v1/models`, `POST /v1/chat/completions` and `POST /v1/responses` expose profiles as model IDs, using the existing bearer token. Both POST endpoints support complete JSON and incremental SSE, caller-owned history, real usage and stateless execution with profile isolation and Nono. See [the contract, SDK examples and limitations](OPENAI.md).
 
 ## Endpoints
 

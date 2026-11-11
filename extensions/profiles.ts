@@ -6,6 +6,7 @@ import { copyFile, mkdir, readFile, readdir, rm, symlink, writeFile } from "node
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { ensureNonoAvailable, ensureProfileSandbox, isSandboxEnabled, migrateLegacySandboxRuntime, sandboxedCommand } from "./lib/profile-sandbox.ts";
 import { profileEnvironment, registerProfileEnvReload } from "./lib/profile-env.ts";
 import { extensionCatalog } from "./lib/extension-catalog.ts";
@@ -34,7 +35,7 @@ export function resolveRootAgentDir(environment: NodeJS.ProcessEnv = process.env
 
 const rootAgentDir = () => resolveRootAgentDir();
 const profilesDir = () => join(rootAgentDir(), "profiles");
-const PROFILE_REEXEC_CONTEXT_ENV = ["PI_APPLICATION_IDENTITY_KEY", "PI_APPLICATION_SLUG", "PI_APPLICATION_SESSION_ID", "PI_APPLICATION_DIRECT_CONTEXT_MEMORY", "PI_APPLICATION_HANDOFF"] as const;
+const PROFILE_REEXEC_CONTEXT_ENV = ["PI_OPENAI_WORKER", "PI_APPLICATION_IDENTITY_KEY", "PI_APPLICATION_SLUG", "PI_APPLICATION_SESSION_ID", "PI_APPLICATION_DIRECT_CONTEXT_MEMORY", "PI_APPLICATION_HANDOFF"] as const;
 
 export function forwardedProfileExecutionEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return Object.fromEntries(PROFILE_REEXEC_CONTEXT_ENV.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]!]]));
@@ -371,7 +372,10 @@ async function reexecWithProfile(name: string, args: string[]) {
   const runtimeSources = name === "default" ? [] : await rootRuntimeSources(root, rootSettings);
   const extensionArgs = runtimeSources.flatMap((source) => ["--extension", source]);
   const sessionArgs = name === "default" ? [] : ["--session-dir", join(target, "sessions")];
-  const piArgs = [resolve(process.argv[1]), ...extensionArgs, ...sessionArgs, ...args];
+  const compatibilityWorker = process.env.PI_OPENAI_WORKER === "1";
+  const piArgs = compatibilityWorker
+    ? [fileURLToPath(new URL("./api-server/openai-worker.mjs", import.meta.url)), resolve(process.argv[1]), ...extensionArgs]
+    : [resolve(process.argv[1]), ...extensionArgs, ...sessionArgs, ...args];
   // The default profile is intentionally never sandboxed. Named profiles run
   // directly in their own persistent directory; nono enforces their policy.
   const sandbox = await isSandboxEnabled(target, name === "default");

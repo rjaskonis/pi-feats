@@ -53,4 +53,13 @@ async function start() {
 async function stop() { const state = await readState(); if (!state || !isAlive(state.pid)) { await unlink(statePath()).catch(() => {}); return console.log("API is not running."); } try { process.kill(-state.pid, "SIGTERM"); } catch { process.kill(state.pid, "SIGTERM"); } for (let i = 0; i < 30 && isAlive(state.pid); i++) await new Promise((resolve) => setTimeout(resolve, 100)); if (isAlive(state.pid)) { try { process.kill(-state.pid, "SIGKILL"); } catch { process.kill(state.pid, "SIGKILL"); } } await unlink(statePath()).catch(() => {}); console.log("API stopped."); }
 async function status() { await clearStaleState(); const state = await readState(); console.log(!state || !isAlive(state.pid) ? "API: stopped" : `API: running (PID ${state.pid}) at http://${state.host}:${state.port}`); }
 async function handleCliCommand(): Promise<boolean> { const args = withoutTuiModeArgs(process.argv.slice(2)); if (args[0] !== "api" || process.env.PI_API_WORKER === "1") return false; switch (args[1]) { case "start": await start(); break; case "stop": await stop(); break; case "status": await status(); break; case "restart": await stop(); await start(); break; default: console.error("Usage: pi api start | stop | restart | status"); process.exitCode = 1; } return true; }
-export default async function (pi: ExtensionAPI) { if (await handleCliCommand()) process.exit(); if (process.env.PI_API_WORKER !== "1") return; pi.on("session_start", async () => { const { startApiServer } = await import("./server.ts"); await startApiServer({ agentDir: agentDir(), cwd: process.cwd() }); }); }
+export default async function (pi: ExtensionAPI) {
+  // Compatibility execution owns a dedicated SDK runtime, never an API listener.
+  if (process.env.PI_OPENAI_WORKER) return;
+  if (await handleCliCommand()) process.exit();
+  if (process.env.PI_API_WORKER !== "1") return;
+  pi.on("session_start", async () => {
+    const { startApiServer } = await import("./server.ts");
+    await startApiServer({ agentDir: agentDir(), cwd: process.cwd() });
+  });
+}

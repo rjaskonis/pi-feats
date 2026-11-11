@@ -188,6 +188,8 @@ curl -X POST \
 
 The API Server is the automation and integration surface for Pi. It turns the same persistent profiles and sessions used in the terminal into an authenticated HTTP service, enabling WebUI administration, external applications, webhooks, and programmatic chat without inventing a second state model.
 
+The [OpenAI-compatible API](extensions/api-server/OPENAI.md) exposes profiles as model IDs through `/v1/models`, `/v1/chat/completions` and `/v1/responses`, with JSON, incremental SSE, caller-owned history and isolated stateless execution. It uses the existing API bearer token and is also available through the Console proxy at `/api/pi/v1`.
+
 ```bash
 # Start, inspect, restart, and stop the service
 pi api start
