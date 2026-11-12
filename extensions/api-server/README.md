@@ -58,7 +58,7 @@ Management endpoints use `/api/...` paths when accessed directly. The [OpenAI-co
 
 ## OpenAI-compatible profile API
 
-`GET /v1/models`, `POST /v1/chat/completions` and `POST /v1/responses` expose profiles as model IDs, using the existing bearer token. Both POST endpoints support complete JSON and incremental SSE, caller-owned text/image history, document extraction (PDF, XLSX, DOCX, PPTX and UTF-8 text), real usage and stateless execution with profile isolation and Nono. Images require a vision-capable profile; document extraction requires the runtime prerequisites described in the contract. See [the contract, SDK examples and limitations](OPENAI.md).
+`GET /v1/models`, `POST /v1/chat/completions` and `POST /v1/responses` expose profiles as model IDs, using the existing bearer token. Both POST endpoints support complete JSON and incremental SSE, caller-owned text/image/file history, real usage and stateless execution with profile isolation and Nono. Codex-backed profiles send documents as native `input_file` parts through the existing Codex transport, without a standalone OpenAI API or local document extraction. Other profile APIs retain the PDF/Office/text extraction fallback. Images and native PDFs require a vision-capable profile; only the extraction fallback requires the documented Python/Poppler prerequisites. See [the contract, SDK examples and limitations](OPENAI.md).
 
 ## Endpoints
 

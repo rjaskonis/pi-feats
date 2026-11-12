@@ -107,7 +107,23 @@ Chat image example (replace `<base64>` with actual data):
 
 Responses image parts use `{ "type": "input_image", "image_url": "data:image/png;base64,<base64>" }`. `detail` is accepted as an advisory field; Pi controls image processing.
 
-Documents are converted to user-role text inside the selected profile worker, including Nono when enabled. Supported formats:
+### Native files through Codex (preferred for Codex profiles)
+
+When the selected profile uses Pi's `openai-codex-responses` API, documents are sent as **native `input_file` parts with their original bytes** through that same provider. The default destination is `https://chatgpt.com/backend-api/codex/responses`, using the profile's existing Codex authentication. There is no standalone `api.openai.com` client, separate API key, `/v1/files` upload or provider/model switch.
+
+This works for both public protocols: Chat `file` parts and Responses `input_file` parts are normalized into the same Codex-native request. No special header or Open WebUI setting is needed. File `detail: "auto" | "low" | "high"` is preserved when supplied.
+
+Pi 1.5.2's base message union cannot represent a file block. The bridge therefore keeps request-local file bindings alongside authoritative user/assistant history and replaces their internal markers at the final provider-payload boundary. It wraps the existing SDK stream function and exposes the expanded native file parts to existing provider-payload policy hooks, preserving profile instructions, authentication, internal tools, usage and cancellation. It never reattaches original files after a policy hook removes them; filtered-out required files fail explicitly. Text-only input guardrails do not automatically inspect binary document contents: document-content policies must inspect the native file parts or reject them. Files are reattached during tool turns, retries and compaction requests; internal markers and base64-as-text prompts are not sent to the model. Missing file context or a switch to an incompatible transport fails explicitly instead of silently dropping attachments.
+
+On this path, **Python, Poppler, OCR and local Office parsers are not used to read documents**. Codex performs the file processing. A PDF with only page images can be interpreted by the model; it does not require a local text layer. Because PDF processing includes visual input, a vision-capable profile that permits images is required for native PDFs too.
+
+Real end-to-end validation through our local `/v1/responses` endpoint succeeded with PDF, an image-only PDF, XLSX (including caller-supplied history), DOCX and CSV on `gpt-6.1-sol`. The byte-identical native file parts and the `chatgpt.com` destination were checked before transmission; the responses returned the expected file-only values. See [the evidence and reproduction procedure](CODEX-NATIVE-FILES.md).
+
+Other file types are forwarded unchanged on the Codex path, but acceptance, parsing, context limits and fidelity remain model/backend capabilities. Spreadsheet ingestion is not an Excel engine: do not assume exact cell addressing, recalculated formulas or unrestricted full-workbook access. If a native Codex request fails, it is **not** silently retried through local extraction or a standalone OpenAI endpoint.
+
+### Extraction fallback for other profile APIs
+
+For profiles using a different API, documents retain the existing conversion to user-role text inside the selected profile worker, including Nono when enabled. Supported fallback formats:
 
 - PDF: the real text layer, extracted by Poppler (`pdftotext`). Scanned/image-only PDFs fail with `document_text_missing`; perform OCR first or send page images to a vision-capable profile. Embedded diagrams/images are not rendered automatically.
 - XLSX: sheet names, cell addresses, text, raw values, formulas and available cached results. Formulas/macros are never executed or recalculated. Styles, charts and date/number formatting are not rendered.
@@ -127,15 +143,15 @@ Responses document example:
 }
 ```
 
-`file_data` accepts raw base64 (provide a filename) or a MIME-qualified base64 data URL. Chat uses `{ "type": "file", "file": { "filename": "report.pdf", "file_data": "data:application/pdf;base64,<base64>" } }`. Images and multiple documents may be combined in one request. Extracted documents are labeled in user context; originals are not stored on disk or exposed as executable tool calls. They are not staged as editable files for agent tools. Extraction failures never silently drop an attachment.
+`file_data` accepts raw base64 (provide a filename) or a MIME-qualified base64 data URL. Chat uses `{ "type": "file", "file": { "filename": "report.pdf", "file_data": "data:application/pdf;base64,<base64>" } }`. Images and multiple documents may be combined in one request. On the fallback path, extracted documents are labeled in user context. On the Codex path, original bytes are attached as native file content instead. Pi does not store the originals on disk or stage editable files for agent tools. Attachment failures never silently drop a file; the provider's own data-handling policies still apply.
 
 Image URLs and `file_url` can reference publicly reachable HTTPS content. Downloads reject credentials, nonstandard ports, redirects, compressed HTTP bodies, loopback/private/link-local/reserved addresses and unsafe DNS results. The checked DNS address is pinned to the actual connection. No Pi API token, cookies or other ambient credentials are forwarded to attachment hosts. Each download has a 20-second deadline.
 
 Open WebUI may already extract uploaded PDF/Office documents into retrieval context; that text remains supported without document dependencies in Pi. For direct file input, the UI/client must send the bytes or a public URL. A private Open WebUI `/api/v1/files/...` URL or an OpenAI `file_id` is not an attachment payload the Pi server can access automatically. Send `file_data` or let the client extract its own attachment; IDs are explicitly rejected with `unsupported_file_reference` rather than guessed, ignored or fetched with unrelated credentials.
 
-### Document runtime prerequisites
+### Fallback document runtime prerequisites
 
-Office document extraction requires **Python 3**, using only its standard library. PDF extraction additionally requires **Poppler's `pdftotext`**. These must exist in the Pi runtime/container and be accessible under the named profile's existing Nono policy. On Linux, the worker prefers `/usr/bin/python3` over environment shims. No dependencies are installed automatically and no additional profile sandbox permissions are granted.
+These prerequisites apply only to the non-Codex extraction fallback, not native Codex file input. Office document extraction requires **Python 3**, using only its standard library. PDF extraction additionally requires **Poppler's `pdftotext`**. These must exist in the Pi runtime/container and be accessible under the named profile's existing Nono policy. On Linux, the worker prefers `/usr/bin/python3` over environment shims. No dependencies are installed automatically and no additional profile sandbox permissions are granted.
 
 For example, an administrator can include `python3` and `poppler-utils` in a Debian/Ubuntu runtime image. A missing executable produces `document_extractor_unavailable` (HTTP 503). This is an operational prerequisite, not permission for the API to install software or modify a container.
 
@@ -148,7 +164,7 @@ The extractor runs as a short-lived subprocess within the request's process grou
 - `stream` is boolean. Chat `stream_options.include_usage` is a validated boolean when streaming; other stream options are ignored. For non-streaming requests and Responses, `stream_options` is ignored.
 - Responses supports top-level string `instructions`. Non-null `previous_response_id` and `conversation` are rejected in both protocols: send explicit history in `messages` or `input` instead.
 - `metadata`: at most 16 string entries, keys up to 64 characters, values up to 512 characters. Responses echoes it; Chat accepts it without storage or identity routing.
-- At most 100 messages, 1,000 parts per message and 100,000 total text characters, including instructions, extracted documents and resize notes. Extracted text is never silently truncated.
+- At most 100 messages, 1,000 parts per message and 100,000 total text characters, including instructions, fallback-extracted documents and resize notes. Native Codex document content is not locally extracted or counted as text characters; the attachment byte limits and Codex's own context limits apply. Extracted text is never silently truncated.
 - At most 10 attachments per request, 10 MiB per attachment and 20 MiB aggregate decoded attachment bytes, including history. Images must be no larger than 16,384 pixels on either axis or 40 megapixels. Encoded image bytes do not count as prompt-text characters.
 - Compatibility POST JSON bodies are limited to 32 MiB to accommodate base64 overhead, consistently at the direct API, Console proxy and worker transport. Other existing API routes retain their own limits. External ingress/body limits may still require deployment-specific configuration.
 - Visible output is bounded to 16 MiB. Worker frame, transport and writable backlog limits prevent unlimited pending output. Initialization has a 60-second deadline and each blocked SSE drain has a 30-second deadline. A caller disconnect cancels the agent and request-owned worker process group; force termination follows a one-second grace period when needed.
@@ -176,9 +192,19 @@ npm run test:extensions
 npm run build:web
 PI_OPENAI_TEST_CLI=/absolute/path/to/pi/dist/cli.js \
 PI_OPENAI_TEST_NONO=1 \
-node --experimental-strip-types --test tests/openai-worker-integration.test.ts
+node --experimental-strip-types --test tests/openai-worker-integration.test.ts tests/openai-codex-worker.test.ts
 ```
 
-The integration test uses a temporary Pi root, tests default/named/Nono execution, verifies native image/text history, PDF/XLSX extraction, image payloads above 1 MiB, vision capability errors, credential separation, concurrent conversation isolation, internal tool turns, usage, cancellation and profile tool policy, rejects failed sandbox startup, runs isolated profile creation/resource commands and checks that no profile-local package trees or persistent transcripts are created. Without `PI_OPENAI_TEST_CLI` it is explicitly skipped. `PI_OPENAI_TEST_NONO=1` requires an already-installed Nono; it never installs it.
+The Codex worker test uses a deterministic localhost Codex mock, verifies native current/history files through an internal tool loop under Nono, and deliberately removes Poppler from PATH. The extraction-fallback integration test uses a temporary Pi root, tests default/named/Nono execution, verifies native image/text history, PDF/XLSX extraction, image payloads above 1 MiB, vision capability errors, credential separation, concurrent conversation isolation, internal tool turns, usage, cancellation and profile tool policy, rejects failed sandbox startup, runs isolated profile creation/resource commands and checks that no profile-local package trees or persistent transcripts are created. Without `PI_OPENAI_TEST_CLI` it is explicitly skipped. `PI_OPENAI_TEST_NONO=1` requires an already-installed Nono; it never installs it.
 
 Compatibility was validated locally with Pi 1.5.2, JavaScript `openai` 7.15.0 and Python `openai` 2.48.0: discovery, both JSON protocols, both SSE protocols, JavaScript `finalResponse()`, Python `get_final_response()` and image/file request serialization. Attachment tests additionally exercise real PDF/Office extraction, limits and SSRF protections without external network requests. SDKs are optional test-only dependencies; unavailable SDK checks are reported without automatic installation. Proxy tests exercise the same streaming gateway used by the Next route, including downstream body cancellation; external proxy/network buffering requires deployment-specific verification.
+
+Live Codex validation is explicitly opt-in and consumes the existing Codex subscription's quota. It is skipped by ordinary test runs and never uses a standalone OpenAI API key:
+
+```bash
+PI_CODEX_LIVE_TESTS=1 \
+PI_CODEX_SDK_ENTRY=/absolute/path/to/pi/dist/index.js \
+node --experimental-strip-types --test tests/openai-codex-live.test.ts
+```
+
+Run this from a repository checkout with local Codex credentials and the supported Pi SDK. `PI_CODEX_LIVE_MODEL` can select an existing Codex model for the validation without mutating profile settings. Only synthetic files are sent; agent tools are disabled and Poppler is deliberately unavailable during the test. Do not treat a mocked transport test alone as evidence of real backend file support.

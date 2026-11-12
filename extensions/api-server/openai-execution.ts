@@ -1,8 +1,9 @@
 /** Shared ephemeral Pi execution, with a structured subprocess event channel. */
-import type { AgentSession, AgentSessionEvent, SessionManager as SessionManagerType } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent, ModelRuntime as ModelRuntimeType, SessionManager as SessionManagerType } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { prepareAttachments } from "./openai-attachments.ts";
+import { prepareAttachments, extractPreparedDocuments } from "./openai-attachments.ts";
+import { CODEX_FILE_API, hasNativePdfInput, installCodexFileBridge, type CodexFileBridge } from "./openai-codex-files.ts";
 import { attachmentError, attachmentFailures } from "./openai-errors.ts";
 import { OPENAI_BODY_BYTES, OPENAI_ATTACHMENT_BYTES, OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
 import { CompatibilityError, type CompletionRequest, type CompletionResult, type ExecutionEvent, type TokenUsage } from "./openai-contract.ts";
@@ -13,17 +14,17 @@ const emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, to
 
 /** Populate authoritative session context before constructing the AgentSession. */
 export function restoreHistory(manager: Pick<SessionManagerType, "appendMessage">, request: CompletionRequest): Array<{ id: string; index: number }> {
-  const restoredImages: Array<{ id: string; index: number }> = [];
+  const restoredInputs: Array<{ id: string; index: number }> = [];
   for (const [index, message] of request.messages.slice(0, -1).entries()) {
     if (message.role === "assistant") manager.appendMessage({ role: "assistant", content: [{ type: "text", text: message.content }], api: "openai-completions", provider: "external", model: "external", usage: emptyUsage(), stopReason: "stop", timestamp: Date.now() });
     else if (message.role === "user") {
       const id = manager.appendMessage({ role: "user", content: message.images?.length ? [{ type: "text", text: message.content }, ...message.images] : message.content, timestamp: Date.now() });
-      if (message.images?.length) restoredImages.push({ id, index });
+      if (message.images?.length || message.documents?.length) restoredInputs.push({ id, index });
     }
     // Instruction roles are appended to the profile prompt, not recorded as
     // native system loadout snapshots (which would deactivate profile tools).
   }
-  return restoredImages;
+  return restoredInputs;
 }
 
 /** Execute a prepared session and dispose it on every success, failure, or abort. */
@@ -63,7 +64,7 @@ export async function executeSession(session: AgentSession, request: CompletionR
   signal.addEventListener("abort", abort, { once: true });
   try {
     signal.throwIfAborted();
-    if (request.messages.some((message) => message.images?.length) && !session.model?.input.includes("image")) throw attachmentError("unsupported_image_model");
+    if ((request.messages.some((message) => message.images?.length) || hasNativePdfInput(request)) && !session.model?.input.includes("image")) throw attachmentError("unsupported_image_model");
     emit({ type: "ready" });
     const final = request.messages.at(-1)!;
     await session.prompt(final.content, { source: "rpc", expandPromptTemplates: false, ...(final.images?.length ? { images: final.images } : {}) });
@@ -120,6 +121,8 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     process.stdout.write(`${WORKER_EVENT_PREFIX}${JSON.stringify(value)}\n`);
   };
   let session: AgentSession | undefined;
+  let nativeFiles: CodexFileBridge | undefined;
+  let modelRuntime: ModelRuntimeType | undefined;
   try {
     let input = "", inputBytes = 0;
     process.stdin.setEncoding("utf8");
@@ -130,7 +133,7 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     }
     const rawRequest = JSON.parse(input) as CompletionRequest;
     input = "";
-    const request = await prepareAttachments(rawRequest, controller.signal);
+    let request = await prepareAttachments(rawRequest, controller.signal, { documents: "defer" });
     const { createAgentSession, createCodemodeExtension, createToolSearchExtension, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, resizeImage, formatDimensionNote } = host ?? await import("@earendil-works/pi-coding-agent");
     const { join } = await import("node:path");
     const agentDir = process.env.PI_CODING_AGENT_DIR!;
@@ -153,15 +156,21 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     await loader.reload();
     if (loader.getExtensions().errors.length) throw new Error("Profile extension initialization failed.");
     const manager = SessionManager.inMemory(cwd);
-    const restoredImages = restoreHistory(manager, request);
-    const runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json"), allowModelNetwork: false });
+    const restoredInputs = restoreHistory(manager, request);
+    const runtime = modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json"), allowModelNetwork: false });
     controller.signal.throwIfAborted();
     session = (await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader: loader, sessionManager: manager, modelRuntime: runtime })).session;
     const configuredProvider = settingsManager.getDefaultProvider(), configuredModel = settingsManager.getDefaultModel();
     if ((configuredProvider && session.model?.provider !== configuredProvider) || (configuredModel && session.model?.id !== configuredModel)) {
       throw new CompatibilityError("The profile's configured model is unavailable.", null, 502, "profile_model_unavailable");
     }
-    if (request.messages.some((message) => message.images?.length) && !session.model?.input.includes("image")) throw attachmentError("unsupported_image_model");
+    // The selected Codex provider accepts official input_file parts. Other
+    // providers retain the existing extraction fallback; never change model,
+    // credentials or endpoint to route files through a standalone OpenAI API.
+    if (session.model?.api !== CODEX_FILE_API) request = await extractPreparedDocuments(request, controller.signal);
+    const visualInput = request.messages.some((message) => message.images?.length) || hasNativePdfInput(request);
+    if (visualInput && settingsManager.getBlockImages()) throw attachmentError("image_input_disabled");
+    if (visualInput && !session.model?.input.includes("image")) throw attachmentError("unsupported_image_model");
     // Validate and normalize history as well as the final prompt using the
     // selected model's limits and the profile's image-resizing policy. Pi's
     // prompt path may otherwise omit undecodable images with only a text hint.
@@ -175,21 +184,26 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
       if (note) message.content += `\n\n${note}`;
     }
     if (request.messages.reduce((total, message) => total + message.content.length, request.instructions?.length ?? 0) > OPENAI_TEXT_CHARACTERS) throw attachmentError("context_too_large");
-    for (const { id, index } of restoredImages) {
+    for (const { id, index } of restoredInputs) {
       const message = request.messages[index];
-      manager.appendContextEdit(id, { content: [{ type: "text", text: message.content }, ...message.images!] });
+      manager.appendContextEdit(id, { content: [{ type: "text", text: message.content }, ...(message.images ?? [])] });
     }
-    if (restoredImages.length) session.refreshContext();
+    if (restoredInputs.length) session.refreshContext();
     await session.bindExtensions({ mode: "rpc", onError: () => { process.stderr.write("OpenAI worker extension failed.\n"); } });
+    if (request.messages.some((message) => message.documents?.length)) nativeFiles = installCodexFileBridge(session, request, controller.signal);
     const result = await executeSession(session, request, write, controller.signal);
+    nativeFiles?.assertDelivered();
     session = undefined;
     write({ type: "result", result });
   } catch (error) {
-    process.stderr.write(`OpenAI worker failed (${error instanceof CompatibilityError ? error.code : "runtime_error"}).\n`);
+    const failure = nativeFiles?.failure() ?? error;
+    process.stderr.write(`OpenAI worker failed (${failure instanceof CompatibilityError ? failure.code : "runtime_error"}).\n`);
     session?.dispose();
-    write({ type: "failure", code: error instanceof CompatibilityError ? error.code : "generation_failed" });
+    write({ type: "failure", code: failure instanceof CompatibilityError ? failure.code : "generation_failed" });
     process.exitCode = 1;
   } finally {
+    nativeFiles?.dispose();
+    await modelRuntime?.settleCredentialWrites().catch(() => { process.stderr.write("OpenAI worker credential synchronization failed.\n"); process.exitCode = 1; });
     process.removeListener("SIGTERM", abort);
     process.removeListener("SIGINT", abort);
   }

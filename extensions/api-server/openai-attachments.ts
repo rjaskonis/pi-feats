@@ -1,5 +1,6 @@
 /** Bounded attachment transport and preparation inside the selected profile worker. */
 import { lookup } from "node:dns/promises";
+import { randomUUID } from "node:crypto";
 import { get } from "node:https";
 import { BlockList, isIP } from "node:net";
 import { spawn } from "node:child_process";
@@ -9,7 +10,9 @@ import { CompatibilityError, attachmentError } from "./openai-errors.ts";
 import { OPENAI_ATTACHMENT_BYTES, OPENAI_ATTACHMENT_TOTAL_BYTES, OPENAI_ATTACHMENT_COUNT, OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
 import type { CompletionRequest } from "./openai-contract.ts";
 
-export type InputAttachment = { kind: "image" | "file"; source: string; filename?: string; param: string };
+export type FileDetail = "auto" | "low" | "high";
+export type InputAttachment = { kind: "image" | "file"; source: string; filename?: string; param: string; detail?: FileDetail };
+export type InputDocument = { marker: string; filename: string; data: string; mimeType: string; param: string; detail?: FileDetail };
 export type InputImage = { type: "image"; data: string; mimeType: string };
 export type AttachmentBudget = { count: number; bytes: number };
 const officeTypes = new Set([
@@ -197,20 +200,25 @@ export async function extractDocument(bytes: Buffer, mimeType: string, filename:
 }
 
 /** Sources never become local paths or tool calls; native images and extracted text stay request-scoped. */
-export async function prepareAttachments(request: CompletionRequest, signal: AbortSignal): Promise<CompletionRequest> {
+export async function prepareAttachments(request: CompletionRequest, signal: AbortSignal, options: { documents?: "extract" | "defer" } = {}): Promise<CompletionRequest> {
   const messages: CompletionRequest["messages"] = [];
   const budget: AttachmentBudget = { count: 0, bytes: 0 };
   let characters = request.instructions?.length ?? 0;
   for (const message of request.messages) {
     let content = message.content;
-    const images: InputImage[] = [];
+    const images: InputImage[] = [], documents: InputDocument[] = [];
     for (const attachment of message.attachments ?? []) {
       signal.throwIfAborted();
       if (++budget.count > OPENAI_ATTACHMENT_COUNT) throw attachmentError("attachment_too_large", attachment.param);
       const { bytes, mimeType } = attachment.source.startsWith("data:") ? decodeAttachment(attachment.source, attachment.param) : await downloadAttachment(attachment.source, attachment.param, signal);
       charge(budget, bytes.length, attachment.param);
       if (attachment.kind === "image" || mimeType.startsWith("image/") || hasImageSignature(bytes)) images.push({ type: "image", data: bytes.toString("base64"), mimeType: validateImage(bytes, mimeType, attachment.param) });
-      else {
+      else if (options.documents === "defer") {
+        const marker = `[[pi-file:${randomUUID()}]]`;
+        const extension = Object.entries(mimeByExtension).find(([, type]) => type === mimeType)?.[0] ?? (bytes.subarray(0, 5).toString() === "%PDF-" ? "pdf" : "bin");
+        documents.push({ marker, filename: attachment.filename ?? `attachment.${extension}`, data: bytes.toString("base64"), mimeType, param: attachment.param, ...(attachment.detail ? { detail: attachment.detail } : {}) });
+        content += `\n\n${marker}`;
+      } else {
         const text = await extractDocument(bytes, mimeType, attachment.filename, attachment.param, signal);
         content += `\n\n[Attached document: ${attachment.filename ?? "document"}]\n${text}\n[End attached document]`;
       }
@@ -218,8 +226,27 @@ export async function prepareAttachments(request: CompletionRequest, signal: Abo
     characters += content.length;
     if (characters > OPENAI_TEXT_CHARACTERS) throw attachmentError("context_too_large");
     const { attachments: _sources, ...rest } = message;
-    messages.push({ ...rest, content, ...(images.length ? { images } : {}) });
+    messages.push({ ...rest, content, ...(images.length ? { images } : {}), ...(documents.length ? { documents } : {}) });
   }
   signal.throwIfAborted();
+  return { ...request, messages };
+}
+
+/** Existing extraction remains the fallback for profiles not using the Codex wire API. */
+export async function extractPreparedDocuments(request: CompletionRequest, signal: AbortSignal): Promise<CompletionRequest> {
+  let characters = request.instructions?.length ?? 0;
+  const messages: CompletionRequest["messages"] = [];
+  for (const message of request.messages) {
+    let content = message.content;
+    for (const document of message.documents ?? []) {
+      signal.throwIfAborted();
+      const text = await extractDocument(Buffer.from(document.data, "base64"), document.mimeType, document.filename, document.param, signal);
+      content = content.replace(document.marker, () => `[Attached document: ${document.filename}]\n${text}\n[End attached document]`);
+    }
+    characters += content.length;
+    if (characters > OPENAI_TEXT_CHARACTERS) throw attachmentError("context_too_large");
+    const { documents: _documents, ...rest } = message;
+    messages.push({ ...rest, content });
+  }
   return { ...request, messages };
 }

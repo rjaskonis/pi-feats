@@ -1,11 +1,11 @@
 /** OpenAI wire contracts with profile-owned execution settings and multimodal input. */
 import { CompatibilityError, attachmentError } from "./openai-errors.ts";
-import { normalizeAttachment, type InputAttachment, type InputImage, type AttachmentBudget } from "./openai-attachments.ts";
+import { normalizeAttachment, type InputAttachment, type InputImage, type InputDocument, type FileDetail, type AttachmentBudget } from "./openai-attachments.ts";
 import { OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
 export { CompatibilityError, errorBody } from "./openai-errors.ts";
 
 export type Protocol = "chat" | "responses";
-export type ConversationMessage = { role: "system" | "user" | "assistant"; content: string; attachments?: InputAttachment[]; images?: InputImage[] };
+export type ConversationMessage = { role: "system" | "user" | "assistant"; content: string; attachments?: InputAttachment[]; images?: InputImage[]; documents?: InputDocument[] };
 export type CompletionRequest = {
   profile: string;
   messages: ConversationMessage[];
@@ -48,13 +48,14 @@ function content(value: unknown, param: string, types: string[], allowAttachment
       if (source && typeof source === "object") { const image = record(source, `${at}.image_url`); fields(image, ["url", "detail"], `${at}.image_url.`); source = image.url; }
       attachments.push(normalizeAttachment("image", source, undefined, at, budget));
     } else {
-      fields(item, item.type === "file" ? ["type", "file"] : ["type", "file_data", "file_url", "file_id", "filename"], `${at}.`);
+      fields(item, item.type === "file" ? ["type", "file"] : ["type", "file_data", "file_url", "file_id", "filename", "detail"], `${at}.`);
       const file = item.type === "file" ? record(item.file, `${at}.file`) : item;
-      if (item.type === "file") fields(file, ["file_data", "file_url", "file_id", "filename"], `${at}.file.`);
+      if (item.type === "file") fields(file, ["file_data", "file_url", "file_id", "filename", "detail"], `${at}.file.`);
       if (file.file_id != null) throw attachmentError("unsupported_file_reference", at);
       if ((file.file_data != null) === (file.file_url != null)) throw attachmentError("invalid_attachment", at);
       if (file.file_url != null && (typeof file.file_url !== "string" || !/^https:/i.test(file.file_url))) throw attachmentError("attachment_url_blocked", at);
-      attachments.push(normalizeAttachment("file", file.file_data ?? file.file_url, file.filename, at, budget));
+      if (file.detail != null && !["auto", "low", "high"].includes(String(file.detail))) throw new CompatibilityError("Expected auto, low or high file detail.", `${at}.detail`);
+      attachments.push({ ...normalizeAttachment("file", file.file_data ?? file.file_url, file.filename, at, budget), ...(file.detail != null ? { detail: file.detail as FileDetail } : {}) });
     }
   }
   return { content: text.join(""), ...(attachments.length ? { attachments } : {}) };
