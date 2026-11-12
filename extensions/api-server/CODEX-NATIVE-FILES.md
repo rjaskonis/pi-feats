@@ -62,14 +62,14 @@ PI_OPENAI_TEST_NONO=1 \
 node --experimental-strip-types --test tests/openai-codex-worker.test.ts
 ```
 
-The isolated worker test checks actual SDK serialization and SSE parsing against a localhost Codex mock, including compressed requests, profile instructions/tools, native history, two model/tool turns, usage totals, no profile-local package trees and no persistent transcript. Its restricted PATH makes Poppler unavailable; it runs under the existing Nono launcher when requested.
+The isolated worker test checks actual SDK serialization and SSE parsing against a localhost Codex mock, including compressed requests, profile instructions/tools, native history, two model/tool turns, usage totals, no profile-local package trees and no persistent transcript. Its restricted PATH makes Poppler unavailable; it runs under the existing Nono launcher when requested. It also verifies native image delivery with deliberately text-only Codex catalog metadata, unchanged model configuration, and a separate explicit block-images rejection before any provider call.
 
 ## Scope and boundaries
 
 - Both public protocols accept inline documents; the native path is selected by the configured Pi model API, not the caller's profile ID or a compatibility header.
 - This change does not implement `/v1/files`, vector stores, File Search, server-side response storage or arbitrary cross-service `file_id` resolution. Open WebUI file IDs are not assumed to be Codex file IDs.
 - Existing public-URL download safeguards and attachment byte limits remain in force. No credentials are forwarded to attachment hosts.
-- Native PDFs include visual input, so the profile's image capability and block-images policy remain enforced.
+- Native images/PDFs retain the profile's explicit block-images policy. Codex modality metadata is advisory: custom catalog definitions can default to `input: ["text"]` despite backend vision support. The compatibility API forwards native visual input to Codex rather than rejecting it solely on that metadata; the backend remains authoritative. Catalog entries and the profile's model selection are not rewritten.
 - Profiles using non-Codex APIs retain the existing extraction fallback with its documented Python/Poppler prerequisites. No new standalone OpenAI route is created as a fallback.
 - The Codex backend is the route used by the Codex client, not a promise that every public Responses/Files endpoint exists under it. The inline `input_file` capability was verified on the stated account/model/runtime combination.
 

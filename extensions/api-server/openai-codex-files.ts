@@ -5,7 +5,21 @@ import type { InputDocument } from "./openai-attachments.ts";
 import { attachmentError, CompatibilityError } from "./openai-errors.ts";
 
 export const CODEX_FILE_API = "openai-codex-responses";
+
+/** Catalog defaults are not authoritative for the Codex backend's modalities.
+ * Custom model entries can default to text-only when input metadata is omitted.
+ * Keep image-blocking policy separate; let Codex validate native visual input.
+ */
+export function canAttemptVisualInput(model: { api?: string; input?: readonly string[] } | undefined): boolean {
+  return !!model && (model.api === CODEX_FILE_API || model.input?.includes("image") === true);
+}
+
 type WirePart = Record<string, unknown>;
+
+function nativeUserImageCount(payload: unknown): number {
+  if (!payload || typeof payload !== "object" || !("input" in payload) || !Array.isArray(payload.input)) return 0;
+  return payload.input.reduce((count: number, item: any) => count + (item?.role === "user" && Array.isArray(item.content) ? item.content.filter((part: any) => part?.type === "input_image" && [part.image_url, part.file_id].some((value) => typeof value === "string" && value.length > 0)).length : 0), 0);
+}
 
 /** Native PDF ingestion includes page images, so image policy still applies. */
 export function hasNativePdfInput(request: CompletionRequest): boolean {
@@ -74,6 +88,7 @@ export class CodexFileBindings {
       }
       return counts;
     };
+    if (nativeUserImageCount(after) < nativeUserImageCount(before)) throw attachmentError("native_image_context_missing");
     const expected = files(before), retained = files(after);
     for (const [filename, count] of expected) if ((retained.get(filename) ?? 0) < count) throw attachmentError("native_file_context_missing");
   }
@@ -91,28 +106,36 @@ export type CodexFileBridge = { assertDelivered(): void; failure(): Compatibilit
 export function installCodexFileBridge(session: AgentSession, request: CompletionRequest, signal: AbortSignal): CodexFileBridge {
   const bindings = new CodexFileBindings(request);
   const original = session.agent.streamFunction;
+  const visualInput = request.messages.some((message) => message.images?.length);
   let failure: CompatibilityError | undefined;
-  const wrapped: typeof original = (model, context, options) => original(model, context, {
-    ...options,
-    onPayload: async (payload, physicalModel) => {
-      signal.throwIfAborted(); options?.signal?.throwIfAborted();
-      try {
-        const expanded = bindings.inject(payload, physicalModel, options?.sessionId === undefined || options.sessionId === session.sessionId);
-        // Snapshot expected parts because a policy hook may mutate its argument.
-        const expected = expanded && typeof expanded === "object" && "input" in expanded && Array.isArray(expanded.input)
-          ? { input: expanded.input.map((item: any) => item && typeof item === "object" && Array.isArray(item.content) ? { ...item, content: item.content.map((part: any) => part && typeof part === "object" ? { ...part } : part) } : item) } : expanded;
-        const transformed = await options?.onPayload?.(expanded, physicalModel);
-        const body = transformed === undefined ? expanded : transformed;
-        bindings.validatePolicyResult(expected, body);
-        failure = undefined;
-        return body;
-      } catch (error) {
-        failure = error instanceof CompatibilityError ? error : undefined;
-        throw error;
-      }
-    },
-  });
-  if (bindings.count) session.agent.streamFunction = wrapped;
+  const wrapped: typeof original = (model, context, options) => {
+    // Request-local capability metadata prevents the SDK from downgrading user
+    // images to text placeholders. Never mutate the selected/catalog model.
+    const requestModel = visualInput && model.api === CODEX_FILE_API && !model.input.includes("image") ? { ...model, input: [...model.input, "image" as const] } : model;
+    const expectedImages = model.api === CODEX_FILE_API ? context.messages.reduce((count, message) => count + (message.role === "user" && Array.isArray(message.content) ? message.content.filter((part) => part.type === "image").length : 0), 0) : 0;
+    return original(requestModel, context, {
+      ...options,
+      onPayload: async (payload, physicalModel) => {
+        signal.throwIfAborted(); options?.signal?.throwIfAborted();
+        try {
+          if (nativeUserImageCount(payload) < expectedImages) throw attachmentError("native_image_context_missing");
+          const expanded = bindings.inject(payload, physicalModel, options?.sessionId === undefined || options.sessionId === session.sessionId);
+          // Snapshot expected parts because a policy hook may mutate its argument.
+          const expected = expanded && typeof expanded === "object" && "input" in expanded && Array.isArray(expanded.input)
+            ? { input: expanded.input.map((item: any) => item && typeof item === "object" && Array.isArray(item.content) ? { ...item, content: item.content.map((part: any) => part && typeof part === "object" ? { ...part } : part) } : item) } : expanded;
+          const transformed = await options?.onPayload?.(expanded, physicalModel);
+          const body = transformed === undefined ? expanded : transformed;
+          bindings.validatePolicyResult(expected, body);
+          failure = undefined;
+          return body;
+        } catch (error) {
+          failure = error instanceof CompatibilityError ? error : undefined;
+          throw error;
+        }
+      },
+    });
+  };
+  if (bindings.count || visualInput) session.agent.streamFunction = wrapped;
   return {
     assertDelivered: () => { if (failure) throw failure; bindings.assertDelivered(); },
     failure: () => failure,

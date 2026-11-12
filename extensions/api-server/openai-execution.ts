@@ -3,7 +3,7 @@ import type { AgentSession, AgentSessionEvent, ModelRuntime as ModelRuntimeType,
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { prepareAttachments, extractPreparedDocuments } from "./openai-attachments.ts";
-import { CODEX_FILE_API, hasNativePdfInput, installCodexFileBridge, type CodexFileBridge } from "./openai-codex-files.ts";
+import { CODEX_FILE_API, canAttemptVisualInput, hasNativePdfInput, installCodexFileBridge, type CodexFileBridge } from "./openai-codex-files.ts";
 import { attachmentError, attachmentFailures } from "./openai-errors.ts";
 import { OPENAI_BODY_BYTES, OPENAI_ATTACHMENT_BYTES, OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
 import { CompatibilityError, type CompletionRequest, type CompletionResult, type ExecutionEvent, type TokenUsage } from "./openai-contract.ts";
@@ -64,7 +64,7 @@ export async function executeSession(session: AgentSession, request: CompletionR
   signal.addEventListener("abort", abort, { once: true });
   try {
     signal.throwIfAborted();
-    if ((request.messages.some((message) => message.images?.length) || hasNativePdfInput(request)) && !session.model?.input.includes("image")) throw attachmentError("unsupported_image_model");
+    if ((request.messages.some((message) => message.images?.length) || hasNativePdfInput(request)) && !canAttemptVisualInput(session.model)) throw attachmentError("unsupported_image_model");
     emit({ type: "ready" });
     const final = request.messages.at(-1)!;
     await session.prompt(final.content, { source: "rpc", expandPromptTemplates: false, ...(final.images?.length ? { images: final.images } : {}) });
@@ -170,7 +170,7 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     if (session.model?.api !== CODEX_FILE_API) request = await extractPreparedDocuments(request, controller.signal);
     const visualInput = request.messages.some((message) => message.images?.length) || hasNativePdfInput(request);
     if (visualInput && settingsManager.getBlockImages()) throw attachmentError("image_input_disabled");
-    if (visualInput && !session.model?.input.includes("image")) throw attachmentError("unsupported_image_model");
+    if (visualInput && !canAttemptVisualInput(session.model)) throw attachmentError("unsupported_image_model");
     // Validate and normalize history as well as the final prompt using the
     // selected model's limits and the profile's image-resizing policy. Pi's
     // prompt path may otherwise omit undecodable images with only a text hint.
@@ -190,7 +190,7 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     }
     if (restoredInputs.length) session.refreshContext();
     await session.bindExtensions({ mode: "rpc", onError: () => { process.stderr.write("OpenAI worker extension failed.\n"); } });
-    if (request.messages.some((message) => message.documents?.length)) nativeFiles = installCodexFileBridge(session, request, controller.signal);
+    if (request.messages.some((message) => message.documents?.length) || (session.model?.api === CODEX_FILE_API && request.messages.some((message) => message.images?.length))) nativeFiles = installCodexFileBridge(session, request, controller.signal);
     const result = await executeSession(session, request, write, controller.signal);
     nativeFiles?.assertDelivered();
     session = undefined;

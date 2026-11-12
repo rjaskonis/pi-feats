@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeRequest } from "../extensions/api-server/openai-contract.ts";
 import { prepareAttachments, extractPreparedDocuments } from "../extensions/api-server/openai-attachments.ts";
-import { CODEX_FILE_API, CodexFileBindings, hasNativePdfInput, installCodexFileBridge } from "../extensions/api-server/openai-codex-files.ts";
-import { dataUrl, pdfFixture, visualPdfFixture } from "./fixtures/openai-attachments.ts";
+import { CODEX_FILE_API, CodexFileBindings, canAttemptVisualInput, hasNativePdfInput, installCodexFileBridge } from "../extensions/api-server/openai-codex-files.ts";
+import { dataUrl, pdfFixture, visualPdfFixture, pngDataUrl } from "./fixtures/openai-attachments.ts";
 
 const signal = () => new AbortController().signal;
 async function nativeRequest() {
@@ -13,6 +13,39 @@ async function nativeRequest() {
     { role: "user", content: [{ type: "input_text", text: "Compare files" }, { type: "input_file", filename: "visual.pdf", file_data: dataUrl("application/pdf", visualPdfFixture()) }] },
   ] }, "responses"), signal(), { documents: "defer" });
 }
+
+test("Codex attempts visual input without trusting text-only catalog defaults", () => {
+  assert.equal(canAttemptVisualInput({ api: CODEX_FILE_API, input: ["text"] }), true);
+  assert.equal(canAttemptVisualInput({ api: CODEX_FILE_API }), true);
+  assert.equal(canAttemptVisualInput({ api: "openai-responses", input: ["text"] }), false);
+  assert.equal(canAttemptVisualInput({ api: "openai-completions", input: ["text", "image"] }), true);
+  assert.equal(canAttemptVisualInput(undefined), false);
+});
+
+test("image-only Codex requests preserve image bytes without mutating catalog metadata or bypassing policy hooks", async () => {
+  const request = await prepareAttachments(normalizeRequest({ model: "support", input: [{ role: "user", content: [{ type: "input_image", image_url: pngDataUrl }] }] }, "responses"), signal());
+  const model = { api: CODEX_FILE_API, provider: "codex-fixture", id: "configured-model", input: ["text"] };
+  const context = { messages: [{ role: "user", content: request.messages[0].images! }] };
+  let sent = false, forceDrop = false;
+  const original = async (physicalModel: any, _context: any, options: any) => {
+    assert.equal(physicalModel.id, model.id); assert.equal(physicalModel.provider, model.provider); assert.equal(physicalModel.api, model.api);
+    const content = physicalModel.input.includes("image") && !forceDrop ? [{ type: "input_image", image_url: pngDataUrl }] : [{ type: "input_text", text: "(image omitted: model does not support images)" }];
+    const body = await options.onPayload({ input: [{ role: "user", content }] }, physicalModel);
+    sent = true; return body;
+  };
+  const session = { sessionId: "request-session", agent: { streamFunction: original } };
+  const bridge = installCodexFileBridge(session as any, request, signal());
+  const body = await session.agent.streamFunction(model, context, {});
+  assert.equal(body.input[0].content[0].image_url, pngDataUrl); assert.equal(sent, true);
+  assert.deepEqual(model.input, ["text"]); bridge.assertDelivered();
+  sent = false;
+  await assert.rejects(session.agent.streamFunction(model, context, { onPayload: (body: any) => { body.input[0].content = []; return body; } }), (error: any) => error.code === "native_image_context_missing");
+  assert.equal(sent, false); assert.equal(bridge.failure()?.code, "native_image_context_missing");
+  forceDrop = true;
+  await assert.rejects(session.agent.streamFunction(model, context, {}), (error: any) => error.code === "native_image_context_missing");
+  assert.equal(sent, false); assert.throws(() => bridge.assertDelivered());
+  bridge.dispose(); assert.equal(session.agent.streamFunction, original); assert.deepEqual(model.input, ["text"]);
+});
 
 test("Codex documents retain original bytes without extracting text, including image-only PDFs", async () => {
   const request = await nativeRequest();
@@ -74,10 +107,10 @@ test("stream wrapper exposes native files to profile payload hooks, supports com
   const session = { sessionId: "request-session", agent: { streamFunction: original } };
   const bridge = installCodexFileBridge(session as any, request, signal());
   const wrapped = session.agent.streamFunction;
-  const result = await wrapped({ api: CODEX_FILE_API }, {}, { sessionId: "request-session", onPayload: (body: any) => { assert.equal(body.input[0].content.filter((part: any) => part.type === "input_file").length, 2); return { ...body, instructions: "Extension policy", tools: [{ name: "profile-tool" }] }; } });
+  const result = await wrapped({ api: CODEX_FILE_API }, { messages: [] }, { sessionId: "request-session", onPayload: (body: any) => { assert.equal(body.input[0].content.filter((part: any) => part.type === "input_file").length, 2); return { ...body, instructions: "Extension policy", tools: [{ name: "profile-tool" }] }; } });
   assert.equal(result, "original-result"); assert.equal(seen[0].instructions, "Extension policy"); assert.deepEqual(seen[0].tools, [{ name: "profile-tool" }]);
   assert.equal(seen[0].input[0].content.filter((part: any) => part.type === "input_file").length, 2);
-  await wrapped({ api: CODEX_FILE_API }, {}, { sessionId: "compaction-session" });
+  await wrapped({ api: CODEX_FILE_API }, { messages: [] }, { sessionId: "compaction-session" });
   bridge.assertDelivered(); assert.equal(bridge.failure(), undefined);
   bridge.dispose(); assert.equal(session.agent.streamFunction, original);
 });
@@ -90,7 +123,7 @@ test("file-filtering policy hooks cannot be bypassed by reattaching raw document
   };
   const session = { sessionId: "request-session", agent: { streamFunction: original } };
   const bridge = installCodexFileBridge(session as any, request, signal());
-  await assert.rejects(session.agent.streamFunction({ api: CODEX_FILE_API }, {}, { sessionId: "request-session", onPayload: (body: any) => {
+  await assert.rejects(session.agent.streamFunction({ api: CODEX_FILE_API }, { messages: [] }, { sessionId: "request-session", onPayload: (body: any) => {
     body.input[0].content = body.input[0].content.filter((part: any) => part.type !== "input_file");
     return body;
   } }), (error: any) => error.code === "native_file_context_missing");

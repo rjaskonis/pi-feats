@@ -24,6 +24,7 @@ export const attachmentFailures: Record<string, { status: number; message: strin
   document_extraction_failed: { status: 400, message: "The document could not be read. Check its format, encryption and size." },
   document_text_missing: { status: 400, message: "The document contains no extractable text. For scanned PDFs, send page images or perform OCR first." },
   document_extractor_unavailable: { status: 503, message: "Document extraction requires Python 3; PDF extraction also requires pdftotext (Poppler) in the Pi runtime." },
+  native_image_context_missing: { status: 502, message: "The native Codex request did not retain the uploaded images. No image-omitted placeholder was accepted as a successful visual request." },
   native_file_context_missing: { status: 502, message: "The native Codex request did not retain the attached files. No standalone OpenAI API or local-extraction fallback was used." },
   native_file_provider_mismatch: { status: 400, message: "Native file context requires the Codex Responses transport. The profile switched to an incompatible provider." },
   image_input_disabled: { status: 400, message: "Image input is disabled by the selected profile's settings." },
