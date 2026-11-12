@@ -25,15 +25,18 @@ test("official JavaScript and Python SDK JSON, SSE and Responses accumulation", 
   const baseURL = `http://127.0.0.1:${(server.server.address() as { port: number }).port}/v1`;
   const client = new OpenAI({ apiKey: "sdk-local-test", baseURL });
   const messages = [{ role: "user", content: "Hello" }];
+  const chatOptions = { temperature: 0.5, max_tokens: 1000, tools: [{ type: "function", function: { name: "get_current_timestamp", parameters: { type: "object", properties: {} } } }], tool_choice: "auto" };
+  const responseOptions = { max_output_tokens: 1000, tools: [{ type: "function", name: "get_current_timestamp", parameters: { type: "object", properties: {} } }], tool_choice: "auto", include: ["reasoning.encrypted_content"], store: true };
   assert.equal((await client.models.list()).data[0].id, "support");
-  assert.equal((await client.chat.completions.create({ model: "support", messages })).choices[0].message.content, "Hello SDK");
+  assert.equal((await client.chat.completions.create({ model: "support", messages, ...chatOptions })).choices[0].message.content, "Hello SDK");
   let text = "", tokens = 0;
-  for await (const chunk of await client.chat.completions.create({ model: "support", messages, stream: true, stream_options: { include_usage: true } })) {
+  for await (const chunk of await client.chat.completions.create({ model: "support", messages, ...chatOptions, stream: true, stream_options: { include_usage: true } })) {
     text += chunk.choices[0]?.delta.content ?? ""; if (chunk.usage) tokens = chunk.usage.total_tokens;
   }
   assert.equal(text, "Hello SDK"); assert.equal(tokens, 24);
-  assert.equal((await client.responses.create({ model: "support", input: "Hello", store: false })).output_text, "Hello SDK");
-  const stream = client.responses.stream({ model: "support", input: "Hello", store: false });
+  const response = await client.responses.create({ model: "support", input: "Hello", ...responseOptions });
+  assert.equal(response.output_text, "Hello SDK"); assert.deepEqual(response.tools, []); assert.equal(response.store, false); assert.equal(response.max_output_tokens, null);
+  const stream = client.responses.stream({ model: "support", input: "Hello", ...responseOptions });
   let deltas = 0; for await (const event of stream) if (event.type === "response.output_text.delta") deltas++;
   const final = await stream.finalResponse();
   assert.equal(final.output_text, "Hello SDK"); assert.equal(final.usage.total_tokens, 24); assert.equal(deltas, 2);
@@ -50,12 +53,16 @@ except ImportError:
 c = openai.OpenAI(api_key="sdk-local-test", base_url=sys.argv[1])
 assert c.models.list().data[0].id == "support"
 messages=[{"role":"user","content":"Hello"}]
-assert c.chat.completions.create(model="support", messages=messages).choices[0].message.content == "Hello SDK"
-chunks=list(c.chat.completions.create(model="support", messages=messages, stream=True, stream_options={"include_usage":True}))
+chat_options={"temperature":0.5,"max_tokens":1000,"tools":[{"type":"function","function":{"name":"get_current_timestamp","parameters":{"type":"object","properties":{}}}}],"tool_choice":"auto"}
+response_options={"max_output_tokens":1000,"tools":[{"type":"function","name":"get_current_timestamp","parameters":{"type":"object","properties":{}}}],"tool_choice":"auto","store":True}
+assert c.chat.completions.create(model="support", messages=messages, **chat_options).choices[0].message.content == "Hello SDK"
+chunks=list(c.chat.completions.create(model="support", messages=messages, stream=True, stream_options={"include_usage":True}, **chat_options))
 assert "".join(x.choices[0].delta.content or "" for x in chunks if x.choices) == "Hello SDK"
 assert chunks[-1].usage.total_tokens == 24
-assert c.responses.create(model="support", input="Hello", store=False).output_text == "Hello SDK"
-with c.responses.stream(model="support", input="Hello", store=False) as stream:
+response=c.responses.create(model="support", input="Hello", **response_options)
+assert response.output_text == "Hello SDK"
+assert response.tools == [] and response.store is False and response.max_output_tokens is None
+with c.responses.stream(model="support", input="Hello", **response_options) as stream:
  events=list(stream)
  final=stream.get_final_response()
  assert final.output_text == "Hello SDK"

@@ -59,7 +59,7 @@ test("dedicated worker restores history, profile resources, usage and isolation"
       const config = JSON.parse(await readFile(join(named, "settings.json"), "utf8"));
       await writeFile(join(named, "settings.json"), JSON.stringify({ ...config, sandbox: true }));
     }
-    const request = normalizeRequest({ model: profile, instructions: "Request fixture instructions", input: [{ role: "system", content: "Caller fixture policy" }, { role: "user", content: "My name is Ada" }, { role: "assistant", content: "Welcome Ada" }, { role: "user", content: "Hello" }] }, "responses");
+    const request = normalizeRequest({ model: profile, tools: [{ type: "function", name: "do_not_run_client_tool", parameters: {} }], tool_choice: "none", temperature: 0.123, max_output_tokens: 1, store: true, background: true, instructions: "Request fixture instructions", input: [{ role: "system", content: "Caller fixture policy" }, { role: "user", content: "My name is Ada" }, { role: "assistant", content: "Welcome Ada" }, { role: "user", content: "Hello" }] }, "responses");
     const events: any[] = [];
     const result = await executeWorker(process.execPath, [cli!, "--extension", extensions[0], "profile", profile, "--mode", "rpc", "--no-session"], { cwd: root, env }, request, async (event) => { events.push(event); }, new AbortController().signal);
     assert.equal(result.text, "Hello Ada");
@@ -67,6 +67,9 @@ test("dedicated worker restores history, profile resources, usage and isolation"
     assert.ok(events.filter((event) => event.type === "text").length >= 2);
     const call = calls.at(-1);
     assert.equal(call.model, "fixture");
+    assert.notEqual(call.temperature, 0.123); assert.notEqual(call.max_tokens, 1); assert.notEqual(call.max_completion_tokens, 1);
+    assert.notEqual(call.tool_choice, "none");
+    assert.ok(!call.tools.some((tool: any) => tool.function.name === "do_not_run_client_tool"));
     assert.equal(authorizations.at(-1), profile === "default" ? "Bearer fixture-default-token" : "Bearer fixture-support-token");
     assert.ok(call.messages.some((message: any) => message.role === "assistant" && message.content.includes("Welcome Ada")));
     const wire = JSON.stringify(call.messages);

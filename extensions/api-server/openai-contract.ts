@@ -1,4 +1,4 @@
-/** Text-only OpenAI wire contracts and strict request normalization. */
+/** Text-only OpenAI wire contracts with profile-owned execution settings. */
 export type Protocol = "chat" | "responses";
 export type ConversationMessage = { role: "system" | "user" | "assistant"; content: string };
 export type CompletionRequest = {
@@ -51,48 +51,44 @@ function text(value: unknown, param: string, types: string[]): string {
 /** Normalize either protocol without flattening user/assistant history into a prompt. */
 export function normalizeRequest(input: unknown, protocol: Protocol): CompletionRequest {
   const body = record(input, "body");
-  const common = ["model", "stream", "stream_options", "store", "metadata", "user", "safety_identifier"];
-  fields(body, [...common, ...(protocol === "chat" ? ["messages", "n", "response_format"] : ["input", "instructions", "background", "previous_response_id", "conversation", "text"])]);
+  // Only explicitly normalized fields reach the executor. Client tools,
+  // generation controls and other extra options are intentionally ignored:
+  // profiles own tools/model settings; execution is single-choice, plain-text,
+  // synchronous and stateless regardless of client preferences.
   if (typeof body.model !== "string" || !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(body.model)) throw new CompatibilityError("model must identify a Pi profile.", "model");
   if (body.stream != null && typeof body.stream !== "boolean") throw new CompatibilityError("stream must be a boolean.", "stream");
-  if (body.store != null && body.store !== false) throw new CompatibilityError("Only store: false is supported.", "store", 400, "unsupported_parameter");
-  if (body.n != null && body.n !== 1) throw new CompatibilityError("Only n: 1 is supported.", "n", 400, "unsupported_parameter");
-  if (body.background != null && body.background !== false) throw new CompatibilityError("Background execution is not supported.", "background", 400, "unsupported_parameter");
-  for (const field of ["previous_response_id", "conversation"]) if (body[field] != null) throw new CompatibilityError("Send conversation context in input instead.", field, 400, "unsupported_parameter");
-  for (const field of ["user", "safety_identifier"]) if (body[field] != null && typeof body[field] !== "string") throw new CompatibilityError("Expected a string.", field);
+  // Stored-context references cannot be discarded without losing conversation
+  // history. Unlike execution preferences, they must still fail explicitly.
+  for (const field of ["previous_response_id", "conversation"]) if (body[field] != null) throw new CompatibilityError("Send conversation context explicitly in messages or input instead.", field, 400, "unsupported_parameter");
   let includeUsage = false;
-  if (body.stream_options != null) {
+  if (protocol === "chat" && body.stream === true && body.stream_options != null) {
     const options = record(body.stream_options, "stream_options");
-    fields(options, protocol === "chat" ? ["include_usage", "include_obfuscation"] : ["include_obfuscation"], "stream_options.");
-    if (!body.stream) throw new CompatibilityError("stream_options requires stream: true.", "stream_options");
     if (options.include_usage !== undefined && typeof options.include_usage !== "boolean") throw new CompatibilityError("Expected a boolean.", "stream_options.include_usage");
-    if (options.include_obfuscation !== undefined && options.include_obfuscation !== false) throw new CompatibilityError("Stream obfuscation is not supported.", "stream_options.include_obfuscation");
     includeUsage = options.include_usage === true;
   }
-  const format = protocol === "chat" ? body.response_format : body.text == null ? undefined : (() => { const value = record(body.text, "text"); fields(value, ["format"], "text."); return value.format; })();
-  if (format != null) { const value = record(format, protocol === "chat" ? "response_format" : "text.format"); fields(value, ["type"]); if (value.type !== "text") throw new CompatibilityError("Only plain text output is supported.", protocol === "chat" ? "response_format" : "text.format", 400, "unsupported_parameter"); }
   let metadata: Record<string, string> | null = null;
   if (body.metadata != null) {
     const value = record(body.metadata, "metadata");
     if (Object.keys(value).length > 16 || Object.entries(value).some(([key, item]) => key.length > 64 || typeof item !== "string" || item.length > 512)) throw new CompatibilityError("metadata supports up to 16 string values (64-character keys, 512-character values).", "metadata");
     metadata = value as Record<string, string>;
   }
-  if (body.instructions != null && typeof body.instructions !== "string") throw new CompatibilityError("instructions must be a string.", "instructions");
+  const instructions = protocol === "responses" ? body.instructions : null;
+  if (instructions != null && typeof instructions !== "string") throw new CompatibilityError("instructions must be a string.", "instructions");
   const raw = protocol === "chat" ? body.messages : typeof body.input === "string" ? [{ role: "user", content: body.input }] : body.input;
   if (!Array.isArray(raw) || !raw.length || raw.length > 100) throw new CompatibilityError("Provide between 1 and 100 text messages.", protocol === "chat" ? "messages" : "input");
   const messages = raw.map((value, index): ConversationMessage => {
     const param = `${protocol === "chat" ? "messages" : "input"}.${index}`, item = record(value, param);
-    fields(item, protocol === "chat" ? ["role", "content", "name", "refusal", "tool_calls"] : ["type", "role", "content", "id", "status"], `${param}.`);
+    fields(item, protocol === "chat" ? ["role", "content", "name", "refusal", "tool_calls"] : ["type", "role", "content", "id", "status", "phase"], `${param}.`);
     if (protocol === "responses" && item.type !== undefined && item.type !== "message") throw new CompatibilityError("Only message input items are supported.", `${param}.type`);
     if (!["system", "developer", "user", "assistant"].includes(String(item.role))) throw new CompatibilityError("Unsupported message role.", `${param}.role`);
     if (item.name != null) throw new CompatibilityError("Named messages are not supported.", `${param}.name`);
     if (item.refusal != null || (item.tool_calls != null && (!Array.isArray(item.tool_calls) || item.tool_calls.length))) throw new CompatibilityError("Tool calls and refusals are not supported as input.", param);
-    for (const key of ["id", "status"]) if (item[key] != null && typeof item[key] !== "string") throw new CompatibilityError("Expected a string.", `${param}.${key}`);
+    for (const key of ["id", "status", "phase"]) if (item[key] != null && typeof item[key] !== "string") throw new CompatibilityError("Expected a string.", `${param}.${key}`);
     return { role: item.role === "developer" ? "system" : item.role as ConversationMessage["role"], content: text(item.content, `${param}.content`, protocol === "chat" ? ["text"] : item.role === "assistant" ? ["output_text", "input_text"] : ["input_text"]) };
   });
   if (messages.at(-1)?.role !== "user" || !messages.at(-1)!.content.trim()) throw new CompatibilityError("The final message must be a non-empty user message.", protocol === "chat" ? "messages" : "input");
-  if (messages.reduce((total, item) => total + item.content.length, (body.instructions as string | undefined)?.length ?? 0) > 100_000) throw new CompatibilityError("Conversation exceeds 100,000 characters.", protocol === "chat" ? "messages" : "input", 413);
-  return { profile: body.model, messages, stream: body.stream === true, includeUsage, metadata, instructions: body.instructions as string ?? null };
+  if (messages.reduce((total, item) => total + item.content.length, (instructions as string | undefined)?.length ?? 0) > 100_000) throw new CompatibilityError("Conversation exceeds 100,000 characters.", protocol === "chat" ? "messages" : "input", 413);
+  return { profile: body.model, messages, stream: body.stream === true, includeUsage, metadata, instructions: instructions as string ?? null };
 }
 
 export function chatUsage(usage: TokenUsage) {

@@ -9,6 +9,17 @@ import { executeSession, executeWorker, restoreHistory, WORKER_EVENT_PREFIX } fr
 const usage = { input: 12, output: 4, cached: 3, reasoning: 1 };
 const body = (protocol: "chat" | "responses", stream = false) => protocol === "chat" ? { model: "support", messages: [{ role: "user", content: "Hello" }], stream } : { model: "support", input: "Hello", stream };
 const normalized = () => normalizeRequest(body("chat"), "chat");
+const ignoredClientOptions = {
+  tools: [{ type: "function", function: { name: "get_current_timestamp", parameters: { type: "object", properties: {} } } }],
+  tool_choice: "required", parallel_tool_calls: true, functions: [{ name: "legacy_tool" }], function_call: "auto",
+  temperature: 0.5, top_p: 0.9, top_k: 20, min_p: 0.1, max_tokens: 1000, max_completion_tokens: 1000, max_output_tokens: 1000,
+  frequency_penalty: 0.5, presence_penalty: 0.5, seed: 42, stop: ["END"], logprobs: true, top_logprobs: 5, logit_bias: { "1": -10 },
+  reasoning_effort: "high", reasoning: { effort: "high", summary: "auto" }, include: ["reasoning.encrypted_content"],
+  response_format: { type: "json_schema", json_schema: { name: "ignored", schema: { type: "object" } } },
+  text: { format: { type: "json_object" }, verbosity: "low" }, modalities: ["audio"], audio: { voice: "alloy", format: "mp3" },
+  n: 3, store: true, background: true, service_tier: "priority", truncation: "auto",
+  user: { id: "client-user" }, safety_identifier: { ignored: true }, unknown_provider_setting: { enabled: true },
+};
 function backend(overrides: Partial<CompatibilityBackend> = {}): CompatibilityBackend {
   return {
     authorized: (value) => value === "Bearer test-token",
@@ -33,17 +44,46 @@ test("normalization preserves structured chronological context and text parts", 
 });
 
 test("Responses accepts instructions and previous output messages as caller-owned history", () => {
-  const request = normalizeRequest({ model: "support", instructions: "Be concise", input: [{ role: "user", content: [{ type: "input_text", text: "Hello" }] }, { id: "msg_old", type: "message", status: "completed", role: "assistant", content: [{ type: "output_text", text: "Hi", annotations: [], logprobs: [] }] }, { role: "user", content: "Continue" }], store: false, text: { format: { type: "text" } } }, "responses");
+  const request = normalizeRequest({ model: "support", instructions: "Be concise", input: [{ role: "user", content: [{ type: "input_text", text: "Hello" }] }, { id: "msg_old", type: "message", status: "completed", phase: "final_answer", role: "assistant", content: [{ type: "output_text", text: "Hi", annotations: [], logprobs: [] }] }, { role: "user", content: "Continue" }], store: false, text: { format: { type: "text" } } }, "responses");
   assert.equal(request.instructions, "Be concise"); assert.equal(request.messages[1].content, "Hi");
 });
 
 for (const protocol of ["chat", "responses"] as const) {
-  test(`${protocol}: rejects unsupported generation parameters and modalities`, () => {
-    for (const parameter of ["temperature", "max_tokens", "tools", "top_p"]) assert.throws(() => normalizeRequest({ ...body(protocol), [parameter]: 1 }, protocol), (error: any) => error.param === parameter && error.code === "unsupported_parameter");
-    assert.throws(() => normalizeRequest({ ...body(protocol), store: true }, protocol));
+  test(`${protocol}: ignores client execution preferences without forwarding them or mutating input`, () => {
+    const input = { ...body(protocol), ...structuredClone(ignoredClientOptions) };
+    const original = structuredClone(input);
+    assert.deepEqual(normalizeRequest(input, protocol), normalizeRequest(body(protocol), protocol));
+    assert.deepEqual(input, original);
+    // Ignored options are not parsed or applied, even if their values are malformed.
+    assert.deepEqual(normalizeRequest({ ...body(protocol), tools: 1, temperature: {}, max_output_tokens: "invalid", text: false }, protocol), normalizeRequest(body(protocol), protocol));
+  });
+  test(`${protocol}: still validates core fields, real content and stored-context references`, () => {
     assert.throws(() => normalizeRequest({ ...body(protocol), stream: "true" }, protocol));
     const messages = [{ role: "user", content: [{ type: "input_image", image_url: "https://example.com/image.png" }] }];
     assert.throws(() => normalizeRequest({ ...body(protocol), [protocol === "chat" ? "messages" : "input"]: messages }, protocol));
+    for (const field of ["previous_response_id", "conversation"]) assert.throws(() => normalizeRequest({ ...body(protocol), [field]: "stored-context" }, protocol), (error: any) => error.param === field);
+    const toolHistory = protocol === "chat" ? [{ role: "tool", tool_call_id: "call_1", content: "result" }] : [{ type: "function_call_output", call_id: "call_1", output: "result" }];
+    assert.throws(() => normalizeRequest({ ...body(protocol), [protocol === "chat" ? "messages" : "input"]: [...toolHistory, { role: "user", content: "Hello" }] }, protocol));
+  });
+  test(`${protocol}: Open WebUI-style options work in JSON and SSE with profile-owned settings`, async (t) => {
+    const requests: CompletionRequest[] = [];
+    const server = await app({ execute: async (request, emit, signal) => { requests.push(request); return backend().execute(request, emit, signal); } });
+    t.after(() => server.close());
+    for (const stream of [false, true]) {
+      const response = await server.inject({ method: "POST", url: url(protocol), headers, payload: { ...body(protocol, stream), ...ignoredClientOptions } });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(requests.at(-1), normalizeRequest(body(protocol, stream), protocol));
+      const value = stream ? frames(response.body) : response.json();
+      if (protocol === "chat") {
+        if (stream) assert.equal(value.at(-2).choices[0].finish_reason, "stop");
+        else { assert.equal(value.choices.length, 1); assert.equal(value.choices[0].message.content, "Hello"); assert.equal(value.choices[0].message.tool_calls, undefined); }
+      } else {
+        const result = stream ? value.at(-1).response : value;
+        assert.equal(result.status, "completed"); assert.equal(result.store, false); assert.equal(result.background, false);
+        assert.deepEqual(result.tools, []); assert.equal(result.parallel_tool_calls, false); assert.equal(result.max_output_tokens, null);
+        assert.deepEqual(result.text.format, { type: "text" }); assert.equal(result.output[0].content[0].text, "Hello");
+      }
+    }
   });
   test(`${protocol}: JSON completion selects the requested profile`, async (t) => {
     let selected: CompletionRequest | undefined;
@@ -81,7 +121,7 @@ for (const protocol of ["chat", "responses"] as const) {
   });
   test(`${protocol}: authentication, validation, and profile errors use OpenAI envelopes`, async (t) => {
     const server = await app(); t.after(() => server.close());
-    for (const [payload, auth, status, param] of [[body(protocol), {}, 401, null], [{ ...body(protocol), model: "missing" }, headers, 404, "model"], [{ ...body(protocol), temperature: 0.5 }, headers, 400, "temperature"]] as const) {
+    for (const [payload, auth, status, param] of [[body(protocol), {}, 401, null], [{ ...body(protocol), model: "missing" }, headers, 404, "model"], [{ ...body(protocol), stream: "invalid" }, headers, 400, "stream"]] as const) {
       const response = await server.inject({ method: "POST", url: url(protocol), headers: auth, payload });
       assert.equal(response.statusCode, status); const error = response.json().error; assert.equal(error.param, param); assert.equal(typeof error.type, "string"); assert.equal(typeof error.code, "string");
     }
@@ -166,7 +206,16 @@ test("strict bounds, nested validation, profile names and terminal history shape
   assert.throws(() => normalizeRequest({ ...body("responses"), instructions: "x", input: "x".repeat(100_000) }, "responses"));
   for (const messages of [[], Array.from({ length: 101 }, () => ({ role: "user", content: "x" })), [{ role: "assistant", content: "Hello" }], [{ role: "user", content: " " }]]) assert.throws(() => normalizeRequest({ ...body("chat"), messages }, "chat"));
   for (const metadata of [Array(2), { key: 1 }, { ["k".repeat(65)]: "x" }, { key: "x".repeat(513) }, Object.fromEntries(Array.from({ length: 17 }, (_, i) => [String(i), "x"]))]) assert.throws(() => normalizeRequest({ ...body("chat"), metadata }, "chat"));
-  for (const extra of [{ stream_options: { include_usage: true, unexpected: true }, stream: true }, { response_format: { type: "text", schema: {} } }, { messages: [{ role: "user", content: [{ type: "text", text: "x", unknown: true }] }] }]) assert.throws(() => normalizeRequest({ ...body("chat"), ...extra }, "chat"));
+  assert.throws(() => normalizeRequest({ ...body("chat"), messages: [{ role: "user", content: [{ type: "text", text: "x", unknown: true }] }] }, "chat"));
+  assert.throws(() => normalizeRequest({ ...body("chat", true), stream_options: { include_usage: "invalid" } }, "chat"));
+});
+
+test("stream options preserve usage while ignoring unknown options and inapplicable fields", () => {
+  assert.equal(normalizeRequest({ ...body("chat", true), stream_options: { include_usage: true, include_obfuscation: true, future_option: {} } }, "chat").includeUsage, true);
+  assert.equal(normalizeRequest({ ...body("chat"), stream_options: { include_usage: true } }, "chat").includeUsage, false);
+  assert.equal(normalizeRequest({ ...body("responses", true), stream_options: { include_usage: "ignored", include_obfuscation: true } }, "responses").includeUsage, false);
+  assert.equal(normalizeRequest({ ...body("chat"), instructions: { ignored: true } }, "chat").instructions, null);
+  assert.throws(() => normalizeRequest({ ...body("responses"), instructions: { invalid: true } }, "responses"));
 });
 
 test("HTTP body limits and unsupported media types retain compatible envelopes", async (t) => {

@@ -75,18 +75,31 @@ with client.responses.stream(model="support", input="Hello", store=False) as str
     final_response = stream.get_final_response()
 ```
 
+## Client options are ignored by default
+
+No compatibility header or client-specific setting is required. Both POST endpoints accept and discard additional top-level options rather than returning `unsupported_parameter`. In particular:
+
+- Client-owned `tools`, `tool_choice`, `parallel_tool_calls`, legacy `functions` and `function_call` are ignored. Only the selected Pi profile's tools execute; supplied client tools are never registered or called.
+- Generation controls such as `temperature`, `top_p`, `top_k`, token limits (`max_tokens`, `max_completion_tokens`, `max_output_tokens`), penalties, seed, stop sequences and reasoning settings are ignored. The profile's configured provider/model and runtime settings remain unchanged. A caller-supplied token limit is not enforced.
+- Output preferences such as structured `response_format` / `text.format`, log probabilities, modalities, audio options and `include` are ignored. The API still returns text without a JSON/schema guarantee or reasoning output.
+- `n`, `store`, `background`, `truncation`, service-tier preferences and unknown provider-specific options are ignored. Every call still produces one synchronous, stateless response without storage, even if the caller asks otherwise.
+- `user` and `safety_identifier` are ignored, including client-specific object values. They do not control identity routing, moderation or policy.
+
+Ignored options are not parsed, validated, forwarded to the worker or applied to profile settings. HTTP body limits still cover the entire request, including ignored options. Core fields and actual conversation content remain validated. Stored-context references and tool-result/multimodal input are **not** ignored because doing so would silently lose conversational context.
+
+This allows Open WebUI to send its built-in tool definitions and automatic-task generation settings unchanged. Open WebUI tools remain unused, while Pi profile tools stay active. Automatic titles, tags and suggestions still make additional agent calls and consume tokens; accepting their output-format preference does not guarantee JSON output.
+
 ## Supported input and limits
 
 - Chat `messages`: `system`, `developer`, `user`, `assistant`, with string content or `text` parts.
-- Responses `input`: a string or message list. Text parts use `input_text`; previous assistant output messages can use `output_text` with empty annotations/logprobs. Item IDs and status are caller-owned transport metadata, never server lookup keys.
-- `stream` is boolean; `store` must be omitted, null or false. Chat `n` must be omitted, null or 1. Only plain-text `response_format` / `text.format` is supported.
-- Responses supports top-level string `instructions`. Background execution must be omitted, null or false. Non-null `previous_response_id` and `conversation` are rejected.
+- Responses `input`: a string or message list. Text parts use `input_text`; previous assistant output messages can use `output_text` with empty annotations/logprobs. Item IDs, status and phase are caller-owned transport metadata, never server lookup keys.
+- `stream` is boolean. Chat `stream_options.include_usage` is a validated boolean when streaming; other stream options are ignored. For non-streaming requests and Responses, `stream_options` is ignored.
+- Responses supports top-level string `instructions`. Non-null `previous_response_id` and `conversation` are rejected in both protocols: send explicit history in `messages` or `input` instead.
 - `metadata`: at most 16 string entries, keys up to 64 characters, values up to 512 characters. Responses echoes it; Chat accepts it without storage or identity routing.
-- `user` and `safety_identifier`: optional strings accepted as non-operational metadata, not stored or used for moderation, policy enforcement or Application identity routing.
 - At most 100 messages and 100,000 total text characters, including instructions; HTTP JSON bodies are limited to 1 MiB, including at the Console proxy.
 - Visible output is bounded to 16 MiB. Worker frame, transport and writable backlog limits prevent unlimited pending output. Initialization has a 60-second deadline and each blocked SSE drain has a 30-second deadline. A caller disconnect cancels the agent and request-owned worker process group; force termination follows a one-second grace period when needed.
 
-Unknown parameters and semantic requests outside this scope are rejected explicitly, including generation controls (`temperature`, `top_p`, token limits, reasoning settings, stop sequences), structured output guarantees, log probabilities, multiple choices, client-defined tools, tool-result inputs, hosted OpenAI tools, image/audio/video/files, response storage and retrieval, background work and WebSocket transport. Profile-owned internal tools remain available; their calls and results are not exposed as client-owned function calls.
+Actual tool calls/results in history, non-message Responses input items and image/audio/video/file content parts are rejected rather than discarded. Unknown nested message/content fields and malformed supported fields also remain errors. Response retrieval/storage, server-managed conversations and WebSocket transport are not implemented. Profile-owned internal tools remain available; their calls and results are not exposed as client-owned function calls.
 
 ## Output, usage and failures
 
