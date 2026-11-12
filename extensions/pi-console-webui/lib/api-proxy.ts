@@ -1,4 +1,5 @@
 /** Streaming Pi gateway, shared by the Next route and local contract tests. */
+import { OPENAI_BODY_BYTES } from "../../lib/openai-limits.ts";
 export function proxyError(path: string[], message: string, status: number, code: string): Response {
   return Response.json(path[0] === "v1"
     ? { error: { message, type: status === 401 ? "authentication_error" : "server_error", param: null, code } }
@@ -30,7 +31,7 @@ export async function proxyPiRequest(request: Request, path: string[], config: {
             const { done, value } = await reader.read();
             if (done) break;
             size += value.byteLength;
-            if (size > 1_048_576) {
+            if (size > OPENAI_BODY_BYTES) {
               await reader.cancel().catch(() => {}); cleanup();
               return Response.json({ error: { message: "Request body is too large.", type: "invalid_request_error", param: null, code: "request_too_large" } }, { status: 413 });
             }

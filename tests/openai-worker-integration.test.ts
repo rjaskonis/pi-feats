@@ -8,10 +8,11 @@ import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { executeWorker } from "../extensions/api-server/openai-execution.ts";
 import { normalizeRequest } from "../extensions/api-server/openai-contract.ts";
+import { dataUrl, pdfFixture, pngDataUrl, tinyPng, xlsxFixture } from "./fixtures/openai-attachments.ts";
 
 // Opt-in: this exercises the installed host runtime, never real credentials/providers.
 const cli = process.env.PI_OPENAI_TEST_CLI;
-test("dedicated worker restores history, profile resources, usage and isolation", { skip: !cli, timeout: 90_000 }, async (t) => {
+test("dedicated worker restores history, profile resources, usage and isolation", { skip: !cli, timeout: 120_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-openai-runtime-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls: any[] = [];
@@ -47,7 +48,7 @@ test("dedicated worker restores history, profile resources, usage and isolation"
   const settings = { extensions, defaultProvider: "fixture", defaultModel: "fixture", defaultThinkingLevel: "off", compaction: { enabled: false } };
   await writeFile(join(root, "settings.json"), JSON.stringify(settings));
   await writeFile(join(root, ".env"), "FIXTURE_API_KEY=fixture-default-token\n");
-  await writeFile(join(root, "models.json"), JSON.stringify({ providers: { fixture: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "$FIXTURE_API_KEY", api: "openai-completions", models: [{ id: "fixture", name: "Fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }] } } }));
+  await writeFile(join(root, "models.json"), JSON.stringify({ providers: { fixture: { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: "$FIXTURE_API_KEY", api: "openai-completions", models: [{ id: "fixture", name: "Fixture", reasoning: false, input: ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }] } } }));
   const named = join(root, "profiles", "support");
   await mkdir(named, { recursive: true });
   await writeFile(join(named, "settings.json"), JSON.stringify({ ...settings, extensions: undefined, sandbox: false, profile: { enabledTools: ["read"] } }));
@@ -86,6 +87,38 @@ test("dedicated worker restores history, profile resources, usage and isolation"
   assert.equal(toolResult.text, "Reading\n\nHello Ada"); assert.equal(toolResult.usage.input, 40); assert.equal(toolResult.usage.output, 8);
   assert.equal(toolEvents.filter((event) => event.type === "text").map((event) => event.delta).join(""), toolResult.text);
   assert.ok(calls.at(-1).messages.some((message: any) => message.role === "tool" && JSON.stringify(message).includes("blue umbrella")));
+  const largePng = Buffer.concat([tinyPng, Buffer.alloc(1_100_000)]);
+  const multimedia = normalizeRequest({ model: "support", input: [
+    { role: "user", content: [{ type: "input_text", text: "Earlier image" }, { type: "input_image", image_url: pngDataUrl }] },
+    { role: "assistant", content: "Earlier response" },
+    { role: "user", content: [{ type: "input_text", text: "Inspect attachments" }, { type: "input_image", image_url: dataUrl("image/png", largePng) }, { type: "input_file", filename: "invoice.pdf", file_data: dataUrl("application/pdf", pdfFixture()) }, { type: "input_file", filename: "sales.xlsx", file_data: xlsxFixture().toString("base64") }] },
+  ] }, "responses");
+  const multimediaResult = await run(multimedia, async () => {});
+  assert.equal(multimediaResult.text, "Hello Ada");
+  const multimodalCall = calls.at(-1);
+  assert.equal(multimodalCall.messages.filter((message: any) => message.role === "user" && Array.isArray(message.content) && message.content.some((part: any) => part.type === "image_url")).length, 2, JSON.stringify(multimodalCall.messages.map((message: any) => ({ role: message.role, types: Array.isArray(message.content) ? message.content.map((part: any) => part.type) : typeof message.content }))));
+  const multimodalWire = JSON.stringify(multimodalCall.messages);
+  assert.ok(multimodalWire.includes("Fixture PDF invoice total 42")); assert.ok(multimodalWire.includes("Fixture spreadsheet"));
+  assert.equal((await run(normalizeRequest({ model: "support", input: [{ role: "user", content: [{ type: "input_image", image_url: pngDataUrl }] }] }, "responses"), async () => {})).text, "Hello Ada");
+  const beforeUnsupported = calls.length;
+  const originalSettings = await readFile(join(named, "settings.json"), "utf8");
+  await writeFile(join(named, "settings.json"), JSON.stringify({ ...JSON.parse(originalSettings), images: { blockImages: true } }));
+  try {
+    await assert.rejects(run(normalizeRequest({ model: "support", input: [{ role: "user", content: [{ type: "input_image", image_url: pngDataUrl }] }] }, "responses"), async () => {}), (error: any) => error.status === 400 && error.code === "image_input_disabled");
+  } finally { await writeFile(join(named, "settings.json"), originalSettings); }
+  const corruptPng = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aENsAAAAASUVORK5CYII=";
+  await assert.rejects(run(normalizeRequest({ model: "support", input: [{ role: "user", content: [{ type: "input_image", image_url: corruptPng }] }] }, "responses"), async () => {}), (error: any) => error.status === 400 && error.code === "invalid_attachment");
+  assert.equal(calls.length, beforeUnsupported);
+  const originalModels = await readFile(join(root, "models.json"), "utf8");
+  const textOnlyModels = JSON.parse(originalModels); textOnlyModels.providers.fixture.models[0].input = ["text"];
+  await writeFile(join(root, "models.json"), JSON.stringify(textOnlyModels));
+  const unsupportedEvents: any[] = [];
+  try {
+    await assert.rejects(run(normalizeRequest({ model: "support", input: [{ role: "user", content: [{ type: "input_image", image_url: pngDataUrl }] }] }, "responses"), async (event) => { unsupportedEvents.push(event); }), (error: any) => error.status === 400 && error.code === "unsupported_image_model");
+  } finally { await writeFile(join(root, "models.json"), originalModels); }
+  assert.equal(calls.length, beforeUnsupported); assert.deepEqual(unsupportedEvents, []);
+  await assert.rejects(run(normalizeRequest({ model: "support", input: [{ role: "user", content: [{ type: "input_file", file_data: dataUrl("application/pdf", pdfFixture("")), filename: "scan.pdf" }] }] }, "responses"), async () => {}), (error: any) => error.status === 400 && error.code === "document_text_missing");
+  assert.equal(calls.length, beforeUnsupported);
   const isolatedCalls = calls.length;
   await Promise.all(["support", "default"].map((model) => run(normalizeRequest({ model, input: "Independent request" }, "responses"), async () => {})));
   assert.equal(calls.length, isolatedCalls + 2);

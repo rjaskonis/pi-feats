@@ -2,6 +2,9 @@
 import type { AgentSession, AgentSessionEvent, SessionManager as SessionManagerType } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { prepareAttachments } from "./openai-attachments.ts";
+import { attachmentError, attachmentFailures } from "./openai-errors.ts";
+import { OPENAI_BODY_BYTES, OPENAI_ATTACHMENT_BYTES, OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
 import { CompatibilityError, type CompletionRequest, type CompletionResult, type ExecutionEvent, type TokenUsage } from "./openai-contract.ts";
 
 export const WORKER_EVENT_PREFIX = "PI_OPENAI_EVENT:";
@@ -9,13 +12,18 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 const emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 
 /** Populate authoritative session context before constructing the AgentSession. */
-export function restoreHistory(manager: Pick<SessionManagerType, "appendMessage">, request: CompletionRequest): void {
-  for (const message of request.messages.slice(0, -1)) {
+export function restoreHistory(manager: Pick<SessionManagerType, "appendMessage">, request: CompletionRequest): Array<{ id: string; index: number }> {
+  const restoredImages: Array<{ id: string; index: number }> = [];
+  for (const [index, message] of request.messages.slice(0, -1).entries()) {
     if (message.role === "assistant") manager.appendMessage({ role: "assistant", content: [{ type: "text", text: message.content }], api: "openai-completions", provider: "external", model: "external", usage: emptyUsage(), stopReason: "stop", timestamp: Date.now() });
-    else if (message.role === "user") manager.appendMessage({ role: "user", content: message.content, timestamp: Date.now() });
+    else if (message.role === "user") {
+      const id = manager.appendMessage({ role: "user", content: message.images?.length ? [{ type: "text", text: message.content }, ...message.images] : message.content, timestamp: Date.now() });
+      if (message.images?.length) restoredImages.push({ id, index });
+    }
     // Instruction roles are appended to the profile prompt, not recorded as
     // native system loadout snapshots (which would deactivate profile tools).
   }
+  return restoredImages;
 }
 
 /** Execute a prepared session and dispose it on every success, failure, or abort. */
@@ -55,8 +63,10 @@ export async function executeSession(session: AgentSession, request: CompletionR
   signal.addEventListener("abort", abort, { once: true });
   try {
     signal.throwIfAborted();
+    if (request.messages.some((message) => message.images?.length) && !session.model?.input.includes("image")) throw attachmentError("unsupported_image_model");
     emit({ type: "ready" });
-    await session.prompt(request.messages.at(-1)!.content, { source: "rpc", expandPromptTemplates: false });
+    const final = request.messages.at(-1)!;
+    await session.prompt(final.content, { source: "rpc", expandPromptTemplates: false, ...(final.images?.length ? { images: final.images } : {}) });
     await session.waitForIdle();
     if (eventError) throw eventError;
     signal.throwIfAborted();
@@ -111,18 +121,22 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
   };
   let session: AgentSession | undefined;
   try {
-    let input = "";
+    let input = "", inputBytes = 0;
     process.stdin.setEncoding("utf8");
     for await (const chunk of process.stdin) {
+      inputBytes += Buffer.byteLength(chunk);
+      if (inputBytes > OPENAI_BODY_BYTES + 1_048_576) throw new CompatibilityError("Request is too large.", null, 413);
       input += String(chunk);
-      if (Buffer.byteLength(input) > 1_048_576) throw new CompatibilityError("Request is too large.", null, 413);
     }
-    const request = JSON.parse(input) as CompletionRequest;
-    const { createAgentSession, createCodemodeExtension, createToolSearchExtension, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager } = host ?? await import("@earendil-works/pi-coding-agent");
+    const rawRequest = JSON.parse(input) as CompletionRequest;
+    input = "";
+    const request = await prepareAttachments(rawRequest, controller.signal);
+    const { createAgentSession, createCodemodeExtension, createToolSearchExtension, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, resizeImage, formatDimensionNote } = host ?? await import("@earendil-works/pi-coding-agent");
     const { join } = await import("node:path");
     const agentDir = process.env.PI_CODING_AGENT_DIR!;
     const cwd = process.cwd();
     const settingsManager = SettingsManager.create(cwd, agentDir);
+    if (request.messages.some((message) => message.images?.length) && settingsManager.getBlockImages()) throw attachmentError("image_input_disabled");
     const additionalExtensionPaths: string[] = [];
     for (let i = 2; i < process.argv.length; i++) {
       if (process.argv[i] === "--extension" || process.argv[i] === "-e") additionalExtensionPaths.push(process.argv[++i]);
@@ -139,7 +153,7 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     await loader.reload();
     if (loader.getExtensions().errors.length) throw new Error("Profile extension initialization failed.");
     const manager = SessionManager.inMemory(cwd);
-    restoreHistory(manager, request);
+    const restoredImages = restoreHistory(manager, request);
     const runtime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json"), allowModelNetwork: false });
     controller.signal.throwIfAborted();
     session = (await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader: loader, sessionManager: manager, modelRuntime: runtime })).session;
@@ -147,6 +161,25 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     if ((configuredProvider && session.model?.provider !== configuredProvider) || (configuredModel && session.model?.id !== configuredModel)) {
       throw new CompatibilityError("The profile's configured model is unavailable.", null, 502, "profile_model_unavailable");
     }
+    if (request.messages.some((message) => message.images?.length) && !session.model?.input.includes("image")) throw attachmentError("unsupported_image_model");
+    // Validate and normalize history as well as the final prompt using the
+    // selected model's limits and the profile's image-resizing policy. Pi's
+    // prompt path may otherwise omit undecodable images with only a text hint.
+    const resizeOptions = settingsManager.getImageAutoResize() ? session.model?.inputLimits?.images?.resize : { maxWidth: 16_384, maxHeight: 16_384, maxBytes: Math.ceil(OPENAI_ATTACHMENT_BYTES / 3) * 4 + 1 };
+    for (const message of request.messages) for (const image of message.images ?? []) {
+      controller.signal.throwIfAborted();
+      const decoded = await resizeImage(Buffer.from(image.data, "base64"), image.mimeType, resizeOptions).catch(() => null);
+      if (!decoded) throw attachmentError("invalid_attachment");
+      image.data = decoded.data; image.mimeType = decoded.mimeType;
+      const note = formatDimensionNote(decoded);
+      if (note) message.content += `\n\n${note}`;
+    }
+    if (request.messages.reduce((total, message) => total + message.content.length, request.instructions?.length ?? 0) > OPENAI_TEXT_CHARACTERS) throw attachmentError("context_too_large");
+    for (const { id, index } of restoredImages) {
+      const message = request.messages[index];
+      manager.appendContextEdit(id, { content: [{ type: "text", text: message.content }, ...message.images!] });
+    }
+    if (restoredImages.length) session.refreshContext();
     await session.bindExtensions({ mode: "rpc", onError: () => { process.stderr.write("OpenAI worker extension failed.\n"); } });
     const result = await executeSession(session, request, write, controller.signal);
     session = undefined;
@@ -210,7 +243,7 @@ export async function executeWorker(command: string, args: string[], options: { 
         else if (value.type === "result") result = value.result;
         else if (value.type === "failure") {
           failure = true;
-          if (["output_rewritten", "output_limit_exceeded", "slow_consumer", "generation_failed", "response_missing", "profile_model_unavailable"].includes(value.code)) failureCode = value.code;
+          if (typeof value.code === "string" && (Object.hasOwn(attachmentFailures, value.code) || ["output_rewritten", "output_limit_exceeded", "slow_consumer", "generation_failed", "response_missing", "profile_model_unavailable"].includes(value.code))) failureCode = value.code;
         }
         else throw new Error("Unknown worker record.");
       }
@@ -218,6 +251,7 @@ export async function executeWorker(command: string, args: string[], options: { 
     }
     const code = await exited;
     signal.throwIfAborted();
+    if (failure && Object.hasOwn(attachmentFailures, failureCode)) throw attachmentError(failureCode);
     if (buffer.trim() || code !== 0 || failure || !result || !ready || typeof result.text !== "string" || !["stop", "length"].includes(result.finishReason) || !result.usage || ["input", "output", "cached", "reasoning"].some((key) => !Number.isFinite(result!.usage[key as keyof TokenUsage]) || result!.usage[key as keyof TokenUsage] < 0)) throw new CompatibilityError("Pi execution failed.", null, 502, failureCode);
     if (Buffer.byteLength(result.text) !== outputBytes || outputHash.digest("hex") !== createHash("sha256").update(result.text).digest("hex")) throw new CompatibilityError("Pi stream did not match the completed output.", null, 502, "invalid_stream");
     return result;

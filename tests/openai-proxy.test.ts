@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import Fastify from "fastify";
+import { OPENAI_BODY_BYTES } from "../extensions/lib/openai-limits.ts";
+import { dataUrl, tinyPng } from "./fixtures/openai-attachments.ts";
 import { proxyError, proxyPiRequest } from "../extensions/pi-console-webui/lib/api-proxy.ts";
 import { registerCompatibilityRoutes } from "../extensions/api-server/openai-routes.ts";
 
@@ -11,6 +13,7 @@ test("Console proxy preserves SSE, streams immediately and cancels upstream on b
   registerCompatibilityRoutes(server, {
     authorized: (header) => header === "Bearer proxy-test", profiles: async () => [{ name: "support" }], validateProfile: async () => {},
     execute: async (_request, emit, signal) => {
+      assert.equal(_request.messages[0].attachments?.[0].kind, "image");
       await emit({ type: "ready" }); await emit({ type: "text", delta: "First" });
       await new Promise<void>((resolve) => { signal.addEventListener("abort", () => { aborted(); resolve(); }, { once: true }); });
       signal.throwIfAborted(); throw new Error("Unreachable");
@@ -19,7 +22,7 @@ test("Console proxy preserves SSE, streams immediately and cancels upstream on b
   await server.listen({ host: "127.0.0.1", port: 0 });
   t.after(async () => { server.server.closeAllConnections(); await server.close(); });
   const apiUrl = `http://127.0.0.1:${(server.server.address() as { port: number }).port}`;
-  const response = await proxyPiRequest(new Request("http://console/api/pi/v1/responses", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "support", input: "Hello", stream: true }) }), ["v1", "responses"], { apiUrl, apiToken: "proxy-test" });
+  const response = await proxyPiRequest(new Request("http://console/api/pi/v1/responses", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ model: "support", input: [{ role: "user", content: [{ type: "input_image", image_url: dataUrl("image/png", Buffer.concat([tinyPng, Buffer.alloc(1_100_000)])) }] }], stream: true }) }), ["v1", "responses"], { apiUrl, apiToken: "proxy-test" });
   assert.equal(response.status, 200); assert.match(response.headers.get("content-type")!, /text\/event-stream/);
   assert.equal(response.headers.get("x-accel-buffering"), "no"); assert.match(response.headers.get("cache-control")!, /no-transform/);
   const reader = response.body!.getReader();
@@ -41,6 +44,6 @@ test("Console proxy maps legacy and v1 paths, query strings and compatible error
   assert.equal((await proxyError(["sessions"], "Unauthorized", 401, "invalid_api_key").json()).error, "Unauthorized");
   const unavailable = await proxyPiRequest(new Request("http://console/api/pi/v1/models"), ["v1", "models"], { ...config, apiToken: "" });
   assert.equal(unavailable.status, 503); assert.equal((await unavailable.json()).error.type, "server_error");
-  const oversized = await proxyPiRequest(new Request("http://console/api/pi/v1/responses", { method: "POST", body: "x".repeat(1_048_577) }), ["v1", "responses"], config);
+  const oversized = await proxyPiRequest(new Request("http://console/api/pi/v1/responses", { method: "POST", body: "x".repeat(OPENAI_BODY_BYTES + 1) }), ["v1", "responses"], config);
   assert.equal(oversized.status, 413); assert.equal((await oversized.json()).error.code, "request_too_large");
 });

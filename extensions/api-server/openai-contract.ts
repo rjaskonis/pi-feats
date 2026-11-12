@@ -1,6 +1,11 @@
-/** Text-only OpenAI wire contracts with profile-owned execution settings. */
+/** OpenAI wire contracts with profile-owned execution settings and multimodal input. */
+import { CompatibilityError, attachmentError } from "./openai-errors.ts";
+import { normalizeAttachment, type InputAttachment, type InputImage, type AttachmentBudget } from "./openai-attachments.ts";
+import { OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
+export { CompatibilityError, errorBody } from "./openai-errors.ts";
+
 export type Protocol = "chat" | "responses";
-export type ConversationMessage = { role: "system" | "user" | "assistant"; content: string };
+export type ConversationMessage = { role: "system" | "user" | "assistant"; content: string; attachments?: InputAttachment[]; images?: InputImage[] };
 export type CompletionRequest = {
   profile: string;
   messages: ConversationMessage[];
@@ -13,21 +18,6 @@ export type TokenUsage = { input: number; output: number; cached: number; reason
 export type CompletionResult = { text: string; finishReason: "stop" | "length"; usage: TokenUsage };
 export type ExecutionEvent = { type: "ready" } | { type: "text"; delta: string };
 
-/** A safe, client-facing error; integration exceptions must not be exposed. */
-export class CompatibilityError extends Error {
-  readonly param: string | null;
-  readonly status: number;
-  readonly code: string;
-  constructor(message: string, param: string | null = null, status = 400, code = "invalid_request_error") {
-    super(message); this.param = param; this.status = status; this.code = code;
-  }
-}
-
-export function errorBody(error: unknown) {
-  const known = error instanceof CompatibilityError;
-  return { error: { message: known ? error.message : "Pi execution failed.", type: known && error.status < 500 ? (error.status === 401 ? "authentication_error" : "invalid_request_error") : "server_error", param: known ? error.param : null, code: known ? error.code : "server_error" } };
-}
-
 function record(value: unknown, param: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new CompatibilityError("Expected an object.", param);
   return value as Record<string, unknown>;
@@ -35,17 +25,39 @@ function record(value: unknown, param: string): Record<string, unknown> {
 function fields(body: Record<string, unknown>, allowed: string[], prefix = "") {
   for (const key of Object.keys(body)) if (!allowed.includes(key)) throw new CompatibilityError("Unsupported parameter.", `${prefix}${key}`, 400, "unsupported_parameter");
 }
-function text(value: unknown, param: string, types: string[]): string {
-  if (typeof value === "string") return value;
-  if (!Array.isArray(value) || !value.length) throw new CompatibilityError("Expected text or a non-empty array of text parts.", param);
-  return value.map((part, index) => {
-    const item = record(part, `${param}.${index}`);
-    fields(item, ["type", "text", "annotations", "logprobs"], `${param}.${index}.`);
-    if (!types.includes(String(item.type)) || typeof item.text !== "string") throw new CompatibilityError("Only text content is supported.", `${param}.${index}`);
-    if (item.annotations !== undefined && (!Array.isArray(item.annotations) || item.annotations.length)) throw new CompatibilityError("Annotations are not supported.", `${param}.${index}.annotations`);
-    if (item.logprobs !== undefined && (!Array.isArray(item.logprobs) || item.logprobs.length)) throw new CompatibilityError("Log probabilities are not supported.", `${param}.${index}.logprobs`);
-    return item.text;
-  }).join("");
+function content(value: unknown, param: string, types: string[], allowAttachments: boolean, budget: AttachmentBudget): Pick<ConversationMessage, "content" | "attachments"> {
+  if (typeof value === "string") return { content: value };
+  if (!Array.isArray(value) || !value.length || value.length > 1000) throw new CompatibilityError("Expected text or between 1 and 1,000 content parts.", param);
+  const text: string[] = [], attachments: InputAttachment[] = [];
+  for (const [index, part] of value.entries()) {
+    const at = `${param}.${index}`, item = record(part, at);
+    if (types.includes(String(item.type))) {
+      fields(item, ["type", "text", "annotations", "logprobs"], `${at}.`);
+      if (typeof item.text !== "string") throw new CompatibilityError("Expected a text string.", at);
+      if (item.annotations !== undefined && (!Array.isArray(item.annotations) || item.annotations.length)) throw new CompatibilityError("Annotations are not supported.", `${at}.annotations`);
+      if (item.logprobs !== undefined && (!Array.isArray(item.logprobs) || item.logprobs.length)) throw new CompatibilityError("Log probabilities are not supported.", `${at}.logprobs`);
+      text.push(item.text); continue;
+    }
+    const image = item.type === "image_url" || item.type === "input_image", file = item.type === "file" || item.type === "input_file";
+    if (!image && !file) throw new CompatibilityError("Unsupported content part type.", `${at}.type`);
+    if (!allowAttachments) throw new CompatibilityError("Attachments are supported only in user messages.", at);
+    if (image) {
+      fields(item, ["type", "image_url", "detail", "file_id"], `${at}.`);
+      if (item.file_id != null) throw attachmentError("unsupported_file_reference", at);
+      let source = item.image_url;
+      if (source && typeof source === "object") { const image = record(source, `${at}.image_url`); fields(image, ["url", "detail"], `${at}.image_url.`); source = image.url; }
+      attachments.push(normalizeAttachment("image", source, undefined, at, budget));
+    } else {
+      fields(item, item.type === "file" ? ["type", "file"] : ["type", "file_data", "file_url", "file_id", "filename"], `${at}.`);
+      const file = item.type === "file" ? record(item.file, `${at}.file`) : item;
+      if (item.type === "file") fields(file, ["file_data", "file_url", "file_id", "filename"], `${at}.file.`);
+      if (file.file_id != null) throw attachmentError("unsupported_file_reference", at);
+      if ((file.file_data != null) === (file.file_url != null)) throw attachmentError("invalid_attachment", at);
+      if (file.file_url != null && (typeof file.file_url !== "string" || !/^https:/i.test(file.file_url))) throw attachmentError("attachment_url_blocked", at);
+      attachments.push(normalizeAttachment("file", file.file_data ?? file.file_url, file.filename, at, budget));
+    }
+  }
+  return { content: text.join(""), ...(attachments.length ? { attachments } : {}) };
 }
 
 /** Normalize either protocol without flattening user/assistant history into a prompt. */
@@ -75,7 +87,8 @@ export function normalizeRequest(input: unknown, protocol: Protocol): Completion
   const instructions = protocol === "responses" ? body.instructions : null;
   if (instructions != null && typeof instructions !== "string") throw new CompatibilityError("instructions must be a string.", "instructions");
   const raw = protocol === "chat" ? body.messages : typeof body.input === "string" ? [{ role: "user", content: body.input }] : body.input;
-  if (!Array.isArray(raw) || !raw.length || raw.length > 100) throw new CompatibilityError("Provide between 1 and 100 text messages.", protocol === "chat" ? "messages" : "input");
+  if (!Array.isArray(raw) || !raw.length || raw.length > 100) throw new CompatibilityError("Provide between 1 and 100 messages.", protocol === "chat" ? "messages" : "input");
+  const budget: AttachmentBudget = { count: 0, bytes: 0 };
   const messages = raw.map((value, index): ConversationMessage => {
     const param = `${protocol === "chat" ? "messages" : "input"}.${index}`, item = record(value, param);
     fields(item, protocol === "chat" ? ["role", "content", "name", "refusal", "tool_calls"] : ["type", "role", "content", "id", "status", "phase"], `${param}.`);
@@ -84,10 +97,10 @@ export function normalizeRequest(input: unknown, protocol: Protocol): Completion
     if (item.name != null) throw new CompatibilityError("Named messages are not supported.", `${param}.name`);
     if (item.refusal != null || (item.tool_calls != null && (!Array.isArray(item.tool_calls) || item.tool_calls.length))) throw new CompatibilityError("Tool calls and refusals are not supported as input.", param);
     for (const key of ["id", "status", "phase"]) if (item[key] != null && typeof item[key] !== "string") throw new CompatibilityError("Expected a string.", `${param}.${key}`);
-    return { role: item.role === "developer" ? "system" : item.role as ConversationMessage["role"], content: text(item.content, `${param}.content`, protocol === "chat" ? ["text"] : item.role === "assistant" ? ["output_text", "input_text"] : ["input_text"]) };
+    return { role: item.role === "developer" ? "system" : item.role as ConversationMessage["role"], ...content(item.content, `${param}.content`, protocol === "chat" ? ["text"] : item.role === "assistant" ? ["output_text", "input_text"] : ["input_text"], item.role === "user", budget) };
   });
-  if (messages.at(-1)?.role !== "user" || !messages.at(-1)!.content.trim()) throw new CompatibilityError("The final message must be a non-empty user message.", protocol === "chat" ? "messages" : "input");
-  if (messages.reduce((total, item) => total + item.content.length, (instructions as string | undefined)?.length ?? 0) > 100_000) throw new CompatibilityError("Conversation exceeds 100,000 characters.", protocol === "chat" ? "messages" : "input", 413);
+  if (messages.at(-1)?.role !== "user" || (!messages.at(-1)!.content.trim() && !messages.at(-1)!.attachments?.length)) throw new CompatibilityError("The final message must contain user text or attachments.", protocol === "chat" ? "messages" : "input");
+  if (messages.reduce((total, item) => total + item.content.length, (instructions as string | undefined)?.length ?? 0) > OPENAI_TEXT_CHARACTERS) throw attachmentError("context_too_large", protocol === "chat" ? "messages" : "input");
   return { profile: body.model, messages, stream: body.stream === true, includeUsage, metadata, instructions: instructions as string ?? null };
 }
 

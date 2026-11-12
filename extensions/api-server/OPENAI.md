@@ -1,6 +1,6 @@
 # OpenAI-compatible profile API
 
-The API Server exposes existing Pi profiles through text-only Chat Completions and Responses. This is independent of Applications, identity keys, handlers and session rollover.
+The API Server exposes existing Pi profiles through Chat Completions and Responses, with text output and text/image/document input. This is independent of Applications, identity keys, handlers and session rollover.
 
 | Method | Direct path | Console proxy path |
 | --- | --- | --- |
@@ -20,7 +20,7 @@ The worker creates a `SessionManager.inMemory()` before constructing its only ex
 
 System and developer messages map to ordered request-scoped system-prompt additions. Pi has no distinct developer role: both roles have the same instruction level. Instruction messages are hoisted out of conversational history in their original relative order; Responses top-level `instructions` is appended last. These additions do not replace the profile prompt, SOUL, Guardrails or tool declarations. They are not native system loadout snapshots, which would otherwise change active tools when restoring history.
 
-The final conversational message must be a non-empty user message. Assistant-prefill, instruction-only and assistant-terminal histories are rejected, not repaired with a synthetic prompt. Typical SDK `messages`/string `input` requests and explicit prior output followed by a user message are supported.
+The final conversational message must contain user text or attachments. Assistant-prefill, instruction-only and assistant-terminal histories are rejected, not repaired with a synthetic prompt. Typical SDK `messages`/string `input` requests and explicit prior output followed by a user message are supported.
 
 ## JavaScript
 
@@ -85,21 +85,75 @@ No compatibility header or client-specific setting is required. Both POST endpoi
 - `n`, `store`, `background`, `truncation`, service-tier preferences and unknown provider-specific options are ignored. Every call still produces one synchronous, stateless response without storage, even if the caller asks otherwise.
 - `user` and `safety_identifier` are ignored, including client-specific object values. They do not control identity routing, moderation or policy.
 
-Ignored options are not parsed, validated, forwarded to the worker or applied to profile settings. HTTP body limits still cover the entire request, including ignored options. Core fields and actual conversation content remain validated. Stored-context references and tool-result/multimodal input are **not** ignored because doing so would silently lose conversational context.
+Ignored options are not parsed, validated, forwarded to the worker or applied to profile settings. HTTP body limits still cover the entire request, including ignored options. Core fields and actual conversation content remain validated. Stored-context references, tool-result input and unsupported content types are **not** ignored because doing so would silently lose conversational context.
 
 This allows Open WebUI to send its built-in tool definitions and automatic-task generation settings unchanged. Open WebUI tools remain unused, while Pi profile tools stay active. Automatic titles, tags and suggestions still make additional agent calls and consume tokens; accepting their output-format preference does not guarantee JSON output.
 
+## Images and documents
+
+Images are native Pi image blocks, not base64 dumped into a text prompt. Both current and historical user messages retain images. PNG, JPEG, GIF and WebP are supported. The profile must select a vision-capable model and permit image input; otherwise the API returns `unsupported_image_model` or `image_input_disabled` before starting the public stream. Pi's image decoder validates the payload, and image resizing follows the profile settings and selected model limits. Attachments are accepted only in user messages; attachment-only user turns are valid.
+
+Chat image example (replace `<base64>` with actual data):
+
+```json
+{
+  "model": "support",
+  "messages": [{ "role": "user", "content": [
+    { "type": "text", "text": "Describe this image." },
+    { "type": "image_url", "image_url": { "url": "data:image/png;base64,<base64>", "detail": "auto" } }
+  ] }]
+}
+```
+
+Responses image parts use `{ "type": "input_image", "image_url": "data:image/png;base64,<base64>" }`. `detail` is accepted as an advisory field; Pi controls image processing.
+
+Documents are converted to user-role text inside the selected profile worker, including Nono when enabled. Supported formats:
+
+- PDF: the real text layer, extracted by Poppler (`pdftotext`). Scanned/image-only PDFs fail with `document_text_missing`; perform OCR first or send page images to a vision-capable profile. Embedded diagrams/images are not rendered automatically.
+- XLSX: sheet names, cell addresses, text, raw values, formulas and available cached results. Formulas/macros are never executed or recalculated. Styles, charts and date/number formatting are not rendered.
+- DOCX: main-body paragraphs and tables. Headers, footers, embedded images and full layout fidelity are outside this extractor's scope.
+- PPTX: slide text in presentation order, without slide rendering, notes or embedded images.
+- UTF-8 TXT, Markdown, CSV, TSV, JSON and XML: decoded as text, without evaluating embedded content. Legacy binary XLS/DOC and password-protected documents are not supported.
+
+Responses document example:
+
+```json
+{
+  "model": "support",
+  "input": [{ "role": "user", "content": [
+    { "type": "input_text", "text": "Summarize this workbook." },
+    { "type": "input_file", "filename": "report.xlsx", "file_data": "<base64>" }
+  ] }]
+}
+```
+
+`file_data` accepts raw base64 (provide a filename) or a MIME-qualified base64 data URL. Chat uses `{ "type": "file", "file": { "filename": "report.pdf", "file_data": "data:application/pdf;base64,<base64>" } }`. Images and multiple documents may be combined in one request. Extracted documents are labeled in user context; originals are not stored on disk or exposed as executable tool calls. They are not staged as editable files for agent tools. Extraction failures never silently drop an attachment.
+
+Image URLs and `file_url` can reference publicly reachable HTTPS content. Downloads reject credentials, nonstandard ports, redirects, compressed HTTP bodies, loopback/private/link-local/reserved addresses and unsafe DNS results. The checked DNS address is pinned to the actual connection. No Pi API token, cookies or other ambient credentials are forwarded to attachment hosts. Each download has a 20-second deadline.
+
+Open WebUI may already extract uploaded PDF/Office documents into retrieval context; that text remains supported without document dependencies in Pi. For direct file input, the UI/client must send the bytes or a public URL. A private Open WebUI `/api/v1/files/...` URL or an OpenAI `file_id` is not an attachment payload the Pi server can access automatically. Send `file_data` or let the client extract its own attachment; IDs are explicitly rejected with `unsupported_file_reference` rather than guessed, ignored or fetched with unrelated credentials.
+
+### Document runtime prerequisites
+
+Office document extraction requires **Python 3**, using only its standard library. PDF extraction additionally requires **Poppler's `pdftotext`**. These must exist in the Pi runtime/container and be accessible under the named profile's existing Nono policy. On Linux, the worker prefers `/usr/bin/python3` over environment shims. No dependencies are installed automatically and no additional profile sandbox permissions are granted.
+
+For example, an administrator can include `python3` and `poppler-utils` in a Debian/Ubuntu runtime image. A missing executable produces `document_extractor_unavailable` (HTTP 503). This is an operational prerequisite, not permission for the API to install software or modify a container.
+
+The extractor runs as a short-lived subprocess within the request's process group, with a 25-second deadline. On POSIX it also limits address space to 512 MiB and CPU time to 20 seconds. Office archives are bounded by entry count and expanded size; traversal paths, symlinks, encryption, duplicate entries, DTDs and entities are rejected. No archive is extracted to the filesystem, and PDF bytes are piped to Poppler without temporary files.
+
 ## Supported input and limits
 
-- Chat `messages`: `system`, `developer`, `user`, `assistant`, with string content or `text` parts.
-- Responses `input`: a string or message list. Text parts use `input_text`; previous assistant output messages can use `output_text` with empty annotations/logprobs. Item IDs, status and phase are caller-owned transport metadata, never server lookup keys.
+- Chat `messages`: `system`, `developer`, `user`, `assistant`, with string content or `text` parts; user content also accepts `image_url` and `file` parts.
+- Responses `input`: a string or message list. Text parts use `input_text`; user messages also accept `input_image` and `input_file`. Previous assistant output messages can use `output_text` with empty annotations/logprobs. Item IDs, status and phase are caller-owned transport metadata, never server lookup keys.
 - `stream` is boolean. Chat `stream_options.include_usage` is a validated boolean when streaming; other stream options are ignored. For non-streaming requests and Responses, `stream_options` is ignored.
 - Responses supports top-level string `instructions`. Non-null `previous_response_id` and `conversation` are rejected in both protocols: send explicit history in `messages` or `input` instead.
 - `metadata`: at most 16 string entries, keys up to 64 characters, values up to 512 characters. Responses echoes it; Chat accepts it without storage or identity routing.
-- At most 100 messages and 100,000 total text characters, including instructions; HTTP JSON bodies are limited to 1 MiB, including at the Console proxy.
+- At most 100 messages, 1,000 parts per message and 100,000 total text characters, including instructions, extracted documents and resize notes. Extracted text is never silently truncated.
+- At most 10 attachments per request, 10 MiB per attachment and 20 MiB aggregate decoded attachment bytes, including history. Images must be no larger than 16,384 pixels on either axis or 40 megapixels. Encoded image bytes do not count as prompt-text characters.
+- Compatibility POST JSON bodies are limited to 32 MiB to accommodate base64 overhead, consistently at the direct API, Console proxy and worker transport. Other existing API routes retain their own limits. External ingress/body limits may still require deployment-specific configuration.
 - Visible output is bounded to 16 MiB. Worker frame, transport and writable backlog limits prevent unlimited pending output. Initialization has a 60-second deadline and each blocked SSE drain has a 30-second deadline. A caller disconnect cancels the agent and request-owned worker process group; force termination follows a one-second grace period when needed.
 
-Actual tool calls/results in history, non-message Responses input items and image/audio/video/file content parts are rejected rather than discarded. Unknown nested message/content fields and malformed supported fields also remain errors. Response retrieval/storage, server-managed conversations and WebSocket transport are not implemented. Profile-owned internal tools remain available; their calls and results are not exposed as client-owned function calls.
+Actual tool calls/results in history, non-message Responses input items, audio/video parts and unsupported attachment formats/references are rejected rather than discarded. Unknown nested message/content fields and malformed supported fields also remain errors. Response retrieval/storage, server-managed conversations and WebSocket transport are not implemented. Profile-owned internal tools remain available; their calls and results are not exposed as client-owned function calls.
 
 ## Output, usage and failures
 
@@ -125,6 +179,6 @@ PI_OPENAI_TEST_NONO=1 \
 node --experimental-strip-types --test tests/openai-worker-integration.test.ts
 ```
 
-The integration test uses a temporary Pi root, tests default/named/Nono execution, verifies native history, credential separation, concurrent conversation isolation, internal tool turns, usage, cancellation and profile tool policy, rejects failed sandbox startup, runs isolated profile creation/resource commands and checks that no profile-local package trees or persistent transcripts are created. Without `PI_OPENAI_TEST_CLI` it is explicitly skipped. `PI_OPENAI_TEST_NONO=1` requires an already-installed Nono; it never installs it.
+The integration test uses a temporary Pi root, tests default/named/Nono execution, verifies native image/text history, PDF/XLSX extraction, image payloads above 1 MiB, vision capability errors, credential separation, concurrent conversation isolation, internal tool turns, usage, cancellation and profile tool policy, rejects failed sandbox startup, runs isolated profile creation/resource commands and checks that no profile-local package trees or persistent transcripts are created. Without `PI_OPENAI_TEST_CLI` it is explicitly skipped. `PI_OPENAI_TEST_NONO=1` requires an already-installed Nono; it never installs it.
 
-Compatibility was validated locally with Pi 1.5.2, JavaScript `openai` 7.15.0 and Python `openai` 2.48.0: discovery, both JSON protocols, both SSE protocols, JavaScript `finalResponse()` and Python `get_final_response()`. SDKs are optional test-only dependencies; unavailable SDK checks are reported without automatic installation. Proxy tests exercise the same streaming gateway used by the Next route, including downstream body cancellation; external proxy/network buffering requires deployment-specific verification.
+Compatibility was validated locally with Pi 1.5.2, JavaScript `openai` 7.15.0 and Python `openai` 2.48.0: discovery, both JSON protocols, both SSE protocols, JavaScript `finalResponse()`, Python `get_final_response()` and image/file request serialization. Attachment tests additionally exercise real PDF/Office extraction, limits and SSRF protections without external network requests. SDKs are optional test-only dependencies; unavailable SDK checks are reported without automatic installation. Proxy tests exercise the same streaming gateway used by the Next route, including downstream body cancellation; external proxy/network buffering requires deployment-specific verification.

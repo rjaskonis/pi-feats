@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import Fastify from "fastify";
 import { EventEmitter } from "node:events";
+import { OPENAI_BODY_BYTES } from "../extensions/lib/openai-limits.ts";
 import { CompatibilityError, normalizeRequest, type CompletionRequest } from "../extensions/api-server/openai-contract.ts";
 import { registerCompatibilityRoutes, writeSse, type CompatibilityBackend } from "../extensions/api-server/openai-routes.ts";
 import { executeSession, executeWorker, restoreHistory, WORKER_EVENT_PREFIX } from "../extensions/api-server/openai-execution.ts";
@@ -59,7 +60,7 @@ for (const protocol of ["chat", "responses"] as const) {
   });
   test(`${protocol}: still validates core fields, real content and stored-context references`, () => {
     assert.throws(() => normalizeRequest({ ...body(protocol), stream: "true" }, protocol));
-    const messages = [{ role: "user", content: [{ type: "input_image", image_url: "https://example.com/image.png" }] }];
+    const messages = [{ role: "user", content: [{ type: "input_audio", input_audio: { data: "unsupported", format: "wav" } }] }];
     assert.throws(() => normalizeRequest({ ...body(protocol), [protocol === "chat" ? "messages" : "input"]: messages }, protocol));
     for (const field of ["previous_response_id", "conversation"]) assert.throws(() => normalizeRequest({ ...body(protocol), [field]: "stored-context" }, protocol), (error: any) => error.param === field);
     const toolHistory = protocol === "chat" ? [{ role: "tool", tool_call_id: "call_1", content: "result" }] : [{ type: "function_call_output", call_id: "call_1", output: "result" }];
@@ -220,7 +221,7 @@ test("stream options preserve usage while ignoring unknown options and inapplica
 
 test("HTTP body limits and unsupported media types retain compatible envelopes", async (t) => {
   const server = await app(); t.after(() => server.close());
-  const oversized = await server.inject({ method: "POST", url: url("responses"), headers, payload: { ...body("responses"), input: "x".repeat(1_048_576) } });
+  const oversized = await server.inject({ method: "POST", url: url("responses"), headers, payload: { ...body("responses"), input: "x".repeat(OPENAI_BODY_BYTES + 1) } });
   assert.equal(oversized.statusCode, 413); assert.equal(oversized.json().error.code, "request_too_large");
   const media = await server.inject({ method: "POST", url: url("responses"), headers: { ...headers, "content-type": "application/xml" }, payload: "<request/>" });
   assert.equal(media.statusCode, 415); assert.equal(media.json().error.type, "invalid_request_error");

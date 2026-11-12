@@ -14,7 +14,7 @@ const cacheBuild = join(cacheRoot, "next-build");
 const metadataPath = join(cacheRoot, "metadata.json");
 const targetBuild = join(webuiRoot, ".next");
 
-async function sourceHash(path) {
+export async function sourceHash(path, sharedSources = []) {
   const hash = createHash("sha256");
   const visit = async (directory) => {
     for (const entry of (await readdir(directory, { withFileTypes: true })).sort((left, right) => left.name.localeCompare(right.name))) {
@@ -28,6 +28,10 @@ async function sourceHash(path) {
     }
   };
   await visit(path);
+  for (const source of [...sharedSources].sort()) {
+    hash.update(relative(webuiRoot, source));
+    hash.update(await readFile(source));
+  }
   return hash.digest("hex");
 }
 
@@ -38,7 +42,7 @@ const gitCommit = () => {
 
 export async function buildMetadata() {
   const next = JSON.parse(await readFile(join(packageRoot, "node_modules", "next", "package.json"), "utf8"));
-  return { sourceHash: await sourceHash(webuiRoot), nodeVersion: process.version, nextVersion: next.version, commit: gitCommit(), builtAt: new Date().toISOString() };
+  return { sourceHash: await sourceHash(webuiRoot, [join(packageRoot, "extensions", "lib", "openai-limits.ts")]), nodeVersion: process.version, nextVersion: next.version, commit: gitCommit(), builtAt: new Date().toISOString() };
 }
 
 export async function loadCache() {
