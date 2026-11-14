@@ -79,15 +79,76 @@ with client.responses.stream(model="support", input="Hello", store=False) as str
 
 No compatibility header or client-specific setting is required. Both POST endpoints accept and discard additional top-level options rather than returning `unsupported_parameter`. In particular:
 
-- Client-owned `tools`, `tool_choice`, `parallel_tool_calls`, legacy `functions` and `function_call` are ignored. Only the selected Pi profile's tools execute; supplied client tools are never registered or called.
+- Client-owned `tools` are ignored unless the profile explicitly enables Responses client functions below. Chat Completions always retains the existing ignore behavior. `tool_choice`, `parallel_tool_calls`, legacy `functions` and `function_call` remain ignored. Client options never replace the profile's internal tools or execution policy.
 - Generation controls such as `temperature`, `top_p`, `top_k`, token limits (`max_tokens`, `max_completion_tokens`, `max_output_tokens`), penalties, seed, stop sequences and reasoning settings are ignored. The profile's configured provider/model and runtime settings remain unchanged. A caller-supplied token limit is not enforced.
 - Output preferences such as structured `response_format` / `text.format`, log probabilities, modalities, audio options and `include` are ignored. The API still returns text without a JSON/schema guarantee or reasoning output.
-- `n`, `store`, `background`, `truncation`, service-tier preferences and unknown provider-specific options are ignored. Every call still produces one synchronous, stateless response without storage, even if the caller asks otherwise.
+- `n`, `store`, `background`, `truncation`, service-tier preferences and unknown provider-specific options are ignored. Ordinary calls still produce one synchronous, stateless response without storage, even if the caller asks otherwise. An explicitly enabled client-tool exchange retains only its bounded, temporary execution state until its outstanding calls finish or expire.
 - `user` and `safety_identifier` are ignored, including client-specific object values. They do not control identity routing, moderation or policy.
 
 Ignored options are not parsed, validated, forwarded to the worker or applied to profile settings. HTTP body limits still cover the entire request, including ignored options. Core fields and actual conversation content remain validated. Stored-context references, tool-result input and unsupported content types are **not** ignored because doing so would silently lose conversational context.
 
-This allows Open WebUI to send its built-in tool definitions and automatic-task generation settings unchanged. Open WebUI tools remain unused, while Pi profile tools stay active. Automatic titles, tags and suggestions still make additional agent calls and consume tokens; accepting their output-format preference does not guarantee JSON output.
+This allows Open WebUI to send its built-in tool definitions and automatic-task generation settings unchanged. By default Open WebUI tools remain unused, while Pi profile tools stay active. Profiles can opt into delegated Responses functions without modifying Open WebUI. Automatic titles, tags and suggestions still make additional agent calls and consume tokens; accepting their output-format preference does not guarantee JSON output.
+
+## Delegated client functions (opt-in, Responses only)
+
+This feature is **disabled by default**. Existing profiles, Chat Completions, ignored client preferences, and ordinary stateless execution keep their previous behavior. Enable it explicitly in the selected profile's `settings.json` (merge with existing settings):
+
+```json
+{
+  "profile": {
+    "clientTools": {
+      "enabled": true,
+      "allowedTools": ["view_file"],
+      "timeoutMs": 120000,
+      "maxCalls": 16
+    }
+  }
+}
+```
+
+Only named, approved function definitions are registered for the current execution. Unapproved functions and hosted tool types are not activated. Tool definitions use standard Responses `tools` schemas; nested Chat-style function definitions are accepted on this Responses path too. No special compatibility header is required. Schemas and arguments have complexity/size limits; external schema references are rejected.
+
+Approved tools are model-only tools registered privately as `client__<name>`, preventing invocation from codemode scripts. Names that collide with profile tools are rejected. Profile `tool_call` hooks still validate/block/mutate their arguments before any executable client call is returned. Hook authors can match the private `client__view_file` name. Internal tools and their results stay private; the profile's selected model, settings, credentials, instructions, and persistent tool activation are not replaced.
+
+When the agent requests a client function, `/v1/responses` returns standard `function_call` output items, including `call_id`, `name`, JSON `arguments`, and item IDs. A function-only output is valid and does not contain a fabricated assistant text message. SSE emits standard item/argument events and `response.completed` for that protocol leg. Arguments are exposed only after SDK validation and profile authorization, not directly from unvalidated model deltas.
+
+The client executes its own function and sends the result back, for example:
+
+```json
+{
+  "model": "support",
+  "tools": [{
+    "type": "function",
+    "name": "view_file",
+    "parameters": {
+      "type": "object",
+      "properties": { "file_id": { "type": "string" } },
+      "required": ["file_id"]
+    }
+  }],
+  "input": [{
+    "type": "function_call_output",
+    "call_id": "<issued-call-id>",
+    "output": [{ "type": "input_text", "text": "Extracted document content" }]
+  }]
+}
+```
+
+Explicit full history, as used by the default Open WebUI workflow, is also accepted. Preserve the original request context and issued function names/arguments. Completed historical function exchanges can be replayed before a later user question; they do not execute again. An unknown or expired unfinished exchange never starts a replacement execution. All currently issued results must be returned together; sequential tool execution may require additional standard response/result legs.
+
+Results may be strings or text/image content arrays. Image results retain existing image decoding, size, and profile blocking policies; private/authenticated file URLs are not fetched using Open WebUI credentials. `status: "failed"` becomes a failed SDK tool result so the model can explain the client error. Display-only `files`/`embeds` metadata does not become model instructions. The accepted client function definitions cannot change during an outstanding exchange; they can be omitted on a continuation.
+
+The same Nono/profile worker and in-memory SDK session wait for the result, retaining private internal history and native file bindings. Internal actions are not rerun to reconstruct context. Worker state is scoped to the authenticated installation, profile, and opaque outstanding call IDs—not just the profile name. Concurrent resumes, forged/cross-profile results, changed original context, and conflicting results fail explicitly. This is not general conversation storage: `previous_response_id`, response retrieval, and generic stateful Responses remain unsupported.
+
+Usage is returned as deltas across protocol legs. Their sum matches the authoritative SDK ledger; internal-tool usage recorded after a parallel batch completes appears in a later leg rather than being counted twice. A successful leg handoff retains its worker; disconnect before a successful handoff cancels it. Server shutdown, expiry, or policy changes cancel retained execution. General initial-request idempotency is not provided; do not automatically replay server actions after an expired exchange.
+
+Limits: four active client-tool workers globally, two per profile, a 60-second initialization deadline, and a ten-minute maximum execution lifetime. `timeoutMs` defaults to 120 seconds per active/waiting leg (allowed range 5–300 seconds). `maxCalls` defaults to 16 (allowed range 1–32), bounding delegation rounds as well. Existing request/context/attachment limits remain in force. At most 16 approved tool definitions are accepted, with a 256 KiB aggregate schema budget, 64 KiB arguments, and bounded schema/argument depth. No background worker or policy watcher starts while the feature is unused. Disable the policy to roll back activation; pending executions are cancelled on the next request or within the five-second policy check interval.
+
+### Open WebUI with Docling
+
+Leave Open WebUI unchanged. Docling extracts the document; Open WebUI offers `view_file`, executes the returned call against its own file store, and returns the extracted text to Pi. No Open WebUI key, file URL callback, Pi-side vector store, or new upload endpoint is needed.
+
+For a Slim deployment using **Bypass Embedding and Retrieval**, approve `view_file` first. Query/retrieval functions can require embeddings and vector storage; do not approve them until those prerequisites are configured. This delivers extracted content, not the original PDF's page images; direct native `input_file` support remains a separate input path.
 
 ## Images and documents
 
@@ -169,7 +230,7 @@ The extractor runs as a short-lived subprocess within the request's process grou
 - Compatibility POST JSON bodies are limited to 32 MiB to accommodate base64 overhead, consistently at the direct API, Console proxy and worker transport. Other existing API routes retain their own limits. External ingress/body limits may still require deployment-specific configuration.
 - Visible output is bounded to 16 MiB. Worker frame, transport and writable backlog limits prevent unlimited pending output. Initialization has a 60-second deadline and each blocked SSE drain has a 30-second deadline. A caller disconnect cancels the agent and request-owned worker process group; force termination follows a one-second grace period when needed.
 
-Actual tool calls/results in history, non-message Responses input items, audio/video parts and unsupported attachment formats/references are rejected rather than discarded. Unknown nested message/content fields and malformed supported fields also remain errors. Response retrieval/storage, server-managed conversations and WebSocket transport are not implemented. Profile-owned internal tools remain available; their calls and results are not exposed as client-owned function calls.
+Except for explicitly enabled Responses client function exchanges described above, actual tool calls/results in history and non-message Responses input items remain rejected rather than discarded. Audio/video parts and unsupported attachment formats/references remain unsupported. Unknown nested message/content fields and malformed supported fields also remain errors. Response retrieval/storage, server-managed conversations and WebSocket transport are not implemented. Profile-owned internal tools remain available; their calls and results are not exposed as client-owned function calls.
 
 ## Output, usage and failures
 
@@ -181,7 +242,7 @@ Usage is derived from Pi's authoritative execution ledger across model turns, re
 
 A model output limit maps to Chat `finish_reason: "length"` and Responses `status: "incomplete"` with `max_output_tokens`. Runtime/provider errors and deferred provider responses are failures, not successful completion. Empty/non-text-only results fail outside this text-output scope.
 
-Errors use `{ "error": { "message", "type", "param", "code" } }`. Statuses include 400 (validation), 401 (authentication), 404 (profile), 413 (bounds), 415 (content type), 500 (server) and 502 (execution). SSE headers are delayed until worker initialization succeeds. After headers, Chat emits an error frame followed by `[DONE]`; Responses emits `response.failed`. Neither emits normal terminal success afterward. With the validated SDK versions, JavaScript `finalResponse()` returns the failed object; Python exposes `response.failed` while `get_final_response()` raises because no completed event arrived. Inspect failure events rather than treating partial text as success. Client errors never include subprocess stderr, provider diagnostics, credentials or prompts. Server diagnostics use safe operation/profile/error codes only.
+Errors use `{ "error": { "message", "type", "param", "code" } }`. Statuses include 400 (validation), 401 (authentication), 403 (client policy), 404 (profile), 409 (invalid/stale client continuation), 413 (bounds), 415 (content type), 429 (client-worker capacity), 500 (server) and 502 (execution). SSE headers are delayed until worker initialization succeeds. After headers, Chat emits an error frame followed by `[DONE]`; Responses emits `response.failed`. Neither emits normal terminal success afterward. With the validated SDK versions, JavaScript `finalResponse()` returns the failed object; Python exposes `response.failed` while `get_final_response()` raises because no completed event arrived. Inspect failure events rather than treating partial text as success. Client errors never include subprocess stderr, provider diagnostics, credentials or prompts. Server diagnostics use safe operation/profile/error codes only.
 
 ## Local validation
 

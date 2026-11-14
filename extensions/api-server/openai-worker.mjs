@@ -13,8 +13,13 @@ const jiti = createJiti(import.meta.url, {
 try {
   // Import the host SDK natively so its classes and provider registry are shared.
   const host = await import(pathToFileURL(sdk).href);
-  const { runCompatibilityWorker } = await jiti.import("./openai-execution.ts");
-  await runCompatibilityWorker(host);
+  if (process.env.PI_OPENAI_CLIENT_TOOLS_WORKER === "1") {
+    const { runClientToolsWorker } = await jiti.import("./openai-client-worker.ts");
+    await runClientToolsWorker(host);
+  } else {
+    const { runCompatibilityWorker } = await jiti.import("./openai-execution.ts");
+    await runCompatibilityWorker(host);
+  }
 } catch {
   process.stderr.write("OpenAI worker initialization failed.\n");
   process.exitCode = 1;

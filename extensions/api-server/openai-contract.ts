@@ -62,7 +62,7 @@ function content(value: unknown, param: string, types: string[], allowAttachment
 }
 
 /** Normalize either protocol without flattening user/assistant history into a prompt. */
-export function normalizeRequest(input: unknown, protocol: Protocol): CompletionRequest {
+export function normalizeRequest(input: unknown, protocol: Protocol, internal?: { allowToolTail?: boolean; allowEmpty?: boolean }): CompletionRequest {
   const body = record(input, "body");
   // Only explicitly normalized fields reach the executor. Client tools,
   // generation controls and other extra options are intentionally ignored:
@@ -88,7 +88,7 @@ export function normalizeRequest(input: unknown, protocol: Protocol): Completion
   const instructions = protocol === "responses" ? body.instructions : null;
   if (instructions != null && typeof instructions !== "string") throw new CompatibilityError("instructions must be a string.", "instructions");
   const raw = protocol === "chat" ? body.messages : typeof body.input === "string" ? [{ role: "user", content: body.input }] : body.input;
-  if (!Array.isArray(raw) || !raw.length || raw.length > 100) throw new CompatibilityError("Provide between 1 and 100 messages.", protocol === "chat" ? "messages" : "input");
+  if (!Array.isArray(raw) || (!raw.length && !internal?.allowEmpty) || raw.length > 100) throw new CompatibilityError("Provide between 1 and 100 messages.", protocol === "chat" ? "messages" : "input");
   const budget: AttachmentBudget = { count: 0, bytes: 0 };
   const messages = raw.map((value, index): ConversationMessage => {
     const param = `${protocol === "chat" ? "messages" : "input"}.${index}`, item = record(value, param);
@@ -100,7 +100,7 @@ export function normalizeRequest(input: unknown, protocol: Protocol): Completion
     for (const key of ["id", "status", "phase"]) if (item[key] != null && typeof item[key] !== "string") throw new CompatibilityError("Expected a string.", `${param}.${key}`);
     return { role: item.role === "developer" ? "system" : item.role as ConversationMessage["role"], ...content(item.content, `${param}.content`, protocol === "chat" ? ["text"] : item.role === "assistant" ? ["output_text", "input_text"] : ["input_text"], item.role === "user", budget) };
   });
-  if (messages.at(-1)?.role !== "user" || (!messages.at(-1)!.content.trim() && !messages.at(-1)!.attachments?.length)) throw new CompatibilityError("The final message must contain user text or attachments.", protocol === "chat" ? "messages" : "input");
+  if (!internal?.allowToolTail && (messages.at(-1)?.role !== "user" || (!messages.at(-1)!.content.trim() && !messages.at(-1)!.attachments?.length))) throw new CompatibilityError("The final message must contain user text or attachments.", protocol === "chat" ? "messages" : "input");
   if (messages.reduce((total, item) => total + item.content.length, (instructions as string | undefined)?.length ?? 0) > OPENAI_TEXT_CHARACTERS) throw attachmentError("context_too_large", protocol === "chat" ? "messages" : "input");
   return { profile: body.model, messages, stream: body.stream === true, includeUsage, metadata, instructions: instructions as string ?? null };
 }

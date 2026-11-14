@@ -20,6 +20,7 @@ import { ApplicationStore, type ApplicationRecord } from "./application-store.ts
 import { buildStatelessPrompt } from "./stateless-prompt.ts";
 import { registerCompatibilityRoutes } from "./openai-routes.ts";
 import { CompatibilityError } from "./openai-contract.ts";
+import { ClientToolsRuntime } from "./openai-client-runtime.ts";
 import { executeWorker } from "./openai-execution.ts";
 import { applicationHandlerTemplate } from "../lib/application-handler-templates.ts";
 import { applicationExecutionContext, type ContextMemoryExecutionLog } from "../lib/application-context.ts";
@@ -659,7 +660,22 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     const api = new ApiServer(options, config);
     const server = Fastify({ bodyLimit: MAX_BODY_BYTES, logger: false });
     await server.register(websocket);
+    const compatibilityLaunch = (profile: string) => {
+      const pi = piCommand();
+      const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: options.agentDir, PI_PROFILE_ROOT: options.agentDir, PI_OPENAI_WORKER: "1", PI_OPENAI_CLIENT_TOOLS_WORKER: "0" };
+      for (const key of Object.keys(env)) if (key.startsWith("PI_APPLICATION_") || key === "PI_API_WORKER" || key === "PI_PROFILE_DISCOVER_TOOLS") delete env[key];
+      return { command: pi.command, args: [...pi.args, "profile", profile, "--mode", "rpc", "--no-session"], cwd: api.profiles.directory(profile), env };
+    };
+    const clientTools = new ClientToolsRuntime({
+      settings: async (profile) => {
+        try { return await api.profiles.readSettings(profile); }
+        catch (error) { if ((error as { status?: number }).status === 404) throw new CompatibilityError("The requested Pi profile does not exist.", "model", 404, "model_not_found"); throw error; }
+      },
+      launch: compatibilityLaunch,
+    });
+    server.addHook("preClose", () => clientTools.close());
     registerCompatibilityRoutes(server, {
+      clientTools,
       authorized: (authorization) => authorized({ headers: { authorization } } as FastifyRequest, config.apiToken),
       profiles: () => api.profiles.list(),
       validateProfile: async (profile) => {
@@ -670,11 +686,9 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
         }
       },
       execute: async (request, emit, signal) => {
-        const pi = piCommand();
-        const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: options.agentDir, PI_PROFILE_ROOT: options.agentDir, PI_OPENAI_WORKER: "1" };
-        for (const key of Object.keys(env)) if (key.startsWith("PI_APPLICATION_") || key === "PI_API_WORKER" || key === "PI_PROFILE_DISCOVER_TOOLS") delete env[key];
+        const launch = compatibilityLaunch(request.profile);
         try {
-          return await executeWorker(pi.command, [...pi.args, "profile", request.profile, "--mode", "rpc", "--no-session"], { cwd: api.profiles.directory(request.profile), env }, request, emit, signal);
+          return await executeWorker(launch.command, launch.args, { cwd: launch.cwd, env: launch.env }, request, emit, signal);
         } catch (error) {
           if (!signal.aborted) console.error(`[pi-api] Compatibility execution failed for profile ${request.profile} (${error instanceof CompatibilityError ? error.code : "worker_error"}).`);
           throw error;

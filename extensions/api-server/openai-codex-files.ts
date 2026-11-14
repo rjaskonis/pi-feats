@@ -16,9 +16,9 @@ export function canAttemptVisualInput(model: { api?: string; input?: readonly st
 
 type WirePart = Record<string, unknown>;
 
-function nativeUserImageCount(payload: unknown): number {
+function nativeUserImageCount(payload: unknown, toolImages = false): number {
   if (!payload || typeof payload !== "object" || !("input" in payload) || !Array.isArray(payload.input)) return 0;
-  return payload.input.reduce((count: number, item: any) => count + (item?.role === "user" && Array.isArray(item.content) ? item.content.filter((part: any) => part?.type === "input_image" && [part.image_url, part.file_id].some((value) => typeof value === "string" && value.length > 0)).length : 0), 0);
+  return payload.input.reduce((count: number, item: any) => count + ((item?.role === "user" && Array.isArray(item.content) ? item.content : toolImages && item?.type === "function_call_output" && Array.isArray(item.output) ? item.output : []).filter((part: any) => part?.type === "input_image" && [part.image_url, part.file_id].some((value) => typeof value === "string" && value.length > 0)).length), 0);
 }
 
 /** Native PDF ingestion includes page images, so image policy still applies. */
@@ -79,7 +79,7 @@ export class CodexFileBindings {
   }
 
   /** Never re-add raw files after a profile hook filters or rewrites its input. */
-  validatePolicyResult(before: unknown, after: unknown): void {
+  validatePolicyResult(before: unknown, after: unknown, toolImages = false): void {
     const files = (payload: unknown): Map<string, number> => {
       const counts = new Map<string, number>();
       if (!payload || typeof payload !== "object" || !("input" in payload) || !Array.isArray(payload.input)) return counts;
@@ -88,7 +88,7 @@ export class CodexFileBindings {
       }
       return counts;
     };
-    if (nativeUserImageCount(after) < nativeUserImageCount(before)) throw attachmentError("native_image_context_missing");
+    if (nativeUserImageCount(after, toolImages) < nativeUserImageCount(before, toolImages)) throw attachmentError("native_image_context_missing");
     const expected = files(before), retained = files(after);
     for (const [filename, count] of expected) if ((retained.get(filename) ?? 0) < count) throw attachmentError("native_file_context_missing");
   }
@@ -103,7 +103,7 @@ export class CodexFileBindings {
 export type CodexFileBridge = { assertDelivered(): void; failure(): CompatibilityError | undefined; dispose(): void };
 
 /** Wrap all SDK stream calls, including automatic compaction, without replacing auth or agent tools. */
-export function installCodexFileBridge(session: AgentSession, request: CompletionRequest, signal: AbortSignal): CodexFileBridge {
+export function installCodexFileBridge(session: AgentSession, request: CompletionRequest, signal: AbortSignal, bridgeOptions?: { toolImages?: boolean }): CodexFileBridge {
   const bindings = new CodexFileBindings(request);
   const original = session.agent.streamFunction;
   const visualInput = request.messages.some((message) => message.images?.length);
@@ -111,21 +111,27 @@ export function installCodexFileBridge(session: AgentSession, request: Completio
   const wrapped: typeof original = (model, context, options) => {
     // Request-local capability metadata prevents the SDK from downgrading user
     // images to text placeholders. Never mutate the selected/catalog model.
-    const requestModel = visualInput && model.api === CODEX_FILE_API && !model.input.includes("image") ? { ...model, input: [...model.input, "image" as const] } : model;
-    const expectedImages = model.api === CODEX_FILE_API ? context.messages.reduce((count, message) => count + (message.role === "user" && Array.isArray(message.content) ? message.content.filter((part) => part.type === "image").length : 0), 0) : 0;
+    const contextImages = bridgeOptions?.toolImages && context.messages.some((message) => (message.role === "user" || message.role === "toolResult") && Array.isArray(message.content) && message.content.some((part) => part.type === "image"));
+    const requestModel = (visualInput || contextImages) && model.api === CODEX_FILE_API && !model.input.includes("image") ? { ...model, input: [...model.input, "image" as const] } : model;
+    const expectedImages = model.api === CODEX_FILE_API ? context.messages.reduce((count, message) => count + ((message.role === "user" || (bridgeOptions?.toolImages && message.role === "toolResult")) && Array.isArray(message.content) ? message.content.filter((part) => part.type === "image").length : 0), 0) : 0;
     return original(requestModel, context, {
       ...options,
       onPayload: async (payload, physicalModel) => {
         signal.throwIfAborted(); options?.signal?.throwIfAborted();
         try {
-          if (nativeUserImageCount(payload) < expectedImages) throw attachmentError("native_image_context_missing");
+          if (nativeUserImageCount(payload, bridgeOptions?.toolImages) < expectedImages) throw attachmentError("native_image_context_missing");
           const expanded = bindings.inject(payload, physicalModel, options?.sessionId === undefined || options.sessionId === session.sessionId);
           // Snapshot expected parts because a policy hook may mutate its argument.
           const expected = expanded && typeof expanded === "object" && "input" in expanded && Array.isArray(expanded.input)
-            ? { input: expanded.input.map((item: any) => item && typeof item === "object" && Array.isArray(item.content) ? { ...item, content: item.content.map((part: any) => part && typeof part === "object" ? { ...part } : part) } : item) } : expanded;
+            ? { input: expanded.input.map((item: any) => {
+              if (!item || typeof item !== "object") return item;
+              const copy = { ...item };
+              for (const key of ["content", "output"]) if (Array.isArray(copy[key])) copy[key] = copy[key].map((part: any) => part && typeof part === "object" ? { ...part } : part);
+              return copy;
+            }) } : expanded;
           const transformed = await options?.onPayload?.(expanded, physicalModel);
           const body = transformed === undefined ? expanded : transformed;
-          bindings.validatePolicyResult(expected, body);
+          bindings.validatePolicyResult(expected, body, bridgeOptions?.toolImages);
           failure = undefined;
           return body;
         } catch (error) {
@@ -135,7 +141,7 @@ export function installCodexFileBridge(session: AgentSession, request: Completio
       },
     });
   };
-  if (bindings.count || visualInput) session.agent.streamFunction = wrapped;
+  if (bindings.count || visualInput || bridgeOptions?.toolImages) session.agent.streamFunction = wrapped;
   return {
     assertDelivered: () => { if (failure) throw failure; bindings.assertDelivered(); },
     failure: () => failure,

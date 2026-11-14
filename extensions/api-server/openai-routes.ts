@@ -1,10 +1,13 @@
 /** OpenAI-compatible HTTP endpoints; protocol framing is independent of Pi execution. */
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { randomUUID } from "node:crypto";
+import { handleClientToolResponse } from "./openai-client-routes.ts";
+import type { ClientToolsRuntime } from "./openai-client-runtime.ts";
 import { OPENAI_BODY_BYTES } from "../lib/openai-limits.ts";
 import { CompatibilityError, chatUsage, errorBody, normalizeRequest, outputMessage, responseObject, type CompletionRequest, type CompletionResult, type ExecutionEvent } from "./openai-contract.ts";
 
 export type CompatibilityBackend = {
+  clientTools?: ClientToolsRuntime;
   authorized(authorization: string | undefined): boolean;
   profiles(): Promise<Array<{ name: string }>>;
   validateProfile(profile: string): Promise<void>;
@@ -42,7 +45,13 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
     routes.get("/models", async () => ({ object: "list", data: (await backend.profiles()).map(({ name }) => ({ id: name, object: "model", created: 0, owned_by: "pi" })) }));
     for (const protocol of ["chat", "responses"] as const) {
       routes.post(protocol === "chat" ? "/chat/completions" : "/responses", { bodyLimit: OPENAI_BODY_BYTES }, async (request, reply) => {
-        const input = normalizeRequest(request.body, protocol);
+        let legacy: CompletionRequest | undefined;
+        if (protocol === "responses" && backend.clientTools) {
+          const selected = await backend.clientTools.select(request.body);
+          if (selected.client) return handleClientToolResponse(request, reply, selected.client, backend.clientTools, writeSse);
+          legacy = selected.legacy;
+        }
+        const input = legacy ?? normalizeRequest(request.body, protocol);
         await backend.validateProfile(input.profile);
         const controller = new AbortController();
         const disconnected = () => { if (!reply.raw.writableEnded) controller.abort(); };

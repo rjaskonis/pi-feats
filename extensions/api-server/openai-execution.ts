@@ -1,5 +1,5 @@
 /** Shared ephemeral Pi execution, with a structured subprocess event channel. */
-import type { AgentSession, AgentSessionEvent, ModelRuntime as ModelRuntimeType, SessionManager as SessionManagerType } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, AgentSessionEvent, ModelRuntime as ModelRuntimeType, SessionManager as SessionManagerType, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { prepareAttachments, extractPreparedDocuments } from "./openai-attachments.ts";
@@ -107,8 +107,18 @@ export async function executeSession(session: AgentSession, request: CompletionR
   }
 }
 
+export type CompatibilityWorkerHooks = {
+  readRequest(signal: AbortSignal): Promise<CompletionRequest>;
+  write(frame: unknown): void;
+  factory: ExtensionFactory;
+  attachmentBudget: { count: number; bytes: number };
+  prepare(request: CompletionRequest, host: typeof import("@earendil-works/pi-coding-agent"), settings: import("@earendil-works/pi-coding-agent").SettingsManager, signal: AbortSignal): Promise<void>;
+  restore?(manager: SessionManagerType, request: CompletionRequest): Array<{ id: string; index: number }>;
+  started(session: AgentSession, request: CompletionRequest, host: typeof import("@earendil-works/pi-coding-agent")): Promise<void>;
+};
+
 /** Run inside the existing profile launcher (and Nono when enabled). */
-export async function runCompatibilityWorker(host?: typeof import("@earendil-works/pi-coding-agent")): Promise<void> {
+export async function runCompatibilityWorker(host?: typeof import("@earendil-works/pi-coding-agent"), hooks?: CompatibilityWorkerHooks): Promise<void> {
   // Disable worker dispatch when the SDK reloads the shared API extension.
   process.env.PI_OPENAI_WORKER = "running";
   for (const key of Object.keys(process.env)) if (key.startsWith("PI_APPLICATION_") || key === "PI_API_WORKER" || key === "PI_PROFILE_DISCOVER_TOOLS") delete process.env[key];
@@ -116,30 +126,34 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
   const abort = () => controller.abort();
   process.once("SIGTERM", abort);
   process.once("SIGINT", abort);
-  const write = (value: unknown) => {
+  const write = hooks?.write ?? ((value: unknown) => {
     if (process.stdout.writableLength > 1024 * 1024) throw new CompatibilityError("The response consumer is too slow.", null, 502, "slow_consumer");
     process.stdout.write(`${WORKER_EVENT_PREFIX}${JSON.stringify(value)}\n`);
-  };
+  });
   let session: AgentSession | undefined;
   let nativeFiles: CodexFileBridge | undefined;
   let modelRuntime: ModelRuntimeType | undefined;
   try {
-    let input = "", inputBytes = 0;
-    process.stdin.setEncoding("utf8");
-    for await (const chunk of process.stdin) {
-      inputBytes += Buffer.byteLength(chunk);
-      if (inputBytes > OPENAI_BODY_BYTES + 1_048_576) throw new CompatibilityError("Request is too large.", null, 413);
-      input += String(chunk);
+    let rawRequest: CompletionRequest;
+    if (hooks) rawRequest = await hooks.readRequest(controller.signal);
+    else {
+      let input = "", inputBytes = 0;
+      process.stdin.setEncoding("utf8");
+      for await (const chunk of process.stdin) {
+        inputBytes += Buffer.byteLength(chunk);
+        if (inputBytes > OPENAI_BODY_BYTES + 1_048_576) throw new CompatibilityError("Request is too large.", null, 413);
+        input += String(chunk);
+      }
+      rawRequest = JSON.parse(input) as CompletionRequest;
     }
-    const rawRequest = JSON.parse(input) as CompletionRequest;
-    input = "";
-    let request = await prepareAttachments(rawRequest, controller.signal, { documents: "defer" });
+    let request = await prepareAttachments(rawRequest, controller.signal, { documents: "defer", ...(hooks ? { budget: hooks.attachmentBudget } : {}) });
     const { createAgentSession, createCodemodeExtension, createToolSearchExtension, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, resizeImage, formatDimensionNote } = host ?? await import("@earendil-works/pi-coding-agent");
     const { join } = await import("node:path");
     const agentDir = process.env.PI_CODING_AGENT_DIR!;
     const cwd = process.cwd();
     const settingsManager = SettingsManager.create(cwd, agentDir);
     if (request.messages.some((message) => message.images?.length) && settingsManager.getBlockImages()) throw attachmentError("image_input_disabled");
+    if (hooks) await hooks.prepare(request, host ?? await import("@earendil-works/pi-coding-agent"), settingsManager, controller.signal);
     const additionalExtensionPaths: string[] = [];
     for (let i = 2; i < process.argv.length; i++) {
       if (process.argv[i] === "--extension" || process.argv[i] === "-e") additionalExtensionPaths.push(process.argv[++i]);
@@ -151,12 +165,13 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
         { name: "codemode", builtin: true, factory: createCodemodeExtension({ mode: "on" }) },
         { name: "tool-search", builtin: true, factory: createToolSearchExtension() },
         { name: "mcp", builtin: true, factory: createMcpExtension() },
+        ...(hooks ? [hooks.factory] : []),
       ],
       ...(instructions.length ? { appendSystemPrompt: instructions } : {}) });
     await loader.reload();
     if (loader.getExtensions().errors.length) throw new Error("Profile extension initialization failed.");
     const manager = SessionManager.inMemory(cwd);
-    const restoredInputs = restoreHistory(manager, request);
+    const restoredInputs = hooks?.restore ? hooks.restore(manager, request) : restoreHistory(manager, request);
     const runtime = modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json"), allowModelNetwork: false });
     controller.signal.throwIfAborted();
     session = (await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader: loader, sessionManager: manager, modelRuntime: runtime })).session;
@@ -190,7 +205,8 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     }
     if (restoredInputs.length) session.refreshContext();
     await session.bindExtensions({ mode: "rpc", onError: () => { process.stderr.write("OpenAI worker extension failed.\n"); } });
-    if (request.messages.some((message) => message.documents?.length) || (session.model?.api === CODEX_FILE_API && request.messages.some((message) => message.images?.length))) nativeFiles = installCodexFileBridge(session, request, controller.signal);
+    if (request.messages.some((message) => message.documents?.length) || (session.model?.api === CODEX_FILE_API && (hooks || request.messages.some((message) => message.images?.length)))) nativeFiles = installCodexFileBridge(session, request, controller.signal, { toolImages: !!hooks });
+    if (hooks) await hooks.started(session, request, host ?? await import("@earendil-works/pi-coding-agent"));
     const result = await executeSession(session, request, write, controller.signal);
     nativeFiles?.assertDelivered();
     session = undefined;

@@ -200,9 +200,9 @@ export async function extractDocument(bytes: Buffer, mimeType: string, filename:
 }
 
 /** Sources never become local paths or tool calls; native images and extracted text stay request-scoped. */
-export async function prepareAttachments(request: CompletionRequest, signal: AbortSignal, options: { documents?: "extract" | "defer" } = {}): Promise<CompletionRequest> {
+export async function prepareAttachments(request: CompletionRequest, signal: AbortSignal, options: { documents?: "extract" | "defer"; budget?: AttachmentBudget } = {}): Promise<CompletionRequest> {
   const messages: CompletionRequest["messages"] = [];
-  const budget: AttachmentBudget = { count: 0, bytes: 0 };
+  const budget: AttachmentBudget = options.budget ?? { count: 0, bytes: 0 };
   let characters = request.instructions?.length ?? 0;
   for (const message of request.messages) {
     let content = message.content;

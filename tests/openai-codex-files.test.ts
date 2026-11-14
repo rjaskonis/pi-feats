@@ -131,6 +131,22 @@ test("file-filtering policy hooks cannot be bypassed by reattaching raw document
   assert.throws(() => bridge.assertDelivered()); bridge.dispose();
 });
 
+test("client tool images survive stale Codex metadata and cannot be silently stripped by payload hooks", async () => {
+  const request = normalizeRequest({ model: "support", input: "Read client file" }, "responses");
+  const model = { api: CODEX_FILE_API, input: ["text"] };
+  const context = { messages: [{ role: "toolResult", content: [{ type: "image", mimeType: "image/png", data: pngDataUrl.split(",")[1] }] }] };
+  const original = async (physical: any, _context: any, options: any) => {
+    assert.ok(physical.input.includes("image"));
+    return options.onPayload({ input: [{ type: "function_call_output", call_id: "native_call", output: [{ type: "input_image", image_url: pngDataUrl }] }] }, physical);
+  };
+  const session = { sessionId: "client-session", agent: { streamFunction: original } };
+  const bridge = installCodexFileBridge(session as any, request, signal(), { toolImages: true });
+  const retained = await session.agent.streamFunction(model, context, {});
+  assert.equal(retained.input[0].output[0].image_url, pngDataUrl); assert.deepEqual(model.input, ["text"]);
+  await assert.rejects(session.agent.streamFunction(model, context, { onPayload: (body: any) => { body.input[0].output.splice(0); return body; } }), (error: any) => error.code === "native_image_context_missing");
+  assert.throws(() => bridge.assertDelivered()); bridge.dispose();
+});
+
 test("fallback extraction still works for non-Codex profiles and validates file detail", async () => {
   const normalized = normalizeRequest({ model: "support", input: [{ role: "user", content: [{ type: "input_file", filename: "notes.txt", file_data: Buffer.from("Fallback fixture text").toString("base64") }] }] }, "responses");
   const deferred = await prepareAttachments(normalized, signal(), { documents: "defer" });

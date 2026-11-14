@@ -1,3 +1,4 @@
+import { clientToolPolicy } from "./openai-client-contract.ts";
 import { existsSync } from "node:fs";
 import { copyFile, cp, mkdir, readFile, readlink, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
@@ -13,7 +14,7 @@ type PolicyKey = "enabledTools" | "enabledSkills" | "enabledProfileSkills" | "en
 type SkillSources = { shared?: boolean; profile?: boolean };
 type SkillResourceSource = "shared" | "profile" | "package";
 export type ProfileMetadata = { description: string; tags: string[] };
-type ProfilePolicy = Partial<Record<PolicyKey, string[]>> & Partial<ProfileMetadata> & { skillSources?: SkillSources; contextMemory?: { mode: "none" } | { mode: "file"; target: "profile" | "identity" } | { mode: "handler"; handler: string } };
+type ProfilePolicy = Partial<Record<PolicyKey, string[]>> & Partial<ProfileMetadata> & { clientTools?: { enabled?: boolean; allowedTools?: string[]; timeoutMs?: number; maxCalls?: number }; skillSources?: SkillSources; contextMemory?: { mode: "none" } | { mode: "file"; target: "profile" | "identity" } | { mode: "handler"; handler: string } };
 export type ProfileSettings = Record<string, unknown> & { profile?: ProfilePolicy; sandbox?: boolean };
 export type Resource = { name: string; kind: ResourceKind; path?: string; source: "builtin" | "shared" | "profile" | "extension" | "package"; package?: string; enabled: boolean; protected?: boolean };
 export type Package = { name: string; version?: string; description?: string; enabled: boolean; installed: boolean };
@@ -244,6 +245,9 @@ export class ProfileStore {
   }
 
   async writeSettings(name: string, settings: ProfileSettings): Promise<ProfileSettings> {
+    if (settings.profile?.clientTools !== undefined) {
+      try { clientToolPolicy(settings); } catch { throw Object.assign(new Error("Invalid profile client-tool policy."), { status: 400 }); }
+    }
     const normalized = await this.materializeResources(name, settings);
     await mkdir(this.directory(name), { recursive: true });
     await writeFile(this.settingsPath(name), `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
