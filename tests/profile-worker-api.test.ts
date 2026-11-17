@@ -47,10 +47,22 @@ export default function(pi) {
   });
   pi.on("session_shutdown", () => { if (brokenCleanup) throw new Error("Fixture cleanup failed"); });
 }`);
+  const external = await mkdtemp(join(homedir(), ".cache", "pi-worker-external-extension-"));
+  t.after(() => rm(external, { recursive: true, force: true }));
+  await mkdir(join(external, "lib"));
+  await writeFile(join(external, "lib", "helper.ts"), 'export const marker = "EXTERNAL_EXTENSION_LOADED";');
+  const externalEntry = join(external, "extension.ts");
+  await writeFile(externalEntry, `import { marker } from "./lib/helper.ts";
+import { writeFileSync } from "node:fs";
+export default function(pi) {
+  let writable = false;
+  try { writeFileSync(${JSON.stringify(join(external, "write-probe.txt"))}, "probe"); writable = true; } catch {}
+  pi.on("before_agent_start", (event) => ({ systemPrompt: event.systemPrompt + "\\n" + marker + ";EXTERNAL_WRITABLE=" + writable }));
+}`);
   const manifest = JSON.parse(await readFile(resolve("package.json"), "utf8"));
   // Exercise every shipped extension's real startup/shutdown lifecycle. Browser,
   // Composio and other external-service tools are never invoked by this fixture.
-  const settings = { extensions: [...manifest.pi.extensions.map((path: string) => resolve(path)), probe], defaultProvider: "fixture", defaultModel: "fixture", defaultThinkingLevel: "off", compaction: { enabled: false } };
+  const settings = { extensions: [...manifest.pi.extensions.map((path: string) => resolve(path)), probe, externalEntry], defaultProvider: "fixture", defaultModel: "fixture", defaultThinkingLevel: "off", compaction: { enabled: false } };
   await writeFile(join(root, "settings.json"), JSON.stringify(settings));
   await writeFile(join(root, ".env"), "PI_API_WORKER_IDLE_TIMEOUT_SECONDS=1\n");
   await writeFile(join(root, "api-server.json"), JSON.stringify({ host: "127.0.0.1", port: 0, apiToken: "fixture-token" }));
@@ -71,6 +83,8 @@ export default function(pi) {
   const chat = await post("/v1/chat/completions", { model: "support", messages: [{ role: "user", content: "CHAT_MARKER" }] });
   const coldMs = performance.now() - coldStart;
   const firstPid = pid(); assert.ok(firstPid);
+  assert.ok(wire().includes("EXTERNAL_EXTENSION_LOADED"));
+  if (process.env.PI_OPENAI_TEST_NONO === "1") assert.ok(wire().includes("EXTERNAL_WRITABLE=false"));
   const warmStart = performance.now();
   const chatStream = await post("/v1/chat/completions", { model: "support", stream: true, messages: [{ role: "user", content: "WARM_CHAT_MARKER" }] });
   const warmMs = performance.now() - warmStart;

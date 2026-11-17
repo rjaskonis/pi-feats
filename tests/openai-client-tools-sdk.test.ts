@@ -3,8 +3,9 @@ import test from "node:test";
 import { createServer } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { sdkEntryForCli } from "../extensions/api-server/openai-worker-paths.mjs";
 
 const cli = process.env.PI_OPENAI_TEST_CLI;
 for (const mode of ["parallel", "sequential"] as const) test(`SDK client tool promises preserve internal execution in ${mode} batches`, { skip: !cli, timeout: 60_000 }, async (t) => {
@@ -30,7 +31,7 @@ for (const mode of ["parallel", "sequential"] as const) test(`SDK client tool pr
   t.after(() => new Promise<void>((resolve) => provider.close(() => resolve())));
   const port = (provider.address() as { port: number }).port;
   await writeFile(join(root, "models.json"), JSON.stringify({ providers: { fixture: { api: "openai-completions", apiKey: "fixture", baseUrl: `http://127.0.0.1:${port}/v1`, models: [{ id: "fixture", name: "Fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }] } } }));
-  const host = await import(pathToFileURL(join(dirname(cli!), "index.js")).href);
+  const host = await import(pathToFileURL(sdkEntryForCli(cli!)).href);
   const settingsManager = host.SettingsManager.inMemory({ defaultProvider: "fixture", defaultModel: "fixture", compaction: { enabled: false }, retry: { enabled: false } });
   const modelRuntime = await host.ModelRuntime.create({ modelsPath: join(root, "models.json"), authPath: join(root, "auth.json"), allowModelNetwork: false });
   const pending: Array<{ params: any; resolve: (value: any) => void }> = [];

@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
@@ -70,7 +70,14 @@ export function nonoPolicy(profileDir: string, runtimeEntry: string, skillSource
         // Named profiles reference this shared catalog through models.json;
         // Nono must permit resolving the symlink target in the root runtime.
         join(agentDir, "models.json"),
-        ...sharedRuntimeSources,
+        // External file entrypoints can import adjacent code/assets. Never
+        // broaden a file grant to the agent root, its ancestors, or profiles.
+        ...sharedRuntimeSources.map((source) => {
+          if (!/\.[cm]?[jt]s$/.test(source)) return source;
+          const directory = dirname(source), profiles = join(agentDir, "profiles");
+          if (dirname(directory) === directory || directory === agentDir || agentDir.startsWith(`${directory}${sep}`) || directory === profiles || directory.startsWith(`${profiles}${sep}`)) return source;
+          return directory;
+        }),
         ...(skillSources.shared ? [join(agentDir, "skills")] : []),
         // SSH resolves the current UID through these public account maps.
         // This does not expose credentials or private keys.

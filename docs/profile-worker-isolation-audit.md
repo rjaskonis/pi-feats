@@ -79,7 +79,13 @@ mock. The lifecycle review also covers these extension-specific owners:
   behavior, SSE, webhooks, identity and transient-memory separation, native
   transcript inspection, cleanup failure, dirty-resource retirement and custom
   provider retirement. They verify allowed workspace reads and denied neighbor
-  reads outside `/tmp`.
+  reads outside `/tmp`. An external file-entry extension imports an adjacent
+  module successfully while writes to its installation directory remain denied.
+  File grants never expand to the agent root, its ancestors or profile directories.
+- Worker bootstrap resolves the host SDK from the owning Pi package, not the
+  CLI's immediate directory. Path tests cover unbundled `dist/cli.js`, bundled
+  `dist/bundle/cli.js` and the installed `.bin/pi` symlink; the HTTP fixture also
+  supports running against the installed bundled launcher.
 - Runtime tests cover capacity, dynamic expiry, configuration invalidation,
   continuations, active/queued cancellation, crash, shutdown and no replay.
 - Profile CLI validation checks create/skills/extensions/packages through the
