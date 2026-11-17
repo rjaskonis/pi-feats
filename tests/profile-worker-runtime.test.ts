@@ -36,6 +36,17 @@ test("resource signatures detect configuration/code changes but ignore idle-time
   await assert.rejects(profileWorkerVersion(f.root, f.root), (error: any) => error.code === "worker_configuration_error" && !error.message.includes("MALFORMED_PRIVATE_VALUE"));
 });
 
+test("resident and client-tool transports preserve safe provider authentication failures", async (t) => {
+  const f = await fixture(t);
+  const check = (error: any) => error.status === 424 && error.code === "provider_authentication_failed" && !error.message.includes("PRIVATE_TOKEN_MARKER");
+  await assert.rejects(f.run("provider-auth-failure"), check);
+  const client = new ClientToolsRuntime({ settings: async () => ({ profile: { clientTools: { enabled: true, allowedTools: ["view_file"] } } }), launch: f.launch, transport: profile => f.runtime.clientTransport(profile) });
+  t.after(() => client.close());
+  const input = (await client.select({ model: "support", input: "provider-auth-failure", tools: [{ type: "function", name: "view_file", parameters: { type: "object", properties: {} } }] })).client!;
+  await assert.rejects(client.execute(input, async () => {}, new AbortController().signal), check);
+  assert.ok((await f.run()).text);
+});
+
 test("profile lanes reuse one process, serialize concurrent boot and isolate profiles", async (t) => {
   const f = await fixture(t);
   const values = await Promise.all(Array.from({ length: 6 }, () => f.run()));

@@ -1,7 +1,7 @@
 /** Bounded, profile-scoped continuation actors; ordinary requests never allocate one. */
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { CompatibilityError, normalizeRequest, type ExecutionEvent, type ConversationMessage, type CompletionRequest } from "./openai-contract.ts";
-import { attachmentFailures, attachmentError } from "./openai-errors.ts";
+import { attachmentFailures, attachmentError, providerFailure } from "./openai-errors.ts";
 import { WORKER_EVENT_PREFIX } from "./openai-execution.ts";
 import { OPENAI_BODY_BYTES } from "../lib/openai-limits.ts";
 import { CLIENT_LIMITS, acceptedClientTools, clientError, clientToolPolicy, clientOutputFingerprint, ensureInitialClientRequest, fingerprint, normalizeClientRequest, policyFingerprint, validateClientArguments, type ClientCall, type ClientLeg, type ClientRequest, type ClientOutput, type ClientToolPolicy } from "./openai-client-contract.ts";
@@ -11,6 +11,8 @@ export type ClientRuntimeOptions = { settings(profile: string): Promise<unknown>
 type Emit = (event: ExecutionEvent) => Promise<void>;
 type LegWaiter = { emit: Emit; signal: AbortSignal; abort(): void; resolve(value: ClientLeg): void; reject(error: Error): void; ready: boolean; text: string };
 function safeFailure(code: unknown): CompatibilityError {
+  const authentication = providerFailure(code);
+  if (authentication) return authentication;
   if (typeof code === "string" && Object.hasOwn(attachmentFailures, code)) return attachmentError(code);
   const known: Record<string, [number, string]> = {
     client_tool_name_conflict: [400, "A client function conflicts with a profile tool."],

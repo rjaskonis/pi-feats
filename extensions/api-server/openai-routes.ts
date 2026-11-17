@@ -116,7 +116,7 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
           const failure = errorBody(error).error;
           try {
             if (protocol === "chat") { await data({ error: failure }); await data("[DONE]"); }
-            else await event("response.failed", { response: { ...responseObject(input, id, created, [outputMessage(itemId, partial, "incomplete")]), status: "failed", error: { code: "server_error", message: failure.message } } });
+            else await event("response.failed", { response: { ...responseObject(input, id, created, [outputMessage(itemId, partial, "incomplete")]), status: "failed", error: failure } });
             reply.raw.end();
           } catch { controller.abort(); reply.raw.destroy(); }
         } finally {

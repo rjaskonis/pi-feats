@@ -11,7 +11,7 @@ import { globSync } from "node:fs";
 import { extensionCatalog } from "../lib/extension-catalog.ts";
 import { parseProfileEnv } from "../lib/profile-env.ts";
 import { CompatibilityError, type CompletionResult, type ExecutionEvent } from "./openai-contract.ts";
-import { attachmentError, attachmentFailures } from "./openai-errors.ts";
+import { attachmentError, attachmentFailures, providerFailure } from "./openai-errors.ts";
 import { WORKER_EVENT_PREFIX } from "./openai-execution.ts";
 import type { ClientLaunch } from "./openai-client-runtime.ts";
 import type { ProfileJob } from "./profile-worker.ts";
@@ -152,7 +152,7 @@ class Worker {
           const r = value.result;
           if (!p.ready || !r || r.text !== p.text || !["stop", "length"].includes(r.finishReason) || !r.usage || ["input", "output", "cached", "reasoning"].some((key) => !Number.isFinite(r.usage[key]) || r.usage[key] < 0)) throw failure();
           p.result = r;
-        } else if (value.type === "failure") p.error = Object.hasOwn(attachmentFailures, value.code) ? attachmentError(value.code) : new CompatibilityError("Pi execution failed.", null, 502, ["output_rewritten", "output_limit_exceeded", "slow_consumer", "response_missing", "profile_model_unavailable"].includes(value.code) ? value.code : "generation_failed");
+        } else if (value.type === "failure") p.error = providerFailure(value.code) ?? (Object.hasOwn(attachmentFailures, value.code) ? attachmentError(value.code) : new CompatibilityError("Pi execution failed.", null, 502, ["output_rewritten", "output_limit_exceeded", "slow_consumer", "response_missing", "profile_model_unavailable"].includes(value.code) ? value.code : "generation_failed"));
         else throw failure();
       }
     }

@@ -22,6 +22,10 @@ test("HTTP compatibility and Direct share a resident profile process, preserve s
     const body = JSON.parse(source);
     if (req.url === "/webhook") { webhook(body); res.end("ok"); return; }
     calls.push(body);
+    if (JSON.stringify(body.messages).includes("PROVIDER_AUTH_REJECT_MARKER")) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "Invalid API key: PRIVATE_PROVIDER_TOKEN_MARKER", type: "invalid_request_error", code: "invalid_api_key" } })); return;
+    }
     res.writeHead(200, { "content-type": "text/event-stream" });
     const frame = (delta: unknown, finish_reason: unknown, usage?: unknown) => res.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 0, model: "fixture", choices: [{ index: 0, delta, finish_reason }], ...(usage ? { usage } : {}) })}\n\n`);
     const messages = JSON.stringify(body.messages);
@@ -148,5 +152,14 @@ export default function(pi) {
   const empty = await post("/api/message/app/fixture", { identityKey: "alice", sessionType: "stateless", message: "READ_OWN_PROBE EMPTY_RESPONSE_MARKER" }, "POST", 502);
   // The existing Application HTTP envelope maps status-bearing errors to BAD_REQUEST.
   assert.equal(empty.error.code, "BAD_REQUEST"); assert.match(empty.error.message, /without an assistant response/);
+  const authentication = await post("/v1/chat/completions", { model: "support", messages: [{ role: "user", content: "PROVIDER_AUTH_REJECT_MARKER" }] }, "POST", 424);
+  assert.equal(authentication.error.code, "provider_authentication_failed");
+  assert.equal(authentication.error.type, "authentication_error");
+  assert.ok(!JSON.stringify(authentication).includes("PRIVATE_PROVIDER_TOKEN_MARKER"));
+  const failedStream = await post("/v1/responses", { model: "support", input: "PROVIDER_AUTH_REJECT_MARKER", stream: true });
+  assert.ok(failedStream.includes("response.failed"));
+  assert.ok(failedStream.includes("provider_authentication_failed"));
+  assert.ok(!failedStream.includes("PRIVATE_PROVIDER_TOKEN_MARKER"));
+  await post("/v1/responses", { model: "support", input: "AFTER_AUTH_FAILURE" });
   t.diagnostic(`Local mock HTTP timings: cold=${coldMs.toFixed(0)}ms warm=${warmMs.toFixed(0)}ms after-expiry=${restartMs.toFixed(0)}ms (not model latency).`);
 });

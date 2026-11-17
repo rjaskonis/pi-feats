@@ -16,6 +16,7 @@ input.on('line', async (line) => {
   frame({ type: 'ready' });
   const text = request.messages.at(-1).content;
   if (text === 'crash') { process.stderr.write('secret-provider-key\n'); process.exit(2); }
+  if (text === 'provider-auth-failure') { frame({ type: 'failure', code: 'provider_authentication_failed', message: 'PRIVATE_TOKEN_MARKER' }); frame({ type: 'idle' }); return; }
   if (text === 'hang') return;
   if (message.job.client) {
     waiting = true;

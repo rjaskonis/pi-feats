@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { prepareAttachments, extractPreparedDocuments } from "./openai-attachments.ts";
 import { CODEX_FILE_API, canAttemptVisualInput, hasNativePdfInput, installCodexFileBridge, type CodexFileBridge } from "./openai-codex-files.ts";
-import { attachmentError, attachmentFailures } from "./openai-errors.ts";
+import { attachmentError, attachmentFailures, classifyProviderFailure, providerFailure } from "./openai-errors.ts";
 import { OPENAI_BODY_BYTES, OPENAI_ATTACHMENT_BYTES, OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
 import { CompatibilityError, type CompletionRequest, type CompletionResult, type ExecutionEvent, type TokenUsage } from "./openai-contract.ts";
 
@@ -31,7 +31,7 @@ export function restoreHistory(manager: Pick<SessionManagerType, "appendMessage"
 export async function executeSession(session: AgentSession, request: CompletionRequest, emit: (event: ExecutionEvent) => void, signal: AbortSignal, application = false): Promise<CompletionResult> {
   const usage: TokenUsage = { input: 0, output: 0, cached: 0, reasoning: 0 };
   let text = "", current = "", lastReason = "", bytes = 0, needsSeparator = false;
-  let eventError: unknown;
+  let eventError: unknown, providerError: CompatibilityError | undefined;
   const abort = () => { void session.abort().catch(() => {}); };
   const sendText = (delta: string) => {
     if (!delta) return;
@@ -55,6 +55,7 @@ export async function executeSession(session: AgentSession, request: CompletionR
       }
       if (message.role !== "assistant") return;
       lastReason = message.stopReason;
+      providerError = message.stopReason === "error" ? classifyProviderFailure(message.errorMessage) : undefined;
       const finalText = message.content.filter((part) => part.type === "text").map((part) => part.text).join("");
       // Finalized text may add a suffix, but bytes already streamed cannot be retracted.
       if (!finalText.startsWith(current)) throw new CompatibilityError("Pi rewrote already streamed output.", null, 502, "output_rewritten");
@@ -77,8 +78,10 @@ export async function executeSession(session: AgentSession, request: CompletionR
         const finalText = authoritative.content.filter((part) => part.type === "text").map((part) => part.text).join("");
         if (finalText !== current) throw new CompatibilityError("Pi rewrote already streamed output.", null, 502, "output_rewritten");
         lastReason = authoritative.stopReason;
+        providerError = authoritative.stopReason === "error" ? classifyProviderFailure(authoritative.errorMessage) : undefined;
       } else if (text) throw new CompatibilityError("Pi removed the completed output.", null, 502, "output_rewritten");
     }
+    if (lastReason === "error" && providerError) throw providerError;
     if (lastReason === "error" || lastReason === "aborted" || lastReason === "deferred") throw new CompatibilityError("Pi did not complete the response.", null, 502, "generation_failed");
     if (!text) throw new CompatibilityError("Pi completed without a text response.", null, 502, "response_missing");
     // The authoritative ledger includes compaction, retries and nested tool usage.
@@ -95,6 +98,8 @@ export async function executeSession(session: AgentSession, request: CompletionR
       }, 0);
     }
     return { text, finishReason: lastReason === "length" ? "length" : "stop", usage, ...(application ? { response: current } : {}) };
+  } catch (error) {
+    throw classifyProviderFailure(error) ?? error;
   } finally {
     signal.removeEventListener("abort", abort); unsubscribe();
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -235,7 +240,8 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     session = undefined;
     write({ type: "result", result });
   } catch (error) {
-    const failure = nativeFiles?.failure() ?? error;
+    const original = nativeFiles?.failure() ?? error;
+    const failure = classifyProviderFailure(original) ?? original;
     process.stderr.write(`OpenAI worker failed (${failure instanceof CompatibilityError ? failure.code : "runtime_error"}).\n`);
     session?.dispose();
     write({ type: "failure", code: failure instanceof CompatibilityError ? failure.code : "generation_failed" });
@@ -296,7 +302,7 @@ export async function executeWorker(command: string, args: string[], options: { 
         else if (value.type === "result") result = value.result;
         else if (value.type === "failure") {
           failure = true;
-          if (typeof value.code === "string" && (Object.hasOwn(attachmentFailures, value.code) || ["output_rewritten", "output_limit_exceeded", "slow_consumer", "generation_failed", "response_missing", "profile_model_unavailable"].includes(value.code))) failureCode = value.code;
+          if (typeof value.code === "string" && (providerFailure(value.code) || Object.hasOwn(attachmentFailures, value.code) || ["output_rewritten", "output_limit_exceeded", "slow_consumer", "generation_failed", "response_missing", "profile_model_unavailable"].includes(value.code))) failureCode = value.code;
         }
         else throw new Error("Unknown worker record.");
       }
@@ -304,6 +310,7 @@ export async function executeWorker(command: string, args: string[], options: { 
     }
     const code = await exited;
     signal.throwIfAborted();
+    if (failure && providerFailure(failureCode)) throw providerFailure(failureCode)!;
     if (failure && Object.hasOwn(attachmentFailures, failureCode)) throw attachmentError(failureCode);
     if (buffer.trim() || code !== 0 || failure || !result || !ready || typeof result.text !== "string" || !["stop", "length"].includes(result.finishReason) || !result.usage || ["input", "output", "cached", "reasoning"].some((key) => !Number.isFinite(result!.usage[key as keyof TokenUsage]) || result!.usage[key as keyof TokenUsage] < 0)) throw new CompatibilityError("Pi execution failed.", null, 502, failureCode);
     if (Buffer.byteLength(result.text) !== outputBytes || outputHash.digest("hex") !== createHash("sha256").update(result.text).digest("hex")) throw new CompatibilityError("Pi stream did not match the completed output.", null, 502, "invalid_stream");

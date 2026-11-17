@@ -68,7 +68,7 @@ export async function handleClientToolResponse(request: FastifyRequest, reply: F
     // corrected result. Transport failures must instead cancel its worker.
     if (streaming) {
       runtime.cancel(input);
-      try { await event("response.failed", { response: { ...response(partial ? [outputMessage(messageId, partial, "incomplete")] : []), status: "failed", error: { code: "server_error", message: errorBody(error).error.message } } }); reply.raw.end(); }
+      try { await event("response.failed", { response: { ...response(partial ? [outputMessage(messageId, partial, "incomplete")] : []), status: "failed", error: errorBody(error).error } }); reply.raw.end(); }
       catch { controller.abort(); reply.raw.destroy(); }
       return reply;
     }
