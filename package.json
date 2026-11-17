@@ -45,7 +45,8 @@
     "build:web:next": "cd extensions/pi-console-webui && npx --no-install next build",
     "ensure:nono": "sh scripts/install-nono.sh",
     "postinstall": "npm run ensure:nono && node scripts/ensure-console-build.mjs",
-    "test": "npm run test:extensions && npm run build:web",
+    "typecheck": "tsc -p tsconfig.extensions.json",
+    "test": "npm run typecheck && npm run test:extensions && npm run build:web",
     "test:extensions": "node --experimental-strip-types --test tests/*.test.ts"
   },
   "dependencies": {
@@ -84,9 +85,9 @@
     "ws": "^8.21.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-tui": "*",
+    "@earendil-works/pi-ai": ">=1.5.2",
+    "@earendil-works/pi-coding-agent": ">=1.5.2",
+    "@earendil-works/pi-tui": ">=1.5.2",
     "typebox": "*"
   },
   "pi": {
@@ -115,8 +116,9 @@
     "image": "https://raw.githubusercontent.com/rjaskonis/pi-feats/v0.1.4/assets/pi-feats-preview.png"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "^0.85.1",
-    "@earendil-works/pi-tui": "^0.85.1",
+    "@earendil-works/pi-ai": "^1.5.2",
+    "@earendil-works/pi-coding-agent": "^1.5.2",
+    "@earendil-works/pi-tui": "^1.5.2",
     "@types/ws": "^8.18.1",
     "typebox": "^1.3.30"
   }

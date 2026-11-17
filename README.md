@@ -190,6 +190,8 @@ The API Server is the automation and integration surface for Pi. It turns the sa
 
 The [OpenAI-compatible API](extensions/api-server/OPENAI.md) exposes profiles as model IDs through `/v1/models`, `/v1/chat/completions` and `/v1/responses`, with JSON, incremental SSE, caller-owned history and isolated stateless execution. It uses the existing API bearer token and is also available through the Console proxy at `/api/pi/v1`.
 
+API execution reuses one on-demand worker process per used profile, with a fresh session per job and the existing named-profile Nono boundary. Compatibility requests, client-tool continuations, Console chat and Direct Mode share that profile's serialized execution lane; stateful transcripts remain on disk and stateless transcripts remain request-local. Set `PI_API_WORKER_IDLE_TIMEOUT_SECONDS=600` in the root agent `.env` to control idle expiry. The setting is reread every 60 seconds; removal restores 600 seconds and invalid values keep the last valid value. Active jobs, queued requests and client-tool continuations do not expire. There is no global RAM/worker cap; each profile admits at most 64 active/queued reservations. See the API documentation for lifecycle, cancellation and memory considerations, and the [worker isolation audit](docs/profile-worker-isolation-audit.md) for cleanup ownership and conservative retirement rules.
+
 ```bash
 # Start, inspect, restart, and stop the service
 pi api start
@@ -584,7 +586,7 @@ Pi does not advance a pinned version or Git ref during a generic package update.
 Requirements:
 
 - Node.js 22 or later
-- A working Pi installation
+- Pi 1.5.2 or later
 - `curl` when Nono is not already installed
 
 The package `postinstall` script installs Nono automatically when it is missing. Nono is required only for sandboxed Profiles. If a Profile operation still finds Nono unavailable, it asks for confirmation before downloading the official installer; non-interactive runs instead show the manual installation command.

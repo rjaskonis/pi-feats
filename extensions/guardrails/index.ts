@@ -103,7 +103,7 @@ export default function (pi: ExtensionAPI) {
   let reflectionCount = 0;
 
   pi.registerMessageRenderer("guardrail-response", (message, options, theme) =>
-    new Text(theme.fg("warning", message.content), options.outputPad, 0),
+    new Text(theme.fg("warning", typeof message.content === "string" ? message.content : message.content.filter((part) => part.type === "text").map((part) => part.text).join("\n")), options.outputPad, 0),
   );
 
   pi.registerCommand("guardrails", {

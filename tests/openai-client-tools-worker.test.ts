@@ -8,11 +8,12 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import Fastify from "fastify";
 import { ClientToolsRuntime } from "../extensions/api-server/openai-client-runtime.ts";
+import { ProfileWorkerRuntime } from "../extensions/api-server/profile-worker-runtime.ts";
 import { registerCompatibilityRoutes } from "../extensions/api-server/openai-routes.ts";
 import { pngDataUrl } from "./fixtures/openai-attachments.ts";
 
 const cli = process.env.PI_OPENAI_TEST_CLI;
-for (const mode of ["parallel", "sequential", "codex", "blocked", "truncated", "collision", "failed"] as const) test(`Responses client file tools resume the same ${mode} Nono worker without replaying internal actions`, { skip: !cli, timeout: 90_000 }, async (t) => {
+for (const resident of [false, true]) for (const mode of ["parallel", "sequential", "codex", "blocked", "truncated", "collision", "failed"] as const) test(`Responses client file tools resume the same ${resident ? "resident" : "dedicated"} ${mode} Nono worker without replaying internal actions`, { skip: !cli, timeout: 90_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-client-worker-")), profile = join(root, "profiles", "support");
   await mkdir(profile, { recursive: true }); t.after(() => rm(root, { recursive: true, force: true }));
   const wireTool = mode === "collision" ? "internal_once" : "view_file";
@@ -78,7 +79,9 @@ export default function(pi) { ${mode === "failed" ? 'pi.on("tool_result",async(e
   await new Promise<void>((resolve) => provider.listen(0, "127.0.0.1", resolve)); t.after(() => new Promise<void>((resolve) => provider.close(() => resolve())));
   const port = (provider.address() as { port: number }).port;
   await writeFile(join(root, "models.json"), JSON.stringify({ providers: { fixture: { api: mode === "codex" ? "openai-codex-responses" : "openai-completions", apiKey: mode === "codex" ? `e30=.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "fixture-account" } })).toString("base64")}.test` : "local-test", baseUrl: `http://127.0.0.1:${port}/v1`, models: [{ id: "fixture", name: "Fixture", reasoning: false, input: mode === "codex" ? ["text"] : ["text", "image"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }] } } }));
-  const runtime = new ClientToolsRuntime({ settings: async () => JSON.parse(await readFile(join(profile, "settings.json"), "utf8")), launch: () => ({ command: process.execPath, args: [cli!, "--extension", extensions[0], "profile", "support", "--mode", "rpc", "--no-session"], cwd: profile, env: { PATH: process.env.PATH, HOME: process.env.HOME, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: root, PI_PROFILE_ROOT: root, PI_OPENAI_WORKER: "1" } }) });
+  const launch = () => ({ command: process.execPath, args: [cli!, "--extension", extensions[0], "profile", "support", "--mode", "rpc", "--no-session"], cwd: profile, env: { PATH: process.env.PATH, HOME: process.env.HOME, PI_OFFLINE: "1", PI_CODING_AGENT_DIR: root, PI_PROFILE_ROOT: root, PI_OPENAI_WORKER: "1" } });
+  const pool = new ProfileWorkerRuntime({ agentDir: root, launch }); t.after(() => pool.close());
+  const runtime = new ClientToolsRuntime({ settings: async () => JSON.parse(await readFile(join(profile, "settings.json"), "utf8")), launch, ...(resident ? { transport: () => pool.clientTransport("support") } : {}) });
   t.after(() => runtime.close());
   const app = Fastify(); t.after(() => app.close());
   registerCompatibilityRoutes(app, { clientTools: runtime, authorized: (header) => header === "Bearer fixture", profiles: async () => [{ name: "support" }], validateProfile: async () => {}, execute: async () => { throw new Error("Unexpected legacy execution"); } });

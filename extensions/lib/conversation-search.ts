@@ -15,7 +15,7 @@ export function searchConversationEntries(query: string, candidates: Conversatio
   const needle = normalized(query).trim();
   const terms = [...new Set(needle.split(/\s+/).filter((term) => term.length > 1))];
   if (!needle || !terms.length) return [];
-  return candidates.map((candidate) => {
+  return candidates.map((candidate): ConversationSearchResult | undefined => {
     const id = normalized(candidate.id), name = normalized(candidate.name ?? "");
     const exactId = id === needle, idMatch = !exactId && id.includes(needle), nameMatch = name.includes(needle);
     const matches = candidate.entries.map((entry) => {

@@ -7,7 +7,7 @@ import { OPENAI_BODY_BYTES } from "../lib/openai-limits.ts";
 import { CLIENT_LIMITS, acceptedClientTools, clientError, clientToolPolicy, clientOutputFingerprint, ensureInitialClientRequest, fingerprint, normalizeClientRequest, policyFingerprint, validateClientArguments, type ClientCall, type ClientLeg, type ClientRequest, type ClientOutput, type ClientToolPolicy } from "./openai-client-contract.ts";
 
 export type ClientLaunch = { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv };
-export type ClientRuntimeOptions = { settings(profile: string): Promise<unknown>; launch(profile: string): ClientLaunch; maxWorkers?: number; perProfile?: number };
+export type ClientRuntimeOptions = { settings(profile: string): Promise<unknown>; launch(profile: string): ClientLaunch; transport?(profile: string): ChildProcessWithoutNullStreams; maxWorkers?: number; perProfile?: number };
 type Emit = (event: ExecutionEvent) => Promise<void>;
 type LegWaiter = { emit: Emit; signal: AbortSignal; abort(): void; resolve(value: ClientLeg): void; reject(error: Error): void; ready: boolean; text: string };
 function safeFailure(code: unknown): CompatibilityError {
@@ -21,6 +21,10 @@ function safeFailure(code: unknown): CompatibilityError {
     client_tool_resume_conflict: [409, "The client continuation is not waiting."],
     profile_model_unavailable: [502, "The profile's configured model is unavailable."],
     context_too_large: [413, "The conversation exceeds the context limit."],
+    worker_capacity: [429, "Too many queued profile executions. Retry later."],
+    worker_unavailable: [503, "Profile execution is unavailable."],
+    worker_configuration_error: [502, "Profile execution resources could not be loaded."],
+    worker_transport_error: [502, "Pi worker execution failed. Server actions were not replayed."],
   };
   const value = typeof code === "string" ? known[code] : undefined;
   return value ? clientError(String(code), value[1], value[0]) : clientError("client_tool_execution_failed", "Pi client-tool execution failed.", 502);
@@ -52,10 +56,10 @@ class ClientActor {
   private notify: (actor: ClientActor, calls: ClientCall[]) => void;
   private removed: (actor: ClientActor) => void;
   private refreshed: () => Promise<string>;
-  constructor(initial: ClientRequest, policy: ClientToolPolicy, version: string, launch: ClientLaunch, notify: (actor: ClientActor, calls: ClientCall[]) => void, removed: (actor: ClientActor) => void, refreshed: () => Promise<string>) {
+  constructor(initial: ClientRequest, policy: ClientToolPolicy, version: string, launch: ClientLaunch | ChildProcessWithoutNullStreams, notify: (actor: ClientActor, calls: ClientCall[]) => void, removed: (actor: ClientActor) => void, refreshed: () => Promise<string>) {
     this.initial = initial; this.policy = policy; this.notify = notify; this.removed = removed; this.refreshed = refreshed;
     this.version = version;
-    this.child = spawn(launch.command, launch.args, { cwd: launch.cwd, env: { ...launch.env, PI_OPENAI_CLIENT_TOOLS_WORKER: "1" }, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
+    this.child = "stdin" in launch ? launch : spawn(launch.command, launch.args, { cwd: launch.cwd, env: { ...launch.env, PI_OPENAI_CLIENT_TOOLS_WORKER: "1" }, detached: process.platform !== "win32", stdio: ["pipe", "pipe", "pipe"] });
     this.child.stderr.resume(); this.child.stdin.on("error", () => this.cancel());
     this.done = new Promise<void>((resolve) => {
       this.child.once("error", () => { this.ended = true; this.cancel(); resolve(); });
@@ -237,7 +241,7 @@ export class ClientToolsRuntime {
     }
     ensureInitialClientRequest(input);
     if (this.actors.size >= (this.options.maxWorkers ?? CLIENT_LIMITS.workers) || [...this.actors].filter((actor) => actor.initial.request.profile === input.request.profile).length >= (this.options.perProfile ?? CLIENT_LIMITS.perProfile)) throw clientError("client_tool_capacity", "Too many active client tool executions. Retry later without replaying completed server actions.", 429);
-    const actor = new ClientActor(input, policy, version, this.options.launch(input.request.profile), (owner, calls) => { for (const call of calls) { if (this.calls.has(call.call_id)) throw new Error("Duplicate continuation ID."); this.calls.set(call.call_id, owner); } }, (owner) => {
+    const actor = new ClientActor(input, policy, version, this.options.transport?.(input.request.profile) ?? this.options.launch(input.request.profile), (owner, calls) => { for (const call of calls) { if (this.calls.has(call.call_id)) throw new Error("Duplicate continuation ID."); this.calls.set(call.call_id, owner); } }, (owner) => {
       this.actors.delete(owner);
       for (const [id, value] of this.calls) if (value === owner) this.calls.delete(id);
       if (!this.actors.size && this.watcher) { clearInterval(this.watcher); this.watcher = undefined; }

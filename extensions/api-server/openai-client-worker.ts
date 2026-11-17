@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { AgentSession, ExtensionAPI, SettingsManager, SessionManager, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { runCompatibilityWorker, restoreHistory, WORKER_EVENT_PREFIX, type CompatibilityWorkerHooks } from "./openai-execution.ts";
+import { runCompatibilityWorker, restoreHistory, WORKER_EVENT_PREFIX, type CompatibilityWorkerHooks, type ResidentExecution } from "./openai-execution.ts";
 import { prepareAttachments } from "./openai-attachments.ts";
 import { attachmentError, CompatibilityError } from "./openai-errors.ts";
 import { canAttemptVisualInput } from "./openai-codex-files.ts";
@@ -16,7 +16,10 @@ type Prepared = { content: any[]; details: { source: string }; isError: boolean 
 type Pending = { call: ClientCall; resolve(value: Prepared): void; reject(error: Error): void; issued: boolean };
 const zeroNativeUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 
-class ClientWorker implements CompatibilityWorkerHooks {
+export class ClientWorker implements CompatibilityWorkerHooks {
+  private readonly residentInput?: ClientRequest;
+  constructor(residentInput?: ClientRequest) { this.residentInput = residentInput; }
+  receive(value: any): void { this.commands = this.commands.then(() => this.resume(value)).catch(() => this.abort()); }
   attachmentBudget = { count: 0, bytes: 0 };
   private init!: ClientRequest;
   private policy!: ReturnType<typeof clientToolPolicy>;
@@ -62,7 +65,8 @@ class ClientWorker implements CompatibilityWorkerHooks {
   private ended = () => { this.initialReject(new Error("Worker control channel closed.")); this.abort(); };
   async readRequest(signal: AbortSignal): Promise<CompletionRequest> {
     this.signal = signal;
-    process.stdin.setEncoding("utf8"); process.stdin.on("data", this.data); process.stdin.once("end", this.ended);
+    if (!this.residentInput) { process.stdin.setEncoding("utf8"); process.stdin.on("data", this.data); process.stdin.once("end", this.ended); }
+    else this.initialResolve({ type: "init", input: this.residentInput });
     void this.initial.catch(() => {});
     signal.addEventListener("abort", this.abort, { once: true });
     const value = await this.initial;
@@ -221,7 +225,8 @@ class ClientWorker implements CompatibilityWorkerHooks {
     this.pending.clear();
   };
   close(): void {
-    this.abort(); process.stdin.off("data", this.data); process.stdin.off("end", this.ended); process.stdin.pause();
+    this.abort();
+    if (!this.residentInput) { process.stdin.off("data", this.data); process.stdin.off("end", this.ended); process.stdin.pause(); }
     this.signal?.removeEventListener("abort", this.abort);
   }
 }

@@ -21,12 +21,13 @@ function executionContext() {
 export default function registerContextMemory(pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (_event, ctx) => {
     const entries = ctx.sessionManager.getEntries() as Array<{ type?: string; customType?: string }>;
-    if (entries.some((entry) => entry.type === "custom" && entry.customType === "context-memory-snapshot")) return;
-    // Never inject into an already established session when the extension is added later.
-    if (entries.some((entry) => entry.type === "message")) return;
+    const established = entries.some((entry) => entry.type === "message" || (entry.type === "custom" && entry.customType === "context-memory-snapshot"));
+    const context = executionContext();
+    // Persistent snapshots are initial-session context. Request-only Direct
+    // memory must still apply on later turns, without becoming a JSONL message.
+    if (established && context.directContextMemory === undefined) return;
     try {
       await ensureDefaultProfileContextMemory(profileDirectory());
-      const context = executionContext();
       const memory = await resolveContextMemory(agentRoot(), profileDirectory(), context);
       if (memory.handlerExecution && context.application && context.identityKey) {
         const event = memory.handlerExecution;
@@ -34,9 +35,13 @@ export default function registerContextMemory(pi: ExtensionAPI): void {
         if (execution?.onContextMemoryExecution) execution.onContextMemoryExecution(event);
         else process.stderr.write(`PI_CONTEXT_MEMORY_LOG:${JSON.stringify(event)}\n`);
       }
-      const content = snapshotMessage(memory);
-      if (!content) return;
-      return { message: { customType: "context-memory-snapshot", content, display: false } };
+      const transient = context.directContextMemory !== undefined;
+      const content = snapshotMessage(transient ? { ...memory, personal: "" } : memory);
+      const requestMemory = transient ? snapshotMessage({ operational: "", personal: memory.personal }, true) : "";
+      return {
+        ...(requestMemory ? { systemPrompt: `${_event.systemPrompt}\n\n${requestMemory}` } : {}),
+        ...(!established && content ? { message: { customType: "context-memory-snapshot", content, display: false } } : {}),
+      };
     } catch (error) {
       console.error(`Context Memory resolution failed: ${error instanceof Error ? error.message : String(error)}`);
     }

@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type SQLOutputValue } from "node:sqlite";
 import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
@@ -9,7 +9,7 @@ export type PulseHistory = Pulse & { startedAt: string; finishedAt: string | nul
 export type PulseRun = { id: string; sessionId: string | null; startedAt: string; finishedAt: string | null; status: "running" | "success" | "error"; response: string | null; error: string | null };
 export type PulseExecutionSession = { sessionId: string; pulseId: string; pulseName: string; pulseType: PulseType; runId: string; status: PulseRun["status"]; startedAt: string; finishedAt: string | null };
 export type ClaimedPulse = { pulse: Pulse; runId: string };
-type Row = Record<string, unknown>;
+type Row = Record<string, SQLOutputValue>;
 const iso = (date = new Date()) => date.toISOString();
 export const pulseId = (type: PulseType, date = new Date()): string => `pulse-${type}_${date.toISOString().slice(0, 16).replace("T", "-").replace(":", "-")}`;
 
@@ -91,6 +91,7 @@ export class PulseStore {
     // Keep records created before the schedule-based classifier in sync.
     for (const row of this.db.prepare("SELECT id, schedule, type FROM pulses").all() as Row[]) { const type = pulseType(String(row.schedule)); if (row.type !== type) this.db.prepare("UPDATE pulses SET type=? WHERE id=?").run(type, row.id); }
   }
+  close(): void { this.db.close(); }
   private pulse(row: Row): Pulse { return { id: String(row.id), name: String(row.name), description: String(row.description), type: row.type as PulseType, schedule: String(row.schedule), prompt: String(row.prompt), thread_session_id: String(row.thread_session_id), insertIntoApiSession: Boolean(row.insert_into_api_session), result: row.result == null ? null : String(row.result), profile: String(row.profile), enabled: Boolean(row.enabled), nextRunAt: row.next_run_at ? String(row.next_run_at) : null, lastRunAt: row.last_run_at ? String(row.last_run_at) : null }; }
   list(profile?: string): Pulse[] { const query = `SELECT p.*, c.profile, c.enabled, c.next_run_at, c.last_run_at FROM pulses p JOIN pulse_control c ON c.pulse_id=p.id${profile ? " WHERE c.profile=?" : ""} ORDER BY p.name`; return this.db.prepare(query).all(...(profile ? [profile] : [])) .map((row) => this.pulse(row as Row)); }
   get(name: string, profile?: string): Pulse | undefined { return this.list(profile).find((item) => item.name === name); }

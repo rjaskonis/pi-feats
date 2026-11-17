@@ -7,12 +7,13 @@ import { createServer } from "node:http";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { executeWorker } from "../extensions/api-server/openai-execution.ts";
+import { ProfileWorkerRuntime, profileWorkerVersion } from "../extensions/api-server/profile-worker-runtime.ts";
 import { normalizeRequest } from "../extensions/api-server/openai-contract.ts";
 import { dataUrl, pdfFixture, pngDataUrl, tinyPng, xlsxFixture } from "./fixtures/openai-attachments.ts";
 
 // Opt-in: this exercises the installed host runtime, never real credentials/providers.
 const cli = process.env.PI_OPENAI_TEST_CLI;
-test("dedicated worker restores history, profile resources, usage and isolation", { skip: !cli, timeout: 120_000 }, async (t) => {
+for (const resident of [false, true]) test(`${resident ? "resident" : "dedicated"} worker restores history, profile resources, usage and isolation`, { skip: !cli, timeout: 120_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-openai-runtime-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const calls: any[] = [];
@@ -55,6 +56,13 @@ test("dedicated worker restores history, profile resources, usage and isolation"
   await writeFile(join(named, ".env"), "FIXTURE_API_KEY=fixture-support-token\n");
   await writeFile(join(named, "SOUL.md"), "Profile fixture policy: preserve the blue umbrella.");
   const env = { PI_OFFLINE: "1", PATH: process.env.PATH, HOME: process.env.HOME, PI_CODING_AGENT_DIR: root, PI_PROFILE_ROOT: root, PI_OPENAI_WORKER: "1" };
+  const pool = new ProfileWorkerRuntime({ agentDir: root,
+    launch: (profile) => ({ command: process.execPath, args: [cli!, "--extension", extensions[0], "profile", profile, "--mode", "rpc", "--no-session"], cwd: profile === "default" ? root : named, env }),
+    version: (profile) => profileWorkerVersion(root, profile === "default" ? root : named) });
+  t.after(() => pool.close());
+  const run = (request: ReturnType<typeof normalizeRequest>, emit: (event: any) => Promise<void>, signal = new AbortController().signal) => resident
+    ? pool.execute(request.profile, { request }, emit, signal)
+    : executeWorker(process.execPath, [cli!, "--extension", extensions[0], "profile", request.profile, "--mode", "rpc", "--no-session"], { cwd: request.profile === "default" ? root : named, env }, request, emit, signal);
   for (const profile of ["default", "support", ...(process.env.PI_OPENAI_TEST_NONO === "1" ? ["support"] : [])]) {
     if (profile === "support" && calls.length >= 2) {
       const config = JSON.parse(await readFile(join(named, "settings.json"), "utf8"));
@@ -62,7 +70,7 @@ test("dedicated worker restores history, profile resources, usage and isolation"
     }
     const request = normalizeRequest({ model: profile, tools: [{ type: "function", name: "do_not_run_client_tool", parameters: {} }], tool_choice: "none", temperature: 0.123, max_output_tokens: 1, store: true, background: true, instructions: "Request fixture instructions", input: [{ role: "system", content: "Caller fixture policy" }, { role: "user", content: "My name is Ada" }, { role: "assistant", content: "Welcome Ada" }, { role: "user", content: "Hello" }] }, "responses");
     const events: any[] = [];
-    const result = await executeWorker(process.execPath, [cli!, "--extension", extensions[0], "profile", profile, "--mode", "rpc", "--no-session"], { cwd: root, env }, request, async (event) => { events.push(event); }, new AbortController().signal);
+    const result = await run(request, async (event) => { events.push(event); });
     assert.equal(result.text, "Hello Ada");
     assert.equal(result.usage.input, 20); assert.equal(result.usage.output, 4); assert.equal(result.usage.cached, 3);
     assert.ok(events.filter((event) => event.type === "text").length >= 2);
@@ -81,7 +89,6 @@ test("dedicated worker restores history, profile resources, usage and isolation"
     }
     else assert.ok(call.tools.some((tool: any) => tool.function.name === "read"));
   }
-  const run = (request: ReturnType<typeof normalizeRequest>, emit: (event: any) => Promise<void>, signal = new AbortController().signal) => executeWorker(process.execPath, [cli!, "--extension", extensions[0], "profile", request.profile, "--mode", "rpc", "--no-session"], { cwd: request.profile === "default" ? root : named, env }, request, emit, signal);
   const toolEvents: any[] = [];
   const toolResult = await run(normalizeRequest({ model: "support", input: "Use internal tool" }, "responses"), async (event) => { toolEvents.push(event); });
   assert.equal(toolResult.text, "Reading\n\nHello Ada"); assert.equal(toolResult.usage.input, 40); assert.equal(toolResult.usage.output, 8);
@@ -124,6 +131,32 @@ test("dedicated worker restores history, profile resources, usage and isolation"
   assert.equal(calls.length, isolatedCalls + 2);
   for (const call of calls.slice(isolatedCalls)) assert.ok(!JSON.stringify(call.messages).includes("My name is Ada"));
   assert.deepEqual(new Set(authorizations.slice(isolatedCalls)), new Set(["Bearer fixture-default-token", "Bearer fixture-support-token"]));
+  if (resident) {
+    const probe = join(root, "identity-probe.ts");
+    await writeFile(probe, `const identity = process.env.PI_APPLICATION_IDENTITY_KEY ?? "none"; let turns = 0;
+export default function(pi) { pi.on("before_agent_start", event => ({ systemPrompt: event.systemPrompt + "\\nIDENTITY_PROBE=" + identity + ";TURNS=" + (++turns) })); }`);
+    await writeFile(join(root, "settings.json"), JSON.stringify({ ...settings, extensions: [...extensions, probe] }));
+    const path = join(named, "stateful-fixture.jsonl"), sessionId = "stateful-fixture";
+    await writeFile(path, JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd: named }) + "\n");
+    const appRun = (content: string, identityKey: string, stateful: boolean) => pool.execute("support", {
+      request: normalizeRequest({ model: "support", input: content }, "responses"),
+      application: { sessionId, identityKey, application: "fixture", ...(stateful ? { sessionPath: path } : {}) },
+    }, async () => {}, new AbortController().signal);
+    await appRun("STATEFUL_FIRST_MARKER", "alice", true);
+    assert.ok(JSON.stringify(calls.at(-1).messages).includes("IDENTITY_PROBE=alice;TURNS=1"));
+    await appRun("STATELESS_BOB_MARKER", "bob", false);
+    let wire = JSON.stringify(calls.at(-1).messages);
+    assert.ok(wire.includes("IDENTITY_PROBE=bob;TURNS=1")); assert.ok(!wire.includes("STATEFUL_FIRST_MARKER"));
+    await pool.invalidate("support");
+    await appRun("STATEFUL_NEXT_MARKER", "alice", true);
+    wire = JSON.stringify(calls.at(-1).messages);
+    assert.ok(wire.includes("STATEFUL_FIRST_MARKER")); assert.ok(!wire.includes("STATELESS_BOB_MARKER"));
+    assert.ok(wire.includes("IDENTITY_PROBE=alice;TURNS=1"));
+    await run(normalizeRequest({ model: "support", input: "Independent after Application" }, "responses"), async () => {});
+    wire = JSON.stringify(calls.at(-1).messages);
+    assert.ok(wire.includes("IDENTITY_PROBE=none;TURNS=1")); assert.ok(!wire.includes("STATEFUL_FIRST_MARKER")); assert.ok(!wire.includes("STATELESS_BOB_MARKER"));
+    assert.ok((await readFile(path, "utf8")).includes("STATEFUL_NEXT_MARKER"));
+  }
   const cancellation = new AbortController();
   await assert.rejects(run(normalizeRequest({ model: "support", input: "Hold for cancellation" }, "responses"), async (event) => { if (event.type === "text") cancellation.abort(); }, cancellation.signal), (error: any) => error.name === "AbortError");
   await cancelledProvider;

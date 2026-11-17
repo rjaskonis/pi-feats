@@ -177,8 +177,9 @@ export default async function (pi: ExtensionAPI) {
       insertIntoApiSession: Type.Optional(Type.Boolean({ description: "Defaults to true. Set false only when the user explicitly asks not to record the Pulse result in every active Application session for this profile. This records context only; it does not send through an outbound handler." })),
     }),
     async execute(_id, params, _signal, _update, ctx) {
+      let store: PulseStore | undefined;
       try {
-        const profile = process.env.PI_ACTIVE_PROFILE ?? "default", store = new PulseStore(dbPath());
+        const profile = process.env.PI_ACTIVE_PROFILE ?? "default"; store = new PulseStore(dbPath());
         if (params.action === "list") { const pulses = store.list(profile); return { content: [{ type: "text", text: JSON.stringify(pulses) }], details: { pulses } }; }
         if (!params.name) throw new Error("A schedule name is required.");
         if (params.action === "create") {
@@ -193,6 +194,7 @@ export default async function (pi: ExtensionAPI) {
         const pulse = store.update(params.name, profile, { description: params.description ?? current.description, schedule: params.schedule ?? current.schedule, prompt: params.prompt ?? current.prompt, thread_session_id: current.thread_session_id, insertIntoApiSession: params.insertIntoApiSession ?? current.insertIntoApiSession });
         return { content: [{ type: "text", text: JSON.stringify(pulse) }], details: pulse };
       } catch (error) { return { content: [{ type: "text", text: `Unable to manage schedule: ${error instanceof Error ? error.message : String(error)}` }], details: {}, isError: true }; }
+      finally { store?.close(); }
     },
   });
 }

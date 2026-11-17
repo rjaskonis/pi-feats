@@ -28,7 +28,7 @@ export function restoreHistory(manager: Pick<SessionManagerType, "appendMessage"
 }
 
 /** Execute a prepared session and dispose it on every success, failure, or abort. */
-export async function executeSession(session: AgentSession, request: CompletionRequest, emit: (event: ExecutionEvent) => void, signal: AbortSignal): Promise<CompletionResult> {
+export async function executeSession(session: AgentSession, request: CompletionRequest, emit: (event: ExecutionEvent) => void, signal: AbortSignal, application = false): Promise<CompletionResult> {
   const usage: TokenUsage = { input: 0, output: 0, cached: 0, reasoning: 0 };
   let text = "", current = "", lastReason = "", bytes = 0, needsSeparator = false;
   let eventError: unknown;
@@ -67,7 +67,7 @@ export async function executeSession(session: AgentSession, request: CompletionR
     if ((request.messages.some((message) => message.images?.length) || hasNativePdfInput(request)) && !canAttemptVisualInput(session.model)) throw attachmentError("unsupported_image_model");
     emit({ type: "ready" });
     const final = request.messages.at(-1)!;
-    await session.prompt(final.content, { source: "rpc", expandPromptTemplates: false, ...(final.images?.length ? { images: final.images } : {}) });
+    await session.prompt(final.content, { source: "rpc", expandPromptTemplates: application, ...(final.images?.length ? { images: final.images } : {}) });
     await session.waitForIdle();
     if (eventError) throw eventError;
     signal.throwIfAborted();
@@ -94,14 +94,14 @@ export async function executeSession(session: AgentSession, request: CompletionR
         return total + (value && typeof value === "object" && "reasoning" in value && typeof value.reasoning === "number" ? value.reasoning : 0);
       }, 0);
     }
-    return { text, finishReason: lastReason === "length" ? "length" : "stop", usage };
+    return { text, finishReason: lastReason === "length" ? "length" : "stop", usage, ...(application ? { response: current } : {}) };
   } finally {
     signal.removeEventListener("abort", abort); unsubscribe();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
         session.extensionRunner?.emit({ type: "session_shutdown", reason: "quit" }),
-        new Promise<void>((resolve) => { timer = setTimeout(resolve, 2000); }),
+        new Promise<void>((_, reject) => { timer = setTimeout(() => reject(new CompatibilityError("Pi extension cleanup timed out.", null, 502, "worker_cleanup_failed")), 2000); }),
       ]);
     } finally { if (timer) clearTimeout(timer); session.dispose(); }
   }
@@ -118,10 +118,17 @@ export type CompatibilityWorkerHooks = {
 };
 
 /** Run inside the existing profile launcher (and Nono when enabled). */
-export async function runCompatibilityWorker(host?: typeof import("@earendil-works/pi-coding-agent"), hooks?: CompatibilityWorkerHooks): Promise<void> {
+export type ResidentExecution = {
+  retire?: boolean;
+  runtime?: ModelRuntimeType;
+  application?: { sessionPath?: string };
+  event?(event: AgentSessionEvent): void;
+};
+
+export async function runCompatibilityWorker(host?: typeof import("@earendil-works/pi-coding-agent"), hooks?: CompatibilityWorkerHooks, resident?: ResidentExecution): Promise<void> {
   // Disable worker dispatch when the SDK reloads the shared API extension.
   process.env.PI_OPENAI_WORKER = "running";
-  for (const key of Object.keys(process.env)) if (key.startsWith("PI_APPLICATION_") || key === "PI_API_WORKER" || key === "PI_PROFILE_DISCOVER_TOOLS") delete process.env[key];
+  for (const key of Object.keys(process.env)) if ((!resident?.application && key.startsWith("PI_APPLICATION_")) || key === "PI_API_WORKER" || key === "PI_PROFILE_DISCOVER_TOOLS") delete process.env[key];
   const controller = new AbortController();
   const abort = () => controller.abort();
   process.once("SIGTERM", abort);
@@ -170,9 +177,24 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
       ...(instructions.length ? { appendSystemPrompt: instructions } : {}) });
     await loader.reload();
     if (loader.getExtensions().errors.length) throw new Error("Profile extension initialization failed.");
-    const manager = SessionManager.inMemory(cwd);
+    const manager = resident?.application?.sessionPath
+      ? SessionManager.open(resident.application.sessionPath, process.env.PI_CODING_AGENT_SESSION_DIR, cwd)
+      : SessionManager.inMemory(cwd);
     const restoredInputs = hooks?.restore ? hooks.restore(manager, request) : restoreHistory(manager, request);
-    const runtime = modelRuntime = await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json"), allowModelNetwork: false });
+    const runtime = modelRuntime = resident?.runtime ?? await ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json"), allowModelNetwork: false });
+    if (resident && !resident.runtime) {
+      resident.runtime = runtime;
+      // Extension providers and virtual routers may capture job identity in
+      // closures retained by ModelRuntime. Preserve their SDK behavior, but
+      // retire this worker rather than passing those closures to another job.
+      for (const method of ["registerProvider", "registerNativeProvider", "registerVirtualModel"] as const) {
+        const register = runtime[method];
+        Object.defineProperty(runtime, method, { configurable: true, writable: true, value: (...args: unknown[]) => {
+          resident.retire = true;
+          return Reflect.apply(register, runtime, args);
+        } });
+      }
+    }
     controller.signal.throwIfAborted();
     session = (await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader: loader, sessionManager: manager, modelRuntime: runtime })).session;
     const configuredProvider = settingsManager.getDefaultProvider(), configuredModel = settingsManager.getDefaultModel();
@@ -204,10 +226,11 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
       manager.appendContextEdit(id, { content: [{ type: "text", text: message.content }, ...(message.images ?? [])] });
     }
     if (restoredInputs.length) session.refreshContext();
-    await session.bindExtensions({ mode: "rpc", onError: () => { process.stderr.write("OpenAI worker extension failed.\n"); } });
+    await session.bindExtensions({ mode: "rpc", onError: () => { if (resident) resident.retire = true; process.stderr.write("OpenAI worker extension failed.\n"); } });
     if (request.messages.some((message) => message.documents?.length) || (session.model?.api === CODEX_FILE_API && (hooks || request.messages.some((message) => message.images?.length)))) nativeFiles = installCodexFileBridge(session, request, controller.signal, { toolImages: !!hooks });
     if (hooks) await hooks.started(session, request, host ?? await import("@earendil-works/pi-coding-agent"));
-    const result = await executeSession(session, request, write, controller.signal);
+    if (resident?.event) session.subscribe(resident.event);
+    const result = await executeSession(session, request, write, controller.signal, !!resident?.application);
     nativeFiles?.assertDelivered();
     session = undefined;
     write({ type: "result", result });
@@ -216,10 +239,10 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     process.stderr.write(`OpenAI worker failed (${failure instanceof CompatibilityError ? failure.code : "runtime_error"}).\n`);
     session?.dispose();
     write({ type: "failure", code: failure instanceof CompatibilityError ? failure.code : "generation_failed" });
-    process.exitCode = 1;
+    if (!resident) process.exitCode = 1;
   } finally {
     nativeFiles?.dispose();
-    await modelRuntime?.settleCredentialWrites().catch(() => { process.stderr.write("OpenAI worker credential synchronization failed.\n"); process.exitCode = 1; });
+    await modelRuntime?.settleCredentialWrites().catch(() => { process.stderr.write("OpenAI worker credential synchronization failed.\n"); if (resident) throw new Error("Worker credential synchronization failed."); process.exitCode = 1; });
     process.removeListener("SIGTERM", abort);
     process.removeListener("SIGINT", abort);
   }

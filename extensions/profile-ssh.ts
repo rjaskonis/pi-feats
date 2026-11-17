@@ -29,11 +29,11 @@ async function command(command: string, args: string[], options: { env?: NodeJS.
   return await new Promise((resolve, reject) => {
     const child = spawn(command, args, { stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"], env: options.env });
     let stdout = "", stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += String(chunk); });
-    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+    child.stdout!.on("data", (chunk) => { stdout += String(chunk); });
+    child.stderr!.on("data", (chunk) => { stderr += String(chunk); });
     child.once("error", reject);
     child.once("exit", (code) => resolve({ code: code ?? 1, stdout, stderr }));
-    if (options.input !== undefined) child.stdin.end(options.input);
+    if (options.input !== undefined) child.stdin!.end(options.input);
   });
 }
 

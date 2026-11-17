@@ -35,7 +35,7 @@ export function resolveRootAgentDir(environment: NodeJS.ProcessEnv = process.env
 
 const rootAgentDir = () => resolveRootAgentDir();
 const profilesDir = () => join(rootAgentDir(), "profiles");
-const PROFILE_REEXEC_CONTEXT_ENV = ["PI_OPENAI_WORKER", "PI_OPENAI_CLIENT_TOOLS_WORKER", "PI_APPLICATION_IDENTITY_KEY", "PI_APPLICATION_SLUG", "PI_APPLICATION_SESSION_ID", "PI_APPLICATION_DIRECT_CONTEXT_MEMORY", "PI_APPLICATION_HANDOFF"] as const;
+const PROFILE_REEXEC_CONTEXT_ENV = ["PI_OPENAI_WORKER", "PI_OPENAI_CLIENT_TOOLS_WORKER", "PI_PROFILE_WORKER", "PI_APPLICATION_IDENTITY_KEY", "PI_APPLICATION_SLUG", "PI_APPLICATION_SESSION_ID", "PI_APPLICATION_DIRECT_CONTEXT_MEMORY", "PI_APPLICATION_HANDOFF"] as const;
 
 export function forwardedProfileExecutionEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return Object.fromEntries(PROFILE_REEXEC_CONTEXT_ENV.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]!]]));
@@ -379,7 +379,7 @@ async function reexecWithProfile(name: string, args: string[]) {
   // The default profile is intentionally never sandboxed. Named profiles run
   // directly in their own persistent directory; nono enforces their policy.
   const sandbox = await isSandboxEnabled(target, name === "default");
-  const childEnv = {
+  const childEnv: NodeJS.ProcessEnv = {
     ...await profileEnvironment(target),
     ...forwardedProfileExecutionEnvironment(),
     ...await sessionListDirectoryEnvironment(args),
@@ -454,7 +454,7 @@ export default async function (pi: ExtensionAPI) {
       await writeStdout(`${JSON.stringify({ tools: pi.getAllTools().map((tool) => tool.name) })}\n`);
       process.exit(0);
     }
-    const settings = await readJson(join(activeAgentDir, "settings.json")).catch(() => ({}));
+    const settings: ProfileSettings = await readJson(join(activeAgentDir, "settings.json")).catch(() => ({}));
     const enabledTools = settings.profile?.enabledTools;
     if (!enabledTools || enabledTools.includes("*")) return;
     const allowed = new Set(enabledTools);

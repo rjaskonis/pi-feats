@@ -17,7 +17,6 @@ type ComposioSession = {
 };
 
 type Runtime = { config: ComposioConfig; client: ComposioClient; session: ComposioSession };
-const runtimes = new Map<string, Promise<Runtime>>();
 
 function asRecord(value: unknown): RecordValue { return value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : {}; }
 function configurationError(message: string): Error { return new Error(`Composio is not configured: ${message}`); }
@@ -39,7 +38,7 @@ async function configuration(): Promise<ComposioConfig> {
   return { apiKey, userId };
 }
 
-async function runtime(): Promise<Runtime> {
+async function runtime(runtimes: Map<string, Promise<Runtime>>): Promise<Runtime> {
   const config = await configuration();
   const key = `${config.apiKey}\u0000${config.userId}`;
   let current = runtimes.get(key);
@@ -99,13 +98,15 @@ function searchSummary(value: unknown) {
 function result(value: unknown) { return { content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }], details: value }; }
 
 export default function registerComposio(pi: ExtensionAPI): void {
+  const runtimes = new Map<string, Promise<Runtime>>();
+  pi.on("session_shutdown", () => { runtimes.clear(); });
   pi.registerTool({
     name: "composio_search_tools",
     label: "Search connected services",
     description: "Find actions available in connected personal services.",
     parameters: Type.Object({ query: Type.String({ minLength: 1 }), toolkits: Type.Optional(Type.Array(Type.String({ minLength: 1 }))) }),
     async execute(_id, params) {
-      const current = await runtime();
+      const current = await runtime(runtimes);
       return result(searchSummary(await current.session.search({ query: params.query, ...(params.toolkits?.length ? { toolkits: params.toolkits } : {}) })));
     },
   });
@@ -116,7 +117,7 @@ export default function registerComposio(pi: ExtensionAPI): void {
     description: "List active and inactive accounts connected to a personal service.",
     parameters: Type.Object({ toolkit: Type.Optional(Type.String({ minLength: 1 })) }),
     async execute(_id, params) {
-      const current = await runtime();
+      const current = await runtime(runtimes);
       const accounts = await current.client.connectedAccounts.list({ userIds: [current.config.userId], ...(params.toolkit ? { toolkitSlugs: [params.toolkit] } : {}) });
       return result({ accounts: (accounts.items ?? []).map(publicAccount) });
     },
@@ -128,7 +129,7 @@ export default function registerComposio(pi: ExtensionAPI): void {
     description: "Check or start a secure connection to a personal service.",
     parameters: Type.Object({ toolkit: Type.String({ minLength: 1 }), alias: Type.Optional(Type.String({ minLength: 1 })) }),
     async execute(_id, params) {
-      const current = await runtime();
+      const current = await runtime(runtimes);
       const connection = await current.session.authorize(params.toolkit, ...(params.alias ? [{ alias: params.alias }] : []));
       return result({ toolkit: params.toolkit, status: connection.status ?? "PENDING", connectionId: connection.id, connectUrl: connection.redirectUrl ?? undefined });
     },
@@ -145,7 +146,7 @@ export default function registerComposio(pi: ExtensionAPI): void {
       account: Type.Optional(Type.String({ minLength: 1 })),
     }),
     async execute(_id, params) {
-      const current = await runtime();
+      const current = await runtime(runtimes);
       const toolkit = params.toolkit ?? inferToolkit(params.slug);
       if (!toolkit) throw new Error("A toolkit is required to execute this action.");
       const connectedAccountId = await accountFor(current.client, current.config.userId, toolkit, params.account);

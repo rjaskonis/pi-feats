@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strictNullChecks": true,
+    "esModuleInterop": true,
+    "types": ["node"]
+  },
+  "files": ["extensions/pi-console-webui/index.ts"],
+  "include": ["extensions/**/*.ts"],
+  "exclude": ["extensions/pi-console-webui/**"]
+}

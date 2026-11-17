@@ -329,7 +329,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
                             }
                             if (definition.name === "sequential_workflow_record_result" && result.details?.needsEvaluation) {
                                 const automatic = await automaticTaskEvaluation(ctx, params.workflowId, params.taskId, params.result);
-                                if (automatic?.applied)
+                                if (automatic && "applied" in automatic && automatic.applied)
                                     return automatic.applied;
                             }
                             if (definition.name === "sequential_workflow_evaluate" && result.details?.failed) {
@@ -380,7 +380,7 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
         // An unavailable requirement evaluator must not permanently lock a session
         // with no active workflow. A later user request is new evidence and can be
         // evaluated normally if it explicitly requests a workflow.
-        if (event.source !== "extension" && focus() === undefined && requirementBlock()) {
+        if (focus() === undefined && requirementBlock()) {
             clearRequirementBlock();
             audit("requirement_block_released", { message: "A new user input released the unresolved Sequential Workflow evaluation block." }, "user_input");
         }
@@ -456,7 +456,8 @@ export function workflowHarness(host: ExtensionAPI, db: DatabaseSync) {
     // model turn while focused (including a create call that establishes focus).
     let dispatched = false;
     const latestUserRequest = (ctx: ExtensionContext) => {
-        const content = ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "message" && entry.message?.role === "user").at(-1)?.message?.content;
+        const entry = ctx.sessionManager.getBranch().findLast((entry) => entry.type === "message" && entry.message.role === "user");
+        const content = entry?.type === "message" && entry.message.role === "user" ? entry.message.content : undefined;
         return typeof content === "string" ? content : Array.isArray(content) ? content.map((part: any) => part.text ?? "").join("") : "";
     };
     host.on("turn_start", () => { dispatched = false; });

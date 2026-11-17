@@ -465,8 +465,9 @@ async function applyAction(action: ParsedAction) {
     console.log(`Extension \"${identity.name}\" ${enable ? "enabled" : "disabled"} in ${settingsPath}. Use /reload to apply.`);
     return;
   }
-  const entries = Array.isArray(settings[action.kind])
-    ? settings[action.kind].filter((entry): entry is string => typeof entry === "string")
+  const configuredEntries = settings[action.kind];
+  const entries = Array.isArray(configuredEntries)
+    ? configuredEntries.filter((entry): entry is string => typeof entry === "string")
     : [];
   const updatedEntries = setExclusion(entries, resourcePath, !enable);
   if (entries.length === updatedEntries.length && entries.every((entry, index) => entry === updatedEntries[index])) {
@@ -584,7 +585,7 @@ export default async function (pi: ExtensionAPI) {
         .map((tool) => [tool.name, active.has(tool.name) ? "enabled" : "disabled", (BUILTIN_TOOLS as readonly string[]).includes(tool.name) ? "Built-in" : sources.has(tool.name) ? `npm: ${sources.get(tool.name)}` : "Extension", tool.description] as SourceRow)
         .sort((a, b) => a[0].localeCompare(b[0]));
       await writeTable(SourceTable({ title: "TOOLS", detailHeader: "DESCRIPTION", rows }));
-    } else {
+    } else if (kind) {
       const loaded = await readSettings();
       const resourceRoot = loaded.resourceRoot;
       if (kind === "extensions") {
@@ -594,7 +595,8 @@ export default async function (pi: ExtensionAPI) {
       }
       const agentDir = loaded.agentDir;
       const settings = loaded.settings;
-      const rawEntries = Array.isArray(settings[kind]) ? settings[kind].filter((value): value is string => typeof value === "string") : [];
+      const configuredEntries = settings[kind];
+      const rawEntries = Array.isArray(configuredEntries) ? configuredEntries.filter((value): value is string => typeof value === "string") : [];
       const configuredPaths = rawEntries.filter((value) => !/^[!+\-]/.test(value));
       const exclusions = rawEntries.filter((value) => value.startsWith("!") || value.startsWith("-"));
       const catalogRoot = join(resourceRoot, kind);

@@ -8,10 +8,11 @@ import { createServer } from "node:http";
 import * as zlib from "node:zlib";
 import { normalizeRequest } from "../extensions/api-server/openai-contract.ts";
 import { executeWorker } from "../extensions/api-server/openai-execution.ts";
+import { ProfileWorkerRuntime, profileWorkerVersion } from "../extensions/api-server/profile-worker-runtime.ts";
 import { dataUrl, pdfFixture, visualPdfFixture, pngDataUrl } from "./fixtures/openai-attachments.ts";
 
 const cli = process.env.PI_OPENAI_TEST_CLI;
-test("Codex sends images/files despite text-only catalog metadata and preserves explicit image policy", { skip: !cli, timeout: 90_000 }, async (t) => {
+for (const resident of [false, true]) test(`Codex ${resident ? "resident" : "dedicated"} worker sends images/files despite text-only catalog metadata and preserves explicit image policy`, { skip: !cli, timeout: 90_000 }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "pi-codex-worker-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const profile = join(root, "profiles", "native"), bin = join(root, "bin");
@@ -81,9 +82,15 @@ test("Codex sends images/files despite text-only catalog metadata and preserves 
     { role: "assistant", content: "Ready" },
     { role: "user", content: [{ type: "input_text", text: "Read the files and use the profile tool before answering" }, { type: "input_file", filename: "visual.pdf", file_data: dataUrl("application/pdf", visualPdfFixture()) }, { type: "input_image", image_url: pngDataUrl }] },
   ] }, "responses");
+  const launch = () => ({ command: process.execPath, args: [cli!, "--extension", extensions[0], "profile", "native", "--mode", "rpc", "--no-session"], cwd: profile, env: { PATH: process.env.PATH, HOME: process.env.HOME, PI_OFFLINE: "1", PI_OPENAI_WORKER: "1", PI_CODING_AGENT_DIR: root, PI_PROFILE_ROOT: root } });
+  const pool = new ProfileWorkerRuntime({ agentDir: root, launch, version: () => profileWorkerVersion(root, profile) });
+  t.after(() => pool.close());
   const run = async (input: ReturnType<typeof normalizeRequest>, onEvent: (event: any) => Promise<void> = async () => {}) => {
     try {
-      return await executeWorker(process.execPath, [cli!, "--extension", extensions[0], "profile", "native", "--mode", "rpc", "--no-session"], { cwd: profile, env: { PATH: process.env.PATH, HOME: process.env.HOME, PI_OFFLINE: "1", PI_OPENAI_WORKER: "1", PI_CODING_AGENT_DIR: root, PI_PROFILE_ROOT: root } }, input, onEvent, new AbortController().signal);
+      const configured = launch();
+      return await (resident
+        ? pool.execute("native", { request: input }, onEvent, new AbortController().signal)
+        : executeWorker(configured.command, configured.args, configured, input, onEvent, new AbortController().signal));
     } catch (error) { if (providerError) throw providerError; throw error; }
   };
   const events: any[] = [];

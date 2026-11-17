@@ -276,11 +276,12 @@ export class ApplicationRuntime {
 
   private async resolveDirectSession(request: DirectRequest): Promise<string> {
     if (request.sessionType === "stateless") return this.withQueue(`${this.application.slug}:${request.profile}:${request.sessionPrefix}:stateless`, async () => { const current = await this.api.getApplicationSession(this.application.slug, request.profile, request.sessionPrefix, "stateless") as any; if (current) return current.sessionId; const id = await this.api.nextApplicationSessionId(this.application.slug, request.profile, request.sessionPrefix); await this.api.recordApplicationSession(this.application.slug, request.profile, request.sessionPrefix, id, false, "stateless"); return id; });
-    if (!request.sessionId) return this.resolveSession(request.profile, request.sessionPrefix);
-    return this.withQueue(`${this.application.slug}:${request.profile}:${request.sessionPrefix}:direct:${request.sessionId}`, async () => {
-      const exists = (await this.api.listSessions(request.profile)).some((session) => session.id === request.sessionId); if (!exists) await this.api.createSession(request.profile, { id: request.sessionId });
-      await this.api.recordApplicationSession(this.application.slug, request.profile, request.sessionPrefix, request.sessionId, false, "stateful");
-      return request.sessionId;
+    const sessionId = request.sessionId;
+    if (!sessionId) return this.resolveSession(request.profile, request.sessionPrefix);
+    return this.withQueue(`${this.application.slug}:${request.profile}:${request.sessionPrefix}:direct:${sessionId}`, async () => {
+      const exists = (await this.api.listSessions(request.profile)).some((session) => session.id === sessionId); if (!exists) await this.api.createSession(request.profile, { id: sessionId });
+      await this.api.recordApplicationSession(this.application.slug, request.profile, request.sessionPrefix, sessionId, false, "stateful");
+      return sessionId;
     });
   }
 

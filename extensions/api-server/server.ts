@@ -4,7 +4,6 @@ import {
   ModelRuntime,
   SessionManager,
   SettingsManager,
-  type AgentSession,
 } from "@earendil-works/pi-coding-agent";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
@@ -21,9 +20,10 @@ import { buildStatelessPrompt } from "./stateless-prompt.ts";
 import { registerCompatibilityRoutes } from "./openai-routes.ts";
 import { CompatibilityError } from "./openai-contract.ts";
 import { ClientToolsRuntime } from "./openai-client-runtime.ts";
-import { executeWorker } from "./openai-execution.ts";
+import { ProfileWorkerRuntime, profileWorkerVersion } from "./profile-worker-runtime.ts";
+import type { ProfileJob } from "./profile-worker.ts";
 import { applicationHandlerTemplate } from "../lib/application-handler-templates.ts";
-import { applicationExecutionContext, type ContextMemoryExecutionLog } from "../lib/application-context.ts";
+import { type ContextMemoryExecutionLog } from "../lib/application-context.ts";
 import { contextMemoryCharacters, contextMemoryConfig, contextMemoryLimit, memoryPath, readMemory } from "../lib/context-memory.ts";
 import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
@@ -38,7 +38,6 @@ type ApiConfig = {
   cors: { origin: string };
   publicBaseUrl?: string;
 };
-type SessionHandle = { session: AgentSession; busy: boolean; profile: string; sessionId: string };
 type ServerOptions = { agentDir: string; cwd: string };
 type ChatBody = { message: string };
 type ChatParams = { profile?: string; sessionId: string };
@@ -112,19 +111,8 @@ function activityFromAgentEvent(event: Record<string, any>): Record<string, unkn
   return undefined;
 }
 
-function textFromMessage(message: unknown): string {
-  const content = (message as { content?: unknown })?.content;
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .filter((part): part is { type?: unknown; text?: unknown } => !!part && typeof part === "object")
-    .filter((part) => part.type === "text" && typeof part.text === "string")
-    .map((part) => part.text as string)
-    .join("");
-}
-
 class ApiServer {
-  private readonly sessions = new Map<string, SessionHandle>();
+  workers!: ProfileWorkerRuntime;
   private readonly sandboxBusy = new Set<string>();
   private readonly runtimes = new Map<string, Promise<ModelRuntime>>();
   private readonly toolDiscoveries = new Map<string, Promise<void>>();
@@ -186,36 +174,6 @@ class ApiServer {
   async setApplicationWorkingSession(profile: string, application: string, key: string, session: { sessionId: string; updatedAt: string; reason: "message" | "rollover" }): Promise<void> { await this.profiles.setApplicationWorkingSession(profile, application, key, session); }
   async retargetPulseThreadSessions(profile: string, fromSessionId: string, toSessionId: string): Promise<void> { this.pulses.retarget(profile, fromSessionId, toSessionId); }
 
-  private async getSession(profile: string, id: string): Promise<SessionHandle> {
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id)) throw Object.assign(new Error("Invalid sessionId"), { status: 400 });
-    const key = `${profile}:${id}`;
-    const current = this.sessions.get(key);
-    if (current) return current;
-
-    const agentDir = this.profileDirectory(profile);
-    await this.profiles.readSettings(profile);
-    const sessionDir = profile === "default" ? undefined : join(agentDir, "sessions");
-    const known = await this.listProfileSessions(profile);
-    const existing = known.find((session) => session.id === id);
-    const sessionManager = existing
-      ? SessionManager.open(existing.path, sessionDir, this.options.cwd)
-      : SessionManager.create(this.options.cwd, sessionDir, { id });
-    const session = await this.withProfileEnvironment(agentDir, async () => {
-      const settingsManager = SettingsManager.create(this.options.cwd, agentDir);
-      const loader = new DefaultResourceLoader({ cwd: this.options.cwd, agentDir, settingsManager });
-      await loader.reload();
-      let runtime = this.runtimes.get(agentDir);
-      if (!runtime) {
-        runtime = ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") });
-        this.runtimes.set(agentDir, runtime);
-      }
-      return (await createAgentSession({ cwd: this.options.cwd, agentDir, sessionManager, settingsManager, resourceLoader: loader, modelRuntime: await runtime })).session;
-    });
-    const handle = { session, busy: false, profile, sessionId: id };
-    this.sessions.set(key, handle);
-    return handle;
-  }
-
   private sessionDirectory(profile: string): string | undefined {
     return profile === "default" ? undefined : join(this.profileDirectory(profile), "sessions");
   }
@@ -236,12 +194,11 @@ class ApiServer {
   async deleteProfile(profile: string): Promise<void> {
     if (profile === "default") throw Object.assign(new Error("The default profile cannot be deleted"), { status: 400 });
     await this.profiles.readSettings(profile);
-    const handles = [...this.sessions.values()].filter((handle) => handle.profile === profile);
-    if (handles.some((handle) => handle.busy) || [...this.sandboxBusy].some((key) => key.startsWith(`${profile}:`))) throw Object.assign(new Error("The profile has a session that is processing a request."), { status: 409 });
-    for (const handle of handles) { handle.session.dispose(); this.sessions.delete(`${profile}:${handle.sessionId}`); }
+    if (this.workers.isBusy(profile) || [...this.sandboxBusy].some((key) => key.startsWith(`${profile}:`))) throw Object.assign(new Error("The profile has a session that is processing a request."), { status: 409 });
     this.runtimes.delete(this.profileDirectory(profile));
     this.toolDiscoveries.delete(profile);
     this.profiles.clearExtensionTools(profile);
+    await this.workers.invalidate(profile);
     await this.profiles.delete(profile);
     this.applications.deleteProfile(profile);
     this.pulses.deleteProfile(profile);
@@ -308,13 +265,10 @@ class ApiServer {
     if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id)) throw Object.assign(new Error("Invalid sessionId"), { status: 400 });
     const trimmed = name.trim();
     if (!trimmed || trimmed.length > 200) throw Object.assign(new Error("Session name must contain 1 to 200 characters."), { status: 400 });
-    const key = `${profile}:${id}`, active = this.sessions.get(key);
-    if (active) active.session.setSessionName(trimmed);
-    else {
-      const existing = (await this.listProfileSessions(profile)).find((session) => session.id === id);
-      if (!existing) throw Object.assign(new Error("Session not found"), { status: 404 });
-      SessionManager.open(existing.path, this.sessionDirectory(profile), this.options.cwd).appendSessionInfo(trimmed);
-    }
+    if (this.sandboxBusy.has(`${profile}:${id}`)) throw Object.assign(new Error("The session is busy."), { status: 409 });
+    const existing = (await this.listProfileSessions(profile)).find((session) => session.id === id);
+    if (!existing) throw Object.assign(new Error("Session not found"), { status: 404 });
+    SessionManager.open(existing.path, this.sessionDirectory(profile), this.options.cwd).appendSessionInfo(trimmed);
     return { id, name: trimmed };
   }
 
@@ -322,13 +276,10 @@ class ApiServer {
     await this.profiles.readSettings(profile);
     if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id)) throw Object.assign(new Error("Invalid sessionId"), { status: 400 });
     const key = `${profile}:${id}`;
-    const active = this.sessions.get(key);
-    if (active?.busy) throw Object.assign(new Error("The session is busy."), { status: 409 });
+    if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is busy."), { status: 409 });
     const sessions = await this.listProfileSessions(profile);
     const existing = sessions.find((session) => session.id === id);
     if (!existing) throw Object.assign(new Error("Session not found"), { status: 404 });
-    active?.session.dispose();
-    this.sessions.delete(key);
     await rm(existing.path);
     this.applications.deleteConsoleSession(profile, id);
   }
@@ -363,7 +314,7 @@ class ApiServer {
 
   private async discoverSandboxedExtensionTools(profile: string): Promise<void> {
     const agentDir = this.profileDirectory(profile);
-    const environment = { ...(await profileEnvironment(agentDir)), PI_PROFILE_ROOT: this.options.agentDir, PI_PROFILE_DISCOVER_TOOLS: "1" };
+    const environment: NodeJS.ProcessEnv = { ...(await profileEnvironment(agentDir)), PI_PROFILE_ROOT: this.options.agentDir, PI_PROFILE_DISCOVER_TOOLS: "1" };
     const output = await new Promise<{ stdout: string; stderr: string }>((resolveRun, reject) => {
       delete environment.PI_API_WORKER;
       const pi = piCommand();
@@ -388,38 +339,12 @@ class ApiServer {
   }
 
   async complete(profile: string, prompt: string): Promise<string> {
-    const agentDir = this.profileDirectory(profile);
-    if (await this.sandboxed(profile)) {
-      const environment = { ...(await profileEnvironment(agentDir)), PI_PROFILE_ROOT: this.options.agentDir };
-      delete environment.PI_API_WORKER;
-      return new Promise<string>((resolveRun, reject) => {
-        const pi = piCommand();
-        const child = spawn(pi.command, [...pi.args, "profile", profile, "--no-session", "--print", prompt], { cwd: agentDir, env: environment, stdio: ["ignore", "pipe", "pipe"] });
-        let stdout = "", stderr = "";
-        child.stdout.on("data", (chunk) => { stdout += String(chunk); }); child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-        child.once("error", reject); child.once("exit", (code) => code === 0 ? resolveRun(stdout.trim()) : reject(new Error(stderr.trim() || `Handoff completion exited with ${code ?? "unknown"}`)));
-      });
-    }
-    return this.withProfileEnvironment(agentDir, async () => {
-      const settingsManager = SettingsManager.create(this.options.cwd, agentDir);
-      const loader = new DefaultResourceLoader({ cwd: this.options.cwd, agentDir, settingsManager }); await loader.reload();
-      let runtime = this.runtimes.get(agentDir); if (!runtime) { runtime = ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") }); this.runtimes.set(agentDir, runtime); }
-      const { session } = await createAgentSession({ cwd: this.options.cwd, agentDir, sessionManager: SessionManager.inMemory(this.options.cwd), settingsManager, resourceLoader: loader, modelRuntime: await runtime });
-      try { await session.prompt(prompt, { source: "rpc" }); return textFromMessage([...session.messages].reverse().find((item) => item.role === "assistant")); } finally { session.dispose(); }
-    });
+    return this.runProfilePrompt(profile, randomUUID(), prompt, false);
   }
 
   async promptStateless(profile: string, id: string, history: Array<{ role: "user" | "assistant"; content: string }>, message: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<{ profile: string; sessionId: string; response: string }> {
     const prompt = buildStatelessPrompt(history, message);
-    if (await this.sandboxed(profile)) return { profile, sessionId: id, response: await this.runSandboxedStatelessPrompt(profile, id, prompt, applicationContext) };
-    const agentDir = this.profileDirectory(profile); await this.profiles.readSettings(profile);
-    return this.withProfileEnvironment(agentDir, async () => {
-      const settingsManager = SettingsManager.create(this.options.cwd, agentDir); const loader = new DefaultResourceLoader({ cwd: this.options.cwd, agentDir, settingsManager }); await loader.reload();
-      let runtime = this.runtimes.get(agentDir); if (!runtime) { runtime = ModelRuntime.create({ authPath: join(agentDir, "auth.json"), modelsPath: join(agentDir, "models.json") }); this.runtimes.set(agentDir, runtime); }
-      const { session } = await createAgentSession({ cwd: this.options.cwd, agentDir, sessionManager: SessionManager.inMemory(this.options.cwd), settingsManager, resourceLoader: loader, modelRuntime: await runtime });
-      let response = ""; const unsubscribe = session.subscribe((event) => { if (event.type === "message_end" && event.message.role === "assistant") response = textFromMessage(event.message); });
-      try { const run = () => session.prompt(prompt, { source: "rpc" }); if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, run); else await run(); response ||= session.getLastAssistantText() ?? ""; if (!response) throw Object.assign(new Error("Pi completed without an assistant response."), { status: 502, code: "STATELESS_RESPONSE_MISSING", stage: "response_extraction" }); return { profile, sessionId: id, response }; } finally { unsubscribe(); session.dispose(); }
-    });
+    return { profile, sessionId: id, response: await this.runProfilePrompt(profile, id, prompt, false, undefined, applicationContext) };
   }
 
   async discoverExtensionTools(profile: string): Promise<void> {
@@ -480,160 +405,54 @@ class ApiServer {
     return isSandboxEnabled(this.profileDirectory(profile), profile === "default");
   }
 
-  private async runSandboxedPrompt(profile: string, id: string, message: string, onData?: (text: string) => void, handoff?: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }, onEvent?: (event: Record<string, unknown>) => void): Promise<string> {
+  private async runProfilePrompt(profile: string, id: string, message: string, stateful: boolean, handoff?: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }, onData?: (text: string) => void, onEvent?: (event: Record<string, unknown>) => void, signal = new AbortController().signal): Promise<string> {
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id)) throw Object.assign(new Error("Invalid sessionId"), { status: 400 });
     const key = `${profile}:${id}`;
     if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
     this.sandboxBusy.add(key);
     try {
-      const session = (await this.listProfileSessions(profile)).find((item) => item.id === id);
-      if (!session) throw Object.assign(new Error(`No session found matching '${id}'`), { status: 404 });
-      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(handoff ? { PI_APPLICATION_HANDOFF: handoff } : {}), ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application, PI_APPLICATION_SESSION_ID: id, ...(applicationContext.directContextMemory !== undefined ? { PI_APPLICATION_DIRECT_CONTEXT_MEMORY: Buffer.from(applicationContext.directContextMemory, "utf8").toString("base64url") } : {}) } : {}) };
-      // The HTTP gateway is an API worker itself. Its children are agent
-      // runtimes, not additional HTTP servers.
-      delete workerEnv.PI_API_WORKER;
-      const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolveRun, reject) => {
-        // Supply the native file path, not only its ID. The session manager
-        // otherwise scopes an ID lookup to the API worker CWD (`/` in Docker).
-        const pi = piCommand();
-        const child = spawn(pi.command, [...pi.args, "profile", profile, "--session", session.path, ...(onEvent ? ["--mode", "json"] : ["--print"]), message], {
-          // The sandboxed agent sees its profile directory as CWD, never the
-          // HTTP server's CWD or the caller's project directory.
-          cwd: this.profileDirectory(profile), env: workerEnv, stdio: ["ignore", "pipe", "pipe"],
-        });
-        let stdout = ""; let stderr = ""; let jsonBuffer = ""; let finalResponse = "";
-        child.stdout.on("data", (chunk) => {
-          const text = String(chunk);
-          if (!onEvent) { stdout += text; onData?.(text); return; }
-          jsonBuffer += text;
-          const lines = jsonBuffer.split("\n"); jsonBuffer = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.trim()) continue;
-            try {
-              const event = JSON.parse(line) as Record<string, unknown>; onEvent(event);
-              if (event.type === "message_update") { const update = event.assistantMessageEvent as Record<string, unknown> | undefined; if (update?.type === "text_delta" && typeof update.delta === "string") onData?.(update.delta); }
-              if (event.type === "message_end" && (event.message as Record<string, unknown> | undefined)?.role === "assistant") finalResponse = textFromMessage(event.message);
-            } catch { stderr += `Invalid JSON event from sandboxed Pi: ${line}\n`; }
-          }
-          stdout = finalResponse;
-        });
-        child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-        child.once("error", reject);
-        child.once("exit", (code) => resolveRun({ stdout, stderr, code: code ?? 1 }));
-      });
-      const stderr = result.stderr.split(/\r?\n/).filter((line) => {
-        if (!line.startsWith("PI_CONTEXT_MEMORY_LOG:")) return true;
-        if (applicationContext) try {
-          const execution = JSON.parse(line.slice("PI_CONTEXT_MEMORY_LOG:".length)) as ContextMemoryExecutionLog;
-          this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution);
-        } catch { /* Ignore malformed child telemetry. */ }
-        return false;
-      }).join("\n").trim();
-      if (result.code !== 0) throw new Error(stderr || `Sandboxed Pi exited with ${result.code}`);
-      return result.stdout.trim();
-    } finally { this.sandboxBusy.delete(key); }
-  }
-
-  private async runSandboxedStatelessPrompt(profile: string, id: string, prompt: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<string> {
-    const key = `${profile}:${id}`;
-    if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
-    this.sandboxBusy.add(key);
-    try {
-      const workerEnv: NodeJS.ProcessEnv = { ...(await profileEnvironment(this.profileDirectory(profile))), PI_PROFILE_ROOT: this.options.agentDir, ...(applicationContext ? { PI_APPLICATION_IDENTITY_KEY: applicationContext.identityKey, PI_APPLICATION_SLUG: applicationContext.application, PI_APPLICATION_SESSION_ID: id, ...(applicationContext.directContextMemory !== undefined ? { PI_APPLICATION_DIRECT_CONTEXT_MEMORY: Buffer.from(applicationContext.directContextMemory, "utf8").toString("base64url") } : {}) } : {}) };
-      delete workerEnv.PI_API_WORKER;
-      const result = await new Promise<{ stdout: string; stderr: string; code: number }>((resolveRun, reject) => {
-        const pi = piCommand();
-        const child = spawn(pi.command, [...pi.args, "profile", profile, "--no-session", "--print", prompt], { cwd: this.profileDirectory(profile), env: workerEnv, stdio: ["ignore", "pipe", "pipe"] });
-        let stdout = "", stderr = "";
-        child.stdout.on("data", (chunk) => { stdout += String(chunk); });
-        child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-        child.once("error", reject);
-        child.once("exit", (code) => resolveRun({ stdout, stderr, code: code ?? 1 }));
-      });
-      const stderr = result.stderr.split(/\r?\n/).filter((line) => {
-        if (!line.startsWith("PI_CONTEXT_MEMORY_LOG:")) return true;
-        if (applicationContext) try { this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, JSON.parse(line.slice("PI_CONTEXT_MEMORY_LOG:".length)) as ContextMemoryExecutionLog); } catch { /* Ignore malformed child telemetry. */ }
-        return false;
-      }).join("\n").trim();
-      if (result.code !== 0) throw new Error(stderr || `Sandboxed Pi exited with ${result.code}`);
-      if (!result.stdout.trim()) throw Object.assign(new Error("Pi completed without an assistant response."), { status: 502, code: "STATELESS_RESPONSE_MISSING", stage: "response_extraction" });
-      return result.stdout.trim();
+      await this.profiles.readSettings(profile);
+      const session = stateful ? (await this.listProfileSessions(profile)).find((item) => item.id === id) : undefined;
+      if (stateful && !session) throw Object.assign(new Error(`No session found matching '${id}'`), { status: 404 });
+      const job: ProfileJob = {
+        request: { profile, messages: [{ role: "user", content: message }], stream: !!onData, includeUsage: false, metadata: null, instructions: null },
+        application: { sessionPath: session?.path, sessionId: id, handoff, ...applicationContext },
+      };
+      const result = await this.workers.execute(profile, job, async (event) => { if (event.type === "text") onData?.(event.delta); }, signal, onEvent,
+        applicationContext ? (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) : undefined);
+      const response = (result as typeof result & { response?: string }).response ?? result.text;
+      if (!stateful && !response) throw new CompatibilityError("Pi completed without a text response.", null, 502, "response_missing");
+      return response;
+    } catch (error) {
+      if (!stateful && error instanceof CompatibilityError && error.code === "response_missing") throw Object.assign(new Error("Pi completed without an assistant response."), { status: 502, code: "STATELESS_RESPONSE_MISSING", stage: "response_extraction" });
+      throw error;
     } finally { this.sandboxBusy.delete(key); }
   }
 
   async prompt(profile: string, id: string, message: string, handoff?: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }): Promise<{ profile: string; sessionId: string; response: string }> {
-    if (await this.sandboxed(profile)) return { profile, sessionId: id, response: await this.runSandboxedPrompt(profile, id, message, undefined, handoff, applicationContext) };
-    const handle = await this.getSession(profile, id);
-    if (handle.busy || !handle.session.isIdle) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
-    handle.busy = true;
-    try {
-      const promptSession = () => this.withProfileEnvironment(this.profileDirectory(profile), () => handle.session.prompt(message, { source: "rpc" }), handoff ? { PI_APPLICATION_HANDOFF: handoff } : {});
-      if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, promptSession);
-      else await promptSession();
-      const assistant = [...handle.session.messages].reverse().find((item) => item.role === "assistant");
-      return { profile, sessionId: id, response: textFromMessage(assistant) };
-    } finally { handle.busy = false; }
+    return { profile, sessionId: id, response: await this.runProfilePrompt(profile, id, message, true, handoff, applicationContext) };
   }
 
   private async chat(profile: string, id: string, message: string, reply: FastifyReply, stream: boolean): Promise<void> {
     const manual = this.applications.consoleSession(profile, id);
     const applicationContext = manual ? { application: manual.application, identityKey: manual.identityKey } : undefined;
-    if (await this.sandboxed(profile)) {
-      if (!stream) { reply.send({ profile, sessionId: id, response: await this.runSandboxedPrompt(profile, id, message, undefined, undefined, applicationContext) }); return; }
+    {
+      if (!stream) { reply.send({ profile, sessionId: id, response: await this.runProfilePrompt(profile, id, message, true, undefined, applicationContext) }); return; }
+      const controller = new AbortController();
+      const disconnected = () => { if (!reply.raw.writableEnded) controller.abort(); };
+      reply.raw.once("close", disconnected);
       reply.hijack();
       reply.raw.writeHead(200, { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache, no-transform", connection: "keep-alive", "x-accel-buffering": "no" });
       reply.raw.write(`event: session\ndata: ${JSON.stringify({ profile, sessionId: id })}\n\n`);
       try {
-        const response = await this.runSandboxedPrompt(profile, id, message, (text) => reply.raw.write(`event: token\ndata: ${JSON.stringify({ text })}\n\n`), undefined, applicationContext, (event) => { const activity = activityFromAgentEvent(event); if (activity) reply.raw.write(`event: activity\ndata: ${JSON.stringify(activity)}\n\n`); });
+        const response = await this.runProfilePrompt(profile, id, message, true, undefined, applicationContext, (text) => reply.raw.write(`event: token\ndata: ${JSON.stringify({ text })}\n\n`), (event) => { const activity = activityFromAgentEvent(event); if (activity) reply.raw.write(`event: activity\ndata: ${JSON.stringify(activity)}\n\n`); }, controller.signal);
         reply.raw.write(`event: done\ndata: ${JSON.stringify({ response, sessionId: id, profile })}\n\n`);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: message })}\n\n`);
       }
+      reply.raw.removeListener("close", disconnected);
       reply.raw.end(); return;
-    }
-    const handle = await this.getSession(profile, id);
-    if (handle.busy || !handle.session.isIdle) {
-      apiError(reply, 409, "SESSION_BUSY", "The session is already processing a request.");
-      return;
-    }
-    handle.busy = true;
-    let unsubscribe = () => {};
-    let closed = false;
-    try {
-      if (stream) {
-        reply.hijack();
-        const response = reply.raw;
-        response.writeHead(200, {
-          "content-type": "text/event-stream; charset=utf-8",
-          "cache-control": "no-cache, no-transform",
-          connection: "keep-alive",
-          "x-accel-buffering": "no",
-        });
-        response.write(`event: session\ndata: ${JSON.stringify({ profile, sessionId: id })}\n\n`);
-        unsubscribe = handle.session.subscribe((event) => {
-          if (closed) return;
-          const activity = activityFromAgentEvent(event as unknown as Record<string, any>);
-          if (activity) response.write(`event: activity\ndata: ${JSON.stringify(activity)}\n\n`);
-          if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") response.write(`event: token\ndata: ${JSON.stringify({ text: event.assistantMessageEvent.delta })}\n\n`);
-        });
-        response.once("close", () => { closed = true; void handle.session.abort(); });
-      }
-      const promptSession = () => this.withProfileEnvironment(this.profileDirectory(profile), () => handle.session.prompt(message, { source: "rpc" }));
-      if (applicationContext) await applicationExecutionContext.run({ ...applicationContext, profile, sessionId: id, onContextMemoryExecution: (execution) => this.recordContextMemoryExecution(applicationContext.application, profile, applicationContext.identityKey, id, execution) }, promptSession);
-      else await promptSession();
-      const assistant = [...handle.session.messages].reverse().find((item) => item.role === "assistant");
-      const response = textFromMessage(assistant);
-      if (stream) {
-        if (!closed) {
-          reply.raw.write(`event: done\ndata: ${JSON.stringify({ response, sessionId: id, profile })}\n\n`);
-          reply.raw.end();
-        }
-      } else {
-        reply.send({ profile, sessionId: id, response });
-      }
-    } finally {
-      unsubscribe();
-      handle.busy = false;
     }
   }
 
@@ -666,14 +485,17 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       for (const key of Object.keys(env)) if (key.startsWith("PI_APPLICATION_") || key === "PI_API_WORKER" || key === "PI_PROFILE_DISCOVER_TOOLS") delete env[key];
       return { command: pi.command, args: [...pi.args, "profile", profile, "--mode", "rpc", "--no-session"], cwd: api.profiles.directory(profile), env };
     };
+    api.workers = new ProfileWorkerRuntime({ agentDir: options.agentDir, launch: compatibilityLaunch,
+      version: (profile) => profileWorkerVersion(options.agentDir, api.profiles.directory(profile)), warn: (message) => console.warn(message) });
     const clientTools = new ClientToolsRuntime({
       settings: async (profile) => {
         try { return await api.profiles.readSettings(profile); }
         catch (error) { if ((error as { status?: number }).status === 404) throw new CompatibilityError("The requested Pi profile does not exist.", "model", 404, "model_not_found"); throw error; }
       },
       launch: compatibilityLaunch,
+      transport: (profile) => api.workers.clientTransport(profile),
     });
-    server.addHook("preClose", () => clientTools.close());
+    server.addHook("preClose", async () => { await clientTools.close(); await api.workers.close(); });
     registerCompatibilityRoutes(server, {
       clientTools,
       authorized: (authorization) => authorized({ headers: { authorization } } as FastifyRequest, config.apiToken),
@@ -686,9 +508,8 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
         }
       },
       execute: async (request, emit, signal) => {
-        const launch = compatibilityLaunch(request.profile);
         try {
-          return await executeWorker(launch.command, launch.args, { cwd: launch.cwd, env: launch.env }, request, emit, signal);
+          return await api.workers.execute(request.profile, { request }, emit, signal);
         } catch (error) {
           if (!signal.aborted) console.error(`[pi-api] Compatibility execution failed for profile ${request.profile} (${error instanceof CompatibilityError ? error.code : "worker_error"}).`);
           throw error;
@@ -1126,7 +947,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     const applicationBySlug = new Map<string, { record: ApplicationRecord; runtime: ApplicationRuntime }>();
     const applicationSettings = (record: ApplicationRecord): ApplicationSettings => ({ ...record.settings, responseMode: record.responseMode, defaultProfile: record.defaultProfile }) as ApplicationSettings;
     const ensureApplicationFiles = async (slug: string) => { const handlers = join(applicationsRoot, slug, "handlers"); await mkdir(join(handlers, "transforms"), { recursive: true }); await mkdir(join(handlers, "context-memory"), { recursive: true }); const inbound = join(handlers, "inbound.ts"); if (!existsSync(inbound)) await writeFile(inbound, applicationHandlerTemplate("inbound"), "utf8"); };
-    const loadApplication = async (record: ApplicationRecord) => { applicationBySlug.get(record.slug)?.runtime.dispose(); const directory = join(applicationsRoot, record.slug); await ensureApplicationFiles(record.slug); const runtime = await ApplicationRuntime.load(directory, api, applicationSettings(record), async (settings) => { const saved = applicationStore.update(record.slug, { settings, responseMode: settings.responseMode, defaultProfile: settings.defaultProfile ?? null }); applicationBySlug.set(saved.slug, { record: saved, runtime }); }, record); applicationBySlug.set(record.slug, { record, runtime }); };
+    const loadApplication = async (record: ApplicationRecord) => { applicationBySlug.get(record.slug)?.runtime.dispose(); const directory = join(applicationsRoot, record.slug); await ensureApplicationFiles(record.slug); const runtime = await ApplicationRuntime.load(directory, api, applicationSettings(record), async (settings) => { const saved = applicationStore.update(record.slug, { ...record, settings, responseMode: settings.responseMode, defaultProfile: settings.defaultProfile ?? null }); applicationBySlug.set(saved.slug, { record: saved, runtime }); }, record); applicationBySlug.set(record.slug, { record, runtime }); };
     for (const record of applicationStore.list()) await loadApplication(record);
     const registeredApplication = (slug: string) => { const application = applicationBySlug.get(slug); if (!application) throw Object.assign(new Error("Application not found."), { status: 404 }); return application; };
     api.setContextMemoryLogger((application, profile, identityKey, sessionId, execution) => {
@@ -1225,7 +1046,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       return apiError(reply, 404, "NOT_FOUND", "Route not found.");
     });
     server.setErrorHandler(async (error, _request, reply) => {
-      if (error.code === "FST_ERR_CTP_BODY_TOO_LARGE") return apiError(reply, 413, "BAD_REQUEST", "payload exceeds the allowed request size limit.");
+      if ((error as { code?: string })?.code === "FST_ERR_CTP_BODY_TOO_LARGE") return apiError(reply, 413, "BAD_REQUEST", "payload exceeds the allowed request size limit.");
       const typed = error as Error & { status?: number };
       if (typed.status) return apiError(reply, typed.status, "BAD_REQUEST", typed.message);
       console.error("[pi-api]", error);
