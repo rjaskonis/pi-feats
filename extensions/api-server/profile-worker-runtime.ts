@@ -180,7 +180,7 @@ class Worker {
 
 export type ProfileWorkerOptions = {
   agentDir: string;
-  launch(profile: string): ClientLaunch;
+  launch(profile: string, signal: AbortSignal): ClientLaunch | Promise<ClientLaunch>;
   version?(profile: string): Promise<string>;
   warn?(message: string): void;
   /** Tests can shorten only the configuration polling interval. */
@@ -191,6 +191,7 @@ export class ProfileWorkerRuntime {
   private lanes = new Map<string, Lane>();
   private workers = new Set<Worker>();
   private closed = false;
+  private shutdown = new AbortController();
   private seconds = 600;
   private watcher?: ReturnType<typeof setInterval>;
   private refreshing?: Promise<void>;
@@ -304,7 +305,12 @@ export class ProfileWorkerRuntime {
       if (this.closed) throw failure();
       if (trace) trace.worker = lane.worker ? "reused" : "cold";
       if (!lane.worker) {
-        const worker = lane.worker = new Worker(this.options.launch(profile), version, this.options.version ? () => this.options.version!(profile) : undefined);
+        const launchSignal = AbortSignal.any([signal, this.shutdown.signal, AbortSignal.timeout(60_000)]);
+        const launch = await this.options.launch(profile, launchSignal);
+        signal.throwIfAborted();
+        if (this.closed) throw failure();
+        if (launchSignal.aborted) throw failure();
+        const worker = lane.worker = new Worker(launch, version, this.options.version ? () => this.options.version!(profile) : undefined);
         this.workers.add(worker); void worker.done.then(() => this.workers.delete(worker));
       }
       if (trace) trace.launcherPid = lane.worker.child.pid;
@@ -322,9 +328,10 @@ export class ProfileWorkerRuntime {
   }
   async close(): Promise<void> {
     this.closed = true;
+    this.shutdown.abort();
     if (this.watcher) clearInterval(this.watcher);
     for (const worker of this.workers) worker.stop();
-    await Promise.all([...this.workers].map((worker) => worker.done));
+    await Promise.all([...this.workers].map((worker) => worker.done).concat([...this.lanes.values()].map(lane => lane.tail)));
   }
 }
 
@@ -363,7 +370,7 @@ async function fingerprintResources(root: string, directory: string): Promise<st
       const path = resolve(base, declaration.replace(/^\+/, "").replace(/^~\//, `${homedir()}/`));
       for (const resource of /[*?\[{}]/.test(path) ? globSync(path) : [path]) await walk(resource);
     }
-    for (const name of ["settings.json", "models.json", "auth.json", "guardrails.json", "mcp.json", "SOUL.md", ".env"]) {
+    for (const name of ["settings.json", "models.json", "auth.json", "guardrails.json", "mcp.json", "nono.json", "SOUL.md", ".env"]) {
       let value = await readFile(join(base, name), "utf8").catch((error) => { if (error.code === "ENOENT") return ""; throw error; });
       if (base === root && name === ".env") { const values = parseProfileEnv(value); delete values[TIMEOUT_KEY]; value = JSON.stringify(values); }
       hash.update(base + name + value);

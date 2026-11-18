@@ -2,28 +2,18 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Box, render, Text } from "ink";
 import React from "react";
 import { existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { ensureNonoAvailable, ensureProfileSandbox, isSandboxEnabled, migrateLegacySandboxRuntime, sandboxedCommand } from "./lib/profile-sandbox.ts";
-import { profileEnvironment, registerProfileEnvReload } from "./lib/profile-env.ts";
-import { extensionCatalog } from "./lib/extension-catalog.ts";
+import { ensureNonoAvailable, ensureProfileSandbox } from "./lib/profile-sandbox.ts";
+import { registerProfileEnvReload } from "./lib/profile-env.ts";
+import { linkSharedModels, prepareProfileLaunch, readProfileSettings as readJson, removeProfileRuntimeArtifacts, sharedResources, validProfileName, type ProfileSettings } from "./lib/profile-launch.ts";
+export { forwardedProfileExecutionEnvironment, rootRuntimeSources, sharedResources } from "./lib/profile-launch.ts";
 import { handleRemoteCli, REMOTE_COMMAND_NAMES } from "./lib/remote-hosts.ts";
 import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
 import { sessionListDirectoryEnvironment } from "./lib/session-list-directory.ts";
-
-type ProfilePolicy = {
-  enabledTools?: string[];
-  enabledSkills?: string[];
-  enabledProfileSkills?: string[];
-  enabledExtensions?: string[];
-  skillSources?: { shared?: boolean; profile?: boolean };
-  contextMemory?: { mode: "none" } | { mode: "file"; target: "profile" | "identity" } | { mode: "handler"; handler: string };
-};
-
-type ProfileSettings = Record<string, unknown> & { profile?: ProfilePolicy };
 
 const defaultAgentDir = join(homedir(), ".pi", "agent");
 
@@ -35,13 +25,7 @@ export function resolveRootAgentDir(environment: NodeJS.ProcessEnv = process.env
 
 const rootAgentDir = () => resolveRootAgentDir();
 const profilesDir = () => join(rootAgentDir(), "profiles");
-const PROFILE_REEXEC_CONTEXT_ENV = ["PI_OPENAI_WORKER", "PI_OPENAI_CLIENT_TOOLS_WORKER", "PI_PROFILE_WORKER", "PI_APPLICATION_IDENTITY_KEY", "PI_APPLICATION_SLUG", "PI_APPLICATION_SESSION_ID", "PI_APPLICATION_DIRECT_CONTEXT_MEMORY", "PI_APPLICATION_HANDOFF"] as const;
-
-export function forwardedProfileExecutionEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return Object.fromEntries(PROFILE_REEXEC_CONTEXT_ENV.flatMap((key) => environment[key] === undefined ? [] : [[key, environment[key]!]]));
-}
 const profileDir = (name: string) => join(profilesDir(), name);
-const validProfileName = (name: string) => /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name);
 const reservedProfileNames = new Set([
   "add", "create", "delete", "disable", "enable", "extensions", "guardrails", "list", "open", "packages", "profile", "pulse", "remove", "rename", "resume", "sessions", "skills", "ssh", "tools", "validate",
   ...REMOTE_COMMAND_NAMES,
@@ -107,70 +91,6 @@ async function writeStdout(text: string) {
   });
 }
 
-async function readJson(path: string): Promise<ProfileSettings> {
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as ProfileSettings;
-  } catch (error) {
-    throw new Error(`could not read ${path}: ${error instanceof Error ? error.message : String(error)}`);
-  }
-}
-
-async function packageSkillRoots(root: string): Promise<string[]> {
-  let settings: ProfileSettings = {};
-  try { settings = await readJson(join(root, "settings.json")); } catch { return []; }
-  const roots: string[] = [];
-  if (!Array.isArray(settings.packages)) return roots;
-  for (const entry of settings.packages) {
-    const source = typeof entry === "object" && entry !== null ? (entry as { source?: unknown }).source : entry;
-    if (typeof source !== "string") continue;
-    const packagePath = packageInstallPath(root, source);
-    if (!packagePath) continue;
-    try {
-      const manifest = JSON.parse(await readFile(join(packagePath, "package.json"), "utf8")) as { pi?: { skills?: unknown } };
-      if (Array.isArray(manifest.pi?.skills)) for (const skill of manifest.pi.skills) if (typeof skill === "string" && existsSync(join(packagePath, skill))) roots.push(join(packagePath, skill));
-    } catch {}
-  }
-  return roots;
-}
-
-export async function sharedResources(root: string, policy: ProfilePolicy = {}, localSkillsDir?: string) {
-  // Extensions are loaded through Pi package settings. Named profiles need
-  // package Skill paths materialized explicitly because their settings omit
-  // packages and Pi otherwise only discovers workspace-local skills.
-  const selectedSharedSkills = !policy.enabledSkills || policy.enabledSkills.includes("*");
-  const packageSkills = policy.skillSources?.shared === false ? [] : (await packageSkillRoots(root)).flatMap((skillRoot) => selectedSharedSkills ? [skillRoot] : policy.enabledSkills!.map((name) => join(skillRoot, name)).filter(existsSync));
-  return {
-    skills: [
-      ...(policy.skillSources?.profile === true && localSkillsDir ? (!policy.enabledProfileSkills || policy.enabledProfileSkills.includes("*") ? [localSkillsDir] : policy.enabledProfileSkills.map((name) => join(localSkillsDir, name)).filter(existsSync)) : []),
-      ...(policy.skillSources?.shared !== false ? (selectedSharedSkills ? [join(root, "skills")] : policy.enabledSkills!.map((name) => join(root, "skills", name)).filter(existsSync)) : []),
-      ...packageSkills,
-    ],
-    prompts: [join(root, "prompts")],
-    themes: [join(root, "themes")],
-  };
-}
-
-function packageInstallPath(root: string, source: string): string | undefined {
-  if (source.startsWith("npm:")) {
-    const spec = source.slice(4);
-    const versionAt = spec.lastIndexOf("@");
-    const packageName = versionAt > (spec.startsWith("@") ? spec.indexOf("/") : -1) ? spec.slice(0, versionAt) : spec;
-    const path = join(root, "npm", "node_modules", packageName);
-    return existsSync(join(path, "package.json")) ? path : undefined;
-  }
-  if (!source.startsWith("git:") && !/^(?:https?|ssh|git):\/\//.test(source)) return undefined;
-  let remote = source.replace(/^git:/, "");
-  const refAt = remote.lastIndexOf("@");
-  if (refAt > remote.lastIndexOf("/")) remote = remote.slice(0, refAt);
-  remote = remote.replace(/^(?:https?|git):\/\//, "").replace(/^ssh:\/\/git@/, "").replace(/^git@/, "").replace(/^([^/:]+):/, "$1/").replace(/\.git$/, "");
-  const path = join(root, "git", remote);
-  return existsSync(join(path, "package.json")) ? path : undefined;
-}
-
-export async function rootRuntimeSources(root: string, base: ProfileSettings): Promise<string[]> {
-  return (await extensionCatalog(root, base)).filter((entry) => entry.enabled).map((entry) => entry.path);
-}
-
 async function profileSettings(root: string, base: ProfileSettings, localSkillsDir: string): Promise<ProfileSettings> {
   const { packages: _packages, extensions: _extensions, ...profileBase } = base;
   return {
@@ -228,18 +148,6 @@ async function listProfiles() {
   });
   await new Promise((resolveRender) => setTimeout(resolveRender, 25));
   app.unmount();
-}
-
-async function removeProfileRuntimeArtifacts(destination: string) {
-  // These locations belonged to the former per-profile extension bootstrap.
-  // A profile is a workspace, never a package or extension installation root.
-  await Promise.all(["extensions", "git", "npm", "node_modules"].map((name) => rm(join(destination, name), { recursive: true, force: true })));
-}
-
-async function linkSharedModels(root: string, destination: string): Promise<void> {
-  const source = join(root, "models.json"), target = join(destination, "models.json");
-  await rm(target, { force: true });
-  if (existsSync(source)) await symlink(source, target);
 }
 
 async function createProfile(name: string) {
@@ -339,65 +247,20 @@ function extractProfile(args: string[]) {
   return undefined;
 }
 
-async function syncProfileResources(name: string) {
-  if (name === "default") return;
-  const settingsPath = join(profileDir(name), "settings.json");
-  const root = rootAgentDir();
-  const settings = await readJson(settingsPath);
-  // Packages and extensions belong to the default runtime. Profiles only own
-  // workspace state and resource policy; rootRuntimeSources() injects the
-  // shared runtime when this profile is launched.
-  delete settings.packages;
-  delete settings.extensions;
-  if (settings.profile) delete settings.profile.enabledExtensions;
-  Object.assign(settings, await sharedResources(root, settings.profile, join(profileDir(name), "skills")));
-  await writeFile(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
-  await removeProfileRuntimeArtifacts(profileDir(name));
-  await linkSharedModels(root, profileDir(name));
-}
-
 async function reexecWithProfile(name: string, args: string[]) {
   if (name !== "default" && (!validProfileName(name) || !existsSync(join(profileDir(name), "settings.json")))) {
     fail(`profile '${name}' does not exist.`);
   }
-  const root = rootAgentDir();
-  const target = name === "default" ? root : profileDir(name);
-  if (name !== "default") await migrateLegacySandboxRuntime(target);
-  await syncProfileResources(name);
-  const baseSettingsPath = join(root, "settings.json");
-  const rootSettings = existsSync(baseSettingsPath) ? await readJson(baseSettingsPath) : {};
-  // The default runtime owns extensions and packages. Named profiles receive
-  // their already installed local paths, never npm:/git: specs. The default
-  // profile already loads these resources from its own settings.
-  const runtimeSources = name === "default" ? [] : await rootRuntimeSources(root, rootSettings);
-  const extensionArgs = runtimeSources.flatMap((source) => ["--extension", source]);
-  const sessionArgs = name === "default" ? [] : ["--session-dir", join(target, "sessions")];
+  const runtimeEntry = resolve(process.argv[1]);
   const compatibilityWorker = process.env.PI_OPENAI_WORKER === "1";
-  const piArgs = compatibilityWorker
-    ? [fileURLToPath(new URL("./api-server/openai-worker.mjs", import.meta.url)), resolve(process.argv[1]), ...extensionArgs]
-    : [resolve(process.argv[1]), ...extensionArgs, ...sessionArgs, ...args];
-  // The default profile is intentionally never sandboxed. Named profiles run
-  // directly in their own persistent directory; nono enforces their policy.
-  const sandbox = await isSandboxEnabled(target, name === "default");
-  const childEnv: NodeJS.ProcessEnv = {
-    ...await profileEnvironment(target),
-    ...forwardedProfileExecutionEnvironment(),
-    ...await sessionListDirectoryEnvironment(args),
-    PI_CODING_AGENT_DIR: target,
-    PI_PROFILE_ROOT: root,
-    PI_PROFILE_REEXEC: "1",
-    PI_ACTIVE_PROFILE: name,
-  };
-  if (name === "default") delete childEnv.PI_CODING_AGENT_SESSION_DIR;
-  else childEnv.PI_CODING_AGENT_SESSION_DIR = join(target, "sessions");
-  const launch = sandbox
-    ? sandboxedCommand(await ensureProfileSandbox(target, resolve(process.argv[1]), runtimeSources), target, process.execPath, piArgs)
-    : { command: process.execPath, args: piArgs };
-  const child = spawn(launch.command, launch.args, {
-    cwd: sandbox ? target : process.cwd(),
-    stdio: "inherit",
-    env: childEnv,
+  const launch = await prepareProfileLaunch({
+    root: rootAgentDir(), name, cwd: process.cwd(), runtimeEntry,
+    extraEnvironment: () => sessionListDirectoryEnvironment(args),
+    arguments: (extensionArgs, sessionArgs) => compatibilityWorker
+      ? [fileURLToPath(new URL("./api-server/openai-worker.mjs", import.meta.url)), runtimeEntry, ...extensionArgs]
+      : [runtimeEntry, ...extensionArgs, ...sessionArgs, ...args],
   });
+  const child = spawn(launch.command, launch.args, { cwd: launch.cwd, stdio: "inherit", env: launch.env });
   const code = await new Promise<number>((resolveExit, reject) => {
     child.once("error", reject);
     child.once("exit", (exitCode) => resolveExit(exitCode ?? 1));

@@ -28,6 +28,9 @@ test("resource signatures detect configuration/code changes but ignore idle-time
   const initial = await profileWorkerVersion(f.root, f.root);
   await writeFile(join(f.root, ".env"), "TOKEN=private\nPI_API_WORKER_IDLE_TIMEOUT_SECONDS=2\n");
   assert.equal(await profileWorkerVersion(f.root, f.root), initial);
+  await writeFile(join(f.root, "nono.json"), JSON.stringify({ metadata: "policy changed" }));
+  assert.notEqual(await profileWorkerVersion(f.root, f.root), initial);
+  await rm(join(f.root, "nono.json"));
   await writeFile(extension, "export default function() { /* changed source */ }\n");
   assert.notEqual(await profileWorkerVersion(f.root, f.root), initial);
   await writeFile(join(f.root, ".env"), "TOKEN=replaced\n");
@@ -62,6 +65,29 @@ test("startup-generated resource changes establish the reuse baseline after init
   const run = () => pool.execute("support", { request: normalizeRequest({ model: "support", input: "hello" }, "responses") }, async () => {}, new AbortController().signal);
   assert.equal((await run()).text, (await run()).text); assert.equal(f.launches, 1);
   version = "updated"; await run(); assert.equal(f.launches, 2);
+});
+
+for (const abortMode of ["request", "shutdown"] as const) test(`async launch cannot spawn after ${abortMode} cancellation`, async (t) => {
+  const f = await fixture(t);
+  let entered!: () => void, finish!: () => void;
+  const started = new Promise<void>(resolve => { entered = resolve; });
+  const barrier = new Promise<void>(resolve => { finish = resolve; });
+  let launchSignal: AbortSignal | undefined;
+  const pool = new ProfileWorkerRuntime({ agentDir: f.root, launch: async (_profile, signal) => {
+    launchSignal = signal; entered(); await barrier;
+    return f.launch();
+  } });
+  t.after(() => pool.close());
+  const controller = new AbortController();
+  const pending = pool.execute("support", { request: normalizeRequest({ model: "support", input: "hello" }, "responses") }, async () => {}, controller.signal);
+  const rejected = assert.rejects(pending);
+  await started;
+  const closed = abortMode === "shutdown" ? pool.close() : undefined;
+  if (!closed) controller.abort();
+  assert.equal(launchSignal?.aborted, true);
+  finish();
+  await rejected; await closed;
+  assert.equal(pool.size, 0);
 });
 
 test("profile queues reject excess reservations rather than allocating more processes", async (t) => {

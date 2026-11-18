@@ -23,6 +23,7 @@ import { CompatibilityError } from "./openai-contract.ts";
 import { ClientToolsRuntime } from "./openai-client-runtime.ts";
 import { ProfileWorkerRuntime, profileWorkerVersion } from "./profile-worker-runtime.ts";
 import type { ProfileJob } from "./profile-worker.ts";
+import { launchProfileWorkerDirect, launchProfileWorkerViaCli } from "./profile-worker-launch.ts";
 import { applicationHandlerTemplate } from "../lib/application-handler-templates.ts";
 import { type ContextMemoryExecutionLog } from "../lib/application-context.ts";
 import { contextMemoryCharacters, contextMemoryConfig, contextMemoryLimit, memoryPath, readMemory } from "../lib/context-memory.ts";
@@ -38,6 +39,7 @@ type ApiConfig = {
   apiToken: string;
   cors: { origin: string };
   publicBaseUrl?: string;
+  workerLauncher: "direct" | "cli";
 };
 type ServerOptions = { agentDir: string; cwd: string };
 type ChatBody = { message: string };
@@ -53,7 +55,9 @@ let profileBootstrap = Promise.resolve();
 async function loadConfig(agentDir: string): Promise<ApiConfig> {
   const api = JSON.parse(await readFile(join(agentDir, "api-server.json"), "utf8")) as Partial<ApiConfig>;
   if (!api.apiToken || typeof api.apiToken !== "string") throw new Error("apiToken is missing from api-server.json");
+  if (api.workerLauncher !== undefined && api.workerLauncher !== "direct" && api.workerLauncher !== "cli") throw new Error('workerLauncher must be "direct" or "cli".');
   return {
+    workerLauncher: api.workerLauncher ?? "direct",
     host: typeof api.host === "string" && api.host ? api.host : "0.0.0.0",
     port: typeof api.port === "number" ? api.port : 8767,
     apiToken: api.apiToken,
@@ -480,20 +484,16 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     const api = new ApiServer(options, config);
     const server = Fastify({ bodyLimit: MAX_BODY_BYTES, logger: false });
     await server.register(websocket);
-    const compatibilityLaunch = (profile: string) => {
-      const pi = piCommand();
-      const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: options.agentDir, PI_PROFILE_ROOT: options.agentDir, PI_OPENAI_WORKER: "1", PI_OPENAI_CLIENT_TOOLS_WORKER: "0" };
-      for (const key of Object.keys(env)) if (key.startsWith("PI_APPLICATION_") || key === "PI_API_WORKER" || key === "PI_PROFILE_DISCOVER_TOOLS") delete env[key];
-      return { command: pi.command, args: [...pi.args, "profile", profile, "--mode", "rpc", "--no-session"], cwd: api.profiles.directory(profile), env };
-    };
-    api.workers = new ProfileWorkerRuntime({ agentDir: options.agentDir, launch: compatibilityLaunch,
+    const cliLaunch = (profile: string) => launchProfileWorkerViaCli(options.agentDir, profile, api.profiles.directory(profile));
+    api.workers = new ProfileWorkerRuntime({ agentDir: options.agentDir,
+      launch: config.workerLauncher === "cli" ? cliLaunch : (profile, signal) => launchProfileWorkerDirect(options.agentDir, profile, api.profiles.directory(profile), signal),
       version: (profile) => profileWorkerVersion(options.agentDir, api.profiles.directory(profile)), warn: (message) => console.warn(message) });
     const clientTools = new ClientToolsRuntime({
       settings: async (profile) => {
         try { return await api.profiles.readSettings(profile); }
         catch (error) { if ((error as { status?: number }).status === 404) throw new CompatibilityError("The requested Pi profile does not exist.", "model", 404, "model_not_found"); throw error; }
       },
-      launch: compatibilityLaunch,
+      launch: cliLaunch,
       transport: (profile) => api.workers.clientTransport(profile),
     });
     server.addHook("preClose", async () => { await clientTools.close(); await api.workers.close(); });

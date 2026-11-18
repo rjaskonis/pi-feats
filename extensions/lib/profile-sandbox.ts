@@ -96,12 +96,14 @@ export function nonoPolicy(profileDir: string, runtimeEntry: string, skillSource
   };
 }
 
-async function run(command: string, args: string[], stdio: "ignore" | "inherit" = "ignore"): Promise<void> {
+async function run(command: string, args: string[], stdio: "ignore" | "inherit" = "ignore", signal?: AbortSignal): Promise<void> {
   await new Promise<void>((resolveRun, reject) => {
-    const child = spawn(command, args, { stdio });
-    child.once("error", reject);
-    child.once("exit", (code) => {
-      if (code === 0) resolveRun();
+    const child = spawn(command, args, { stdio, signal });
+    let spawnError: Error | undefined;
+    child.once("error", error => { spawnError = error; });
+    child.once("close", (code) => {
+      if (spawnError) reject(spawnError);
+      else if (code === 0) resolveRun();
       else reject(new Error(command + " exited with " + String(code)));
     });
   });
@@ -112,9 +114,9 @@ function nonoExecutable(): string {
   return existsSync(local) ? local : "nono";
 }
 
-async function hasNono(): Promise<boolean> {
-  try { await run(nonoExecutable(), ["--version"]); return true; }
-  catch { return false; }
+async function hasNono(signal?: AbortSignal): Promise<boolean> {
+  try { await run(nonoExecutable(), ["--version"], "ignore", signal); return true; }
+  catch { signal?.throwIfAborted(); return false; }
 }
 
 async function confirmNonoInstall(): Promise<boolean> {
@@ -143,15 +145,16 @@ async function installNono(): Promise<void> {
 }
 
 /** Ensures the Nono binary required by sandboxed Profiles is available. */
-export async function ensureNonoAvailable(): Promise<void> {
-  if (await hasNono()) return;
+export async function ensureNonoAvailable(options: { interactive?: boolean; signal?: AbortSignal } = {}): Promise<void> {
+  if (await hasNono(options.signal)) return;
+  if (options.interactive === false) throw new Error("Nono is required for sandboxed Profiles. Install it with: curl -fsSL https://nono.sh/install.sh | sh");
   if (!await confirmNonoInstall()) throw new Error("Nono is required for sandboxed Profiles. Profile operation cancelled.");
   await installNono();
   if (!await hasNono()) throw new Error("Nono installation completed but the executable is unavailable. Add ~/.local/bin to PATH and retry.");
 }
 
-export async function ensureProfileSandbox(profileDir: string, runtimeEntry: string, sharedRuntimeSources: string[] = []): Promise<string> {
-  await ensureNonoAvailable();
+export async function ensureProfileSandbox(profileDir: string, runtimeEntry: string, sharedRuntimeSources: string[] = [], options: { interactive?: boolean; signal?: AbortSignal } = {}): Promise<string> {
+  await ensureNonoAvailable(options);
   const path = nonoConfigPath(profileDir);
   let settings: ProfileSandboxSettings = {};
   try { settings = JSON.parse(await readFile(join(profileDir, "settings.json"), "utf8")) as ProfileSandboxSettings; } catch {}
@@ -172,7 +175,7 @@ export async function ensureProfileSandbox(profileDir: string, runtimeEntry: str
     if (current?.meta?.description === managedDescription) await writePolicy(policy);
   }
   await access(path);
-  await run(nonoExecutable(), ["profile", "validate", path]);
+  await run(nonoExecutable(), ["profile", "validate", path], "ignore", options.signal);
   return path;
 }
 

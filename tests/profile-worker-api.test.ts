@@ -89,7 +89,7 @@ export default function(pi) {
   const settings = { extensions: [...manifest.pi.extensions.map((path: string) => resolve(path)), probe, externalEntry, ...terminal, ...integrationPaths], defaultProvider: "fixture", defaultModel: "fixture", defaultThinkingLevel: "off", compaction: { enabled: false } };
   await writeFile(join(root, "settings.json"), JSON.stringify(settings));
   await writeFile(join(root, ".env"), "PI_API_WORKER_IDLE_TIMEOUT_SECONDS=1\n");
-  await writeFile(join(root, "api-server.json"), JSON.stringify({ host: "127.0.0.1", port: 0, apiToken: "fixture-token" }));
+  await writeFile(join(root, "api-server.json"), JSON.stringify({ host: "127.0.0.1", port: 0, apiToken: "fixture-token", workerLauncher: process.env.PI_OPENAI_TEST_WORKER_LAUNCHER }));
   await writeFile(join(profile, "settings.json"), JSON.stringify({ ...settings, extensions: undefined, sandbox: process.env.PI_OPENAI_TEST_NONO === "1", profile: { enabledTools: ["read"] } }));
   await writeFile(join(root, "models.json"), JSON.stringify({ providers: { fixture: { api: "openai-completions", apiKey: "local-only", baseUrl: `http://127.0.0.1:${port}/v1`, models: [{ id: "fixture", name: "Fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }] } } }));
   const child = spawn(process.execPath, [resolve("tests/fixtures/profile-api.mjs"), root, cli!], { stdio: ["ignore", "pipe", "pipe", "ipc"], env: { ...process.env, PI_COMPUTER_USE_LINUX_HELPER_PATH: "BASE_HELPER_FIXTURE" } });
