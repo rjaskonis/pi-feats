@@ -507,6 +507,8 @@ pi remote delete production --force
 
 The `remote:<name>` form forwards the rest of the command to the selected remote host or container. It never reinterprets the remote profile or resources locally.
 
+If Pi exits with `ENOTCONN` from `uv_cwd` when launched from a disconnected SSHFS mount, the local Pi CLI could not read its working directory. This happens before remote command dispatch. Run the command from a healthy local directory, for example `(cd "$HOME" && pi remote:production bash)`. If the mount has recovered but the original terminal is still attached to the old mount, leave the directory and enter it again by its absolute path.
+
 ## Included extensions
 
 | Extension | Responsibility |
