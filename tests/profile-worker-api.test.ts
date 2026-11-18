@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, writeFile, readFile, rm, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir, symlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
@@ -12,6 +12,9 @@ test("HTTP compatibility and Direct share a resident profile process, preserve s
   // /tmp is broadly accessible in the sandbox, so isolation probes live outside it.
   const root = await mkdtemp(join(homedir(), ".cache", "pi-profile-worker-api-")), profile = join(root, "profiles", "support");
   await mkdir(profile, { recursive: true }); t.after(() => rm(root, { recursive: true, force: true }));
+  // Optional installed npm dependencies belong to the shared runtime, not the
+  // profile. The sandbox grants this runtime tree read-only, as in production.
+  if (process.env.PI_OPENAI_TEST_RUNTIME_NPM_DIR) await symlink(process.env.PI_OPENAI_TEST_RUNTIME_NPM_DIR, join(root, "npm"), "dir");
   const ownFile = join(profile, "own.txt"), neighborFile = join(root, "profiles", "neighbor", "private.txt");
   await mkdir(join(root, "profiles", "neighbor"), { recursive: true });
   await writeFile(ownFile, "OWN_WORKSPACE_DATA"); await writeFile(neighborFile, "NEIGHBOR_WORKSPACE_SECRET");
@@ -40,15 +43,21 @@ test("HTTP compatibility and Direct share a resident profile process, preserve s
   t.after(() => new Promise<void>((resolve) => provider.close(() => resolve())));
   const port = (provider.address() as { port: number }).port;
   const probe = join(root, "probe.ts");
-  await writeFile(probe, `const identity = process.env.PI_APPLICATION_IDENTITY_KEY ?? "none"; const directMemory = process.env.PI_APPLICATION_DIRECT_CONTEXT_MEMORY ? Buffer.from(process.env.PI_APPLICATION_DIRECT_CONTEXT_MEMORY, "base64url").toString() : "none"; let turns=0;
+  await writeFile(probe, `import { AsyncLocalStorage } from "node:async_hooks";
+const proxyStorage = globalThis[Symbol.for("pi-web-access.proxyStorage")] ??= new AsyncLocalStorage();
+const previousProxy = proxyStorage.getStore() ?? "none";
+const previousHelper = process.env.PI_COMPUTER_USE_LINUX_HELPER_PATH;
+process.env.PI_COMPUTER_USE_LINUX_HELPER_PATH = "/fixture/installation/bin/linux-bridge";
+const identity = process.env.PI_APPLICATION_IDENTITY_KEY ?? "none"; const directMemory = process.env.PI_APPLICATION_DIRECT_CONTEXT_MEMORY ? Buffer.from(process.env.PI_APPLICATION_DIRECT_CONTEXT_MEMORY, "base64url").toString() : "none"; let turns=0;
 export default function(pi) {
   let brokenCleanup = false;
   if (identity === "customprovider") pi.registerProvider("scope-fixture", { api: "openai-completions", apiKey: "local-only", baseUrl: "http://127.0.0.1:1", models: [] });
-  pi.on("before_agent_start", (event, ctx) => {
+  pi.on("before_agent_start", async (event, ctx) => proxyStorage.run(identity, async () => {
+    await Promise.resolve();
     if (JSON.stringify(event).includes("DIRTY_JOB_MARKER")) { setInterval(() => {}, 60000).unref(); process.on("beforeExit", () => {}); globalThis.__fixtureIdentity = identity; }
     if (JSON.stringify(event).includes("BROKEN_CLEANUP_MARKER")) brokenCleanup = true;
-    return { systemPrompt: event.systemPrompt + "\\nWORKER_PID=" + process.pid + ";IDENTITY=" + identity + ";TURNS=" + (++turns) + ";MEMORY=" + directMemory + ";GLOBAL=" + (globalThis.__fixtureIdentity ?? "none") + ";CUSTOM_PROVIDER=" + ctx.modelRegistry.getRegisteredProviderIds().includes("scope-fixture") };
-  });
+    return { systemPrompt: event.systemPrompt + "\\nWORKER_PID=" + process.pid + ";IDENTITY=" + identity + ";TURNS=" + (++turns) + ";MEMORY=" + directMemory + ";GLOBAL=" + (globalThis.__fixtureIdentity ?? "none") + ";CUSTOM_PROVIDER=" + ctx.modelRegistry.getRegisteredProviderIds().includes("scope-fixture") + ";PROXY=" + proxyStorage.getStore() + ";PREVIOUS_PROXY=" + previousProxy + ";PREVIOUS_HELPER=" + previousHelper };
+  }));
   pi.on("session_shutdown", () => { if (brokenCleanup) throw new Error("Fixture cleanup failed"); });
 }`);
   const external = await mkdtemp(join(homedir(), ".cache", "pi-worker-external-extension-"));
@@ -63,23 +72,35 @@ export default function(pi) {
   try { writeFileSync(${JSON.stringify(join(external, "write-probe.txt"))}, "probe"); writable = true; } catch {}
   pi.on("before_agent_start", (event) => ({ systemPrompt: event.systemPrompt + "\\n" + marker + ";EXTERNAL_WRITABLE=" + writable }));
 }`);
+  const terminal = ["orca-agent-status.ts", "orca-titlebar-spinner.ts", "orca-prefill.ts"].map(name => join(root, name));
+  for (const path of terminal) await writeFile(path, '// @orca-managed-pi-extension\nthrow new Error("Headless workers must not evaluate terminal presentation modules");\n');
   const manifest = JSON.parse(await readFile(resolve("package.json"), "utf8"));
   // Exercise every shipped extension's real startup/shutdown lifecycle. Browser,
   // Composio and other external-service tools are never invoked by this fixture.
-  const settings = { extensions: [...manifest.pi.extensions.map((path: string) => resolve(path)), probe, externalEntry], defaultProvider: "fixture", defaultModel: "fixture", defaultThinkingLevel: "off", compaction: { enabled: false } };
+  // Opt in to local third-party lifecycle validation without calling their tools
+  // or reading real credentials. Generation still uses the localhost mock.
+  const integrationPaths = JSON.parse(process.env.PI_OPENAI_TEST_EXTERNAL_EXTENSIONS ?? "[]");
+  assert.ok(Array.isArray(integrationPaths) && integrationPaths.every(path => typeof path === "string"));
+  const settings = { extensions: [...manifest.pi.extensions.map((path: string) => resolve(path)), probe, externalEntry, ...terminal, ...integrationPaths], defaultProvider: "fixture", defaultModel: "fixture", defaultThinkingLevel: "off", compaction: { enabled: false } };
   await writeFile(join(root, "settings.json"), JSON.stringify(settings));
   await writeFile(join(root, ".env"), "PI_API_WORKER_IDLE_TIMEOUT_SECONDS=1\n");
   await writeFile(join(root, "api-server.json"), JSON.stringify({ host: "127.0.0.1", port: 0, apiToken: "fixture-token" }));
   await writeFile(join(profile, "settings.json"), JSON.stringify({ ...settings, extensions: undefined, sandbox: process.env.PI_OPENAI_TEST_NONO === "1", profile: { enabledTools: ["read"] } }));
   await writeFile(join(root, "models.json"), JSON.stringify({ providers: { fixture: { api: "openai-completions", apiKey: "local-only", baseUrl: `http://127.0.0.1:${port}/v1`, models: [{ id: "fixture", name: "Fixture", reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 4096 }] } } }));
-  const child = spawn(process.execPath, [resolve("tests/fixtures/profile-api.mjs"), root, cli!], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+  const child = spawn(process.execPath, [resolve("tests/fixtures/profile-api.mjs"), root, cli!], { stdio: ["ignore", "pipe", "pipe", "ipc"], env: { ...process.env, PI_COMPUTER_USE_LINUX_HELPER_PATH: "BASE_HELPER_FIXTURE" } });
   let diagnostics = ""; child.stdout.on("data", (chunk) => { diagnostics += chunk; }); child.stderr.on("data", (chunk) => { diagnostics += chunk; });
   const ended = new Promise((resolve) => child.once("close", resolve));
   t.after(async () => { child.send?.("close"); await ended; });
   const address = await new Promise<any>((resolve, reject) => { child.once("message", resolve); child.once("error", reject); child.once("exit", (code) => reject(new Error(`API exited ${code}: ${diagnostics}`))); });
   const post = async (path: string, payload: unknown, method = "POST", expected = 200) => {
     const res = await fetch(`http://127.0.0.1:${address.port}${path}`, { method, headers: { authorization: "Bearer fixture-token", "content-type": "application/json" }, body: JSON.stringify(payload) });
-    const text = await res.text(); assert.equal(res.status, expected, `${text}\nFixture calls: ${JSON.stringify(calls.slice(-2))}`); return res.headers.get("content-type")?.includes("text/event-stream") ? text : JSON.parse(text);
+    const text = await res.text();
+    if (expected === 200 && calls.length) {
+      const messages = JSON.stringify(calls.at(-1).messages);
+      assert.match(messages, /PREVIOUS_PROXY=none/);
+      if (!integrationPaths.length) assert.match(messages, /PREVIOUS_HELPER=BASE_HELPER_FIXTURE/);
+    }
+    assert.equal(res.status, expected, `${text}\nFixture calls: ${JSON.stringify(calls.slice(-2))}`); return res.headers.get("content-type")?.includes("text/event-stream") ? text : JSON.parse(text);
   };
   const wire = () => JSON.stringify(calls.at(-1).messages);
   const pid = () => wire().match(/WORKER_PID=(\d+)/)?.[1];

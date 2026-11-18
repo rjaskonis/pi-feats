@@ -1,6 +1,7 @@
 /** Profile-resident transport. Every job constructs and disposes its own session. */
 import { createInterface } from "node:readline";
 import { ProfileJobScope } from "./profile-job-scope.ts";
+import { initializeWorkerInfrastructure, preserveComputerUseConfiguration } from "./worker-infrastructure.ts";
 import { ClientWorker } from "./openai-client-worker.ts";
 import { runCompatibilityWorker, WORKER_EVENT_PREFIX, type CompatibilityWorkerHooks, type ResidentExecution } from "./openai-execution.ts";
 import type { CompletionRequest } from "./openai-contract.ts";
@@ -14,6 +15,7 @@ export type ProfileJob = {
 
 export async function runProfileWorker(host: typeof import("@earendil-works/pi-coding-agent"), clearExtensionCache: () => void): Promise<void> {
   process.env.PI_OPENAI_WORKER = "running";
+  initializeWorkerInfrastructure(host);
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
   const resident: ResidentExecution = {};
   let busy = false, stopping = false;
@@ -47,6 +49,7 @@ export async function runProfileWorker(host: typeof import("@earendil-works/pi-c
     delete process.env.PI_PROFILE_WORKER_RETIRE;
     // Initialize lazy stdio handles before the job's lifecycle snapshot.
     void process.stdout; void process.stderr;
+    const restoreComputerUse = preserveComputerUseConfiguration();
     const scope = new ProfileJobScope();
     resident.retire = false;
     // This is a single-profile process, with serialized jobs. Environment-backed
@@ -90,6 +93,7 @@ export async function runProfileWorker(host: typeof import("@earendil-works/pi-c
       clearExtensionCache();
       for (const key of Object.keys(process.env)) if (key.startsWith("PI_APPLICATION_")) delete process.env[key];
       resident.application = undefined; resident.event = undefined;
+      restoreComputerUse();
       const clean = await scope.finish();
       if (!clean || process.env.PI_PROFILE_WORKER_RETIRE === "1") resident.retire = true;
     }

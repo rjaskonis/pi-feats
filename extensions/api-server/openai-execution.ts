@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { prepareAttachments, extractPreparedDocuments } from "./openai-attachments.ts";
 import { CODEX_FILE_API, canAttemptVisualInput, hasNativePdfInput, installCodexFileBridge, type CodexFileBridge } from "./openai-codex-files.ts";
 import { attachmentError, attachmentFailures, classifyProviderFailure, providerFailure } from "./openai-errors.ts";
+import { initializeWorkerInfrastructure } from "./worker-infrastructure.ts";
 import { OPENAI_BODY_BYTES, OPENAI_ATTACHMENT_BYTES, OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
 import { CompatibilityError, type CompletionRequest, type CompletionResult, type ExecutionEvent, type TokenUsage } from "./openai-contract.ts";
 
@@ -159,7 +160,9 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
       rawRequest = JSON.parse(input) as CompletionRequest;
     }
     let request = await prepareAttachments(rawRequest, controller.signal, { documents: "defer", ...(hooks ? { budget: hooks.attachmentBudget } : {}) });
-    const { createAgentSession, createCodemodeExtension, createToolSearchExtension, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, resizeImage, formatDimensionNote } = host ?? await import("@earendil-works/pi-coding-agent");
+    const sdk = host ?? await import("@earendil-works/pi-coding-agent");
+    if (!resident) initializeWorkerInfrastructure(sdk);
+    const { createAgentSession, createCodemodeExtension, createToolSearchExtension, createMcpExtension, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager, resizeImage, formatDimensionNote } = sdk;
     const { join } = await import("node:path");
     const agentDir = process.env.PI_CODING_AGENT_DIR!;
     const cwd = process.cwd();

@@ -52,6 +52,31 @@ before a queued job starts a replacement. Failure, cancellation and retirement
 never replay server actions. Idle expiry starts only after cleanup; reservations
 and client-tool continuations remain protected.
 
+## Process infrastructure and terminal-only integrations
+
+The worker initializes empty, profile-process infrastructure before taking the
+first job snapshot. Web Access's `pi-web-access.proxyStorage` is an empty
+AsyncLocalStorage container, not a saved proxy, session, or identity. Its `run()`
+contexts remain asynchronous-call-local. Replacing the global container still
+fails the normal descriptor check; no new global-mutation exemption is added.
+
+Computer Use's installer passes its Linux helper installation path through
+`PI_COMPUTER_USE_LINUX_HELPER_PATH`. The worker snapshots and restores this one
+configuration handoff after session teardown and before inspecting residual
+state. This is not a general environment rollback: other environment mutations,
+live resources, and cleanup failures still require retirement.
+
+Orca's managed status, titlebar spinner and editor-prefill extensions describe a
+terminal, not API jobs. Workers omit only these three reserved entrypoint names
+when their source also has the Orca management marker. Filtering happens before
+module evaluation, so no status queue, owner global, timer or status HTTP request
+is created. Unmarked same-name extensions and all other extensions remain enabled.
+The worker wraps the public SDK package discovery methods, including explicit
+CLI sources, in its isolated execution subprocess. Resource enablement, trust,
+ordering, metadata, skills, prompts and themes are otherwise unchanged. The SDK
+method descriptors are checked at bootstrap; unsupported APIs fail closed.
+Normal CLI/TUI discovery and Orca status behavior are not modified.
+
 ## Shipped extension review
 
 The HTTP integration fixture loads every extension exported by the root manifest.
@@ -60,6 +85,9 @@ mock. The lifecycle review also covers these extension-specific owners:
 
 | Component | Ownership and cleanup |
 | --- | --- |
+| Orca terminal presentation | Marked status/titlebar/prefill entrypoints are omitted only inside execution workers, before import; arbitrary Orca tools and unmarked files are not suppressed. |
+| Computer Use installation | Helper-path environment handoff is restored after session shutdown; tools, sandbox permissions and actual helper lifecycle are unchanged. |
+| Web Access proxy routing | Empty profile-process ALS infrastructure is allocated before jobs; asynchronous proxy contexts are not shared between identities. |
 | Browser Harness | Connection and tool state belong to each factory/session. Shutdown releases owned tabs/Steel sessions and stops the transport; external browser processes are not terminated. No connection is opened merely by loading the extension. |
 | Composio | Runtime promises now belong to each extension instance instead of a module-level cache. Shutdown clears them. SDK execution requires an explicit tool call. |
 | Context Memory | A shared console capture uses AsyncLocalStorage for per-call log routing, avoiding wrapper accumulation on module reload. Handler deadline timers are cleared. A timed-out custom handler explicitly requires worker retirement because arbitrary promises cannot be cancelled. Identity-mode writes resolve to USER.md, not the profile fallback. |
@@ -86,6 +114,18 @@ mock. The lifecycle review also covers these extension-specific owners:
   CLI's immediate directory. Path tests cover unbundled `dist/cli.js`, bundled
   `dist/bundle/cli.js` and the installed `.bin/pi` symlink; the HTTP fixture also
   supports running against the installed bundled launcher.
+- Infrastructure tests cover pre-import terminal filtering, same-name unmarked
+  extensions, discovery metadata/arguments, idempotence, ALS identity separation,
+  replaced-global detection, helper-path restoration and continued retirement for
+  unrelated mutations/live timers. The HTTP fixture combines these behaviors
+  with existing PID, identity and dirty-resource assertions.
+- The HTTP fixture optionally accepts `PI_OPENAI_TEST_EXTERNAL_EXTENSIONS` (a JSON
+  array of installed absolute extension entrypoints) to validate real third-party
+  startup/shutdown against the localhost model mock. When those packages have
+  shared npm dependencies, `PI_OPENAI_TEST_RUNTIME_NPM_DIR` links the installed
+  runtime npm tree into the isolated fixture's **root** runtime; Nono access
+  remains read-only. Nothing is installed in the profile, real provider
+  credentials are not used, and external-service tools are not invoked.
 - Runtime tests cover capacity, dynamic expiry, configuration invalidation,
   continuations, active/queued cancellation, crash, shutdown and no replay.
 - Profile CLI validation checks create/skills/extensions/packages through the
