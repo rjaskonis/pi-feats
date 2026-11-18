@@ -10,26 +10,30 @@ export class CompatibilityError extends Error {
 
 export function errorBody(error: unknown) {
   const known = error instanceof CompatibilityError;
-  return { error: { message: known ? error.message : "Pi execution failed.", type: known && (error.status === 401 || error.code === "provider_authentication_failed") ? "authentication_error" : known && error.status < 500 ? "invalid_request_error" : "server_error", param: known ? error.param : null, code: known ? error.code : "server_error" } };
+  return { error: { message: known ? error.message : "Pi execution failed.", type: known && (error.status === 401 || error.code === "provider_authentication_failed") ? "authentication_error" : known && error.code === "provider_usage_limit_exceeded" ? "rate_limit_error" : known && error.status < 500 ? "invalid_request_error" : "server_error", param: known ? error.param : null, code: known ? error.code : "server_error" } };
 }
 
-/** Upstream authentication is a failed dependency, not an invalid API bearer token. */
+/** Fixed upstream categories, distinct from local bearer and capacity failures. */
 export function providerFailure(code: unknown): CompatibilityError | undefined {
-  return code === "provider_authentication_failed"
-    ? new CompatibilityError("The profile's provider credentials are missing, invalid, or could not be refreshed. Sign in to the provider again or update the profile's API key.", null, 424, "provider_authentication_failed")
-    : undefined;
+  if (code === "provider_authentication_failed") return new CompatibilityError("The profile's provider credentials are missing, invalid, or could not be refreshed. Sign in to the provider again or update the profile's API key.", null, 424, code);
+  if (code === "provider_usage_limit_exceeded") return new CompatibilityError("The profile's provider usage limit has been reached. Wait for the limit to reset or review the provider's plan and quota.", null, 429, code);
+  return undefined;
 }
 
 /** SDK failures may contain credentials or response bodies: classify, never forward. */
 export function classifyProviderFailure(error: unknown): CompatibilityError | undefined {
   if (error instanceof CompatibilityError) return undefined;
-  const details = error && typeof error === "object" ? error as { status?: unknown; statusCode?: unknown; message?: unknown } : undefined;
+  const details = error && typeof error === "object" ? error as { status?: unknown; statusCode?: unknown; message?: unknown; code?: unknown } : undefined;
   const message = (typeof error === "string" ? error : typeof details?.message === "string" ? details.message : "").slice(0, 65_536);
   const unauthorized = details?.status === 401 || details?.statusCode === 401
     || /^(?:Error:\s*)?(?:HTTP\s+)?401\b/i.test(message)
     || /\b(?:incorrect|invalid|missing) api key\b|\bno api key (?:found|available|provided)\b/i.test(message)
     || (/\boauth\b|\btoken refresh\b/i.test(message) && /\b401\b|\binvalid_grant\b|\brefresh_token_(?:reused|expired|invalidated)\b/i.test(message));
-  return unauthorized ? providerFailure("provider_authentication_failed") : undefined;
+  if (unauthorized) return providerFailure("provider_authentication_failed");
+  const quota = typeof details?.code === "string" && /^(?:usage_limit_reached|usage_not_included|insufficient_quota|quota_exceeded)$/.test(details.code)
+    || /\b(?:usage_limit_reached|usage_not_included|insufficient_quota|quota_exceeded)\b/i.test(message)
+    || /\b(?:usage limit|quota)\b[^\r\n]{0,40}\b(?:reached|exceeded)\b|\byou have hit your (?:chatgpt )?usage limit\b|\bexceeded (?:your )?(?:current )?quota\b/i.test(message);
+  return quota ? providerFailure("provider_usage_limit_exceeded") : undefined;
 }
 
 /** Worker codes map to fixed public errors, never subprocess diagnostics. */

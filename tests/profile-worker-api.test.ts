@@ -25,6 +25,10 @@ test("HTTP compatibility and Direct share a resident profile process, preserve s
     const body = JSON.parse(source);
     if (req.url === "/webhook") { webhook(body); res.end("ok"); return; }
     calls.push(body);
+    if (JSON.stringify(body.messages).includes("PROVIDER_USAGE_REJECT_MARKER")) {
+      res.writeHead(429, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "The usage limit has been reached PRIVATE_PROVIDER_TOKEN_MARKER", type: "insufficient_quota", code: "insufficient_quota" } })); return;
+    }
     if (JSON.stringify(body.messages).includes("PROVIDER_AUTH_REJECT_MARKER")) {
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "Invalid API key: PRIVATE_PROVIDER_TOKEN_MARKER", type: "invalid_request_error", code: "invalid_api_key" } })); return;
@@ -182,5 +186,15 @@ export default function(pi) {
   assert.ok(failedStream.includes("provider_authentication_failed"));
   assert.ok(!failedStream.includes("PRIVATE_PROVIDER_TOKEN_MARKER"));
   await post("/v1/responses", { model: "support", input: "AFTER_AUTH_FAILURE" });
+  const quota = await post("/v1/chat/completions", { model: "support", messages: [{ role: "user", content: "PROVIDER_USAGE_REJECT_MARKER" }] }, "POST", 429);
+  assert.equal(quota.error.code, "provider_usage_limit_exceeded");
+  assert.equal(quota.error.type, "rate_limit_error");
+  assert.ok(!JSON.stringify(quota).includes("PRIVATE_PROVIDER_TOKEN_MARKER"));
+  const quotaStream = await post("/v1/responses", { model: "support", input: "PROVIDER_USAGE_REJECT_MARKER", stream: true });
+  assert.ok(quotaStream.includes("response.failed"));
+  assert.ok(quotaStream.includes("provider_usage_limit_exceeded"));
+  assert.ok(quotaStream.includes('"type":"rate_limit_error"'));
+  assert.ok(!quotaStream.includes("PRIVATE_PROVIDER_TOKEN_MARKER"));
+  await post("/v1/responses", { model: "support", input: "AFTER_QUOTA_FAILURE" });
   t.diagnostic(`Local mock HTTP timings: cold=${coldMs.toFixed(0)}ms warm=${warmMs.toFixed(0)}ms after-expiry=${restartMs.toFixed(0)}ms (not model latency).`);
 });

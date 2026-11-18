@@ -43,7 +43,7 @@ test("classifies SDK credential failures without forwarding provider diagnostics
     assert.equal(errorBody(failure).error.type, "authentication_error");
     assert.ok(!JSON.stringify(errorBody(failure)).includes("PRIVATE_TOKEN_MARKER"));
   }
-  for (const error of ["500 Internal server error", "OAuth refresh failed (503): unavailable", "429 quota exceeded", "403 permission denied for this model", "Request aborted", "Network timeout", undefined]) assert.equal(classifyProviderFailure(error), undefined);
+  for (const error of ["500 Internal server error", "OAuth refresh failed (503): unavailable", "429 too many requests", "403 permission denied for this model", "Request aborted", "Network timeout", undefined]) assert.equal(classifyProviderFailure(error), undefined);
   assert.equal(providerFailure("PRIVATE_TOKEN_MARKER"), undefined);
 });
 

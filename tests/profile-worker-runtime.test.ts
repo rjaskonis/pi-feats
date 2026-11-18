@@ -36,13 +36,13 @@ test("resource signatures detect configuration/code changes but ignore idle-time
   await assert.rejects(profileWorkerVersion(f.root, f.root), (error: any) => error.code === "worker_configuration_error" && !error.message.includes("MALFORMED_PRIVATE_VALUE"));
 });
 
-test("resident and client-tool transports preserve safe provider authentication failures", async (t) => {
+for (const [text, status, code] of [["provider-auth-failure", 424, "provider_authentication_failed"], ["provider-usage-failure", 429, "provider_usage_limit_exceeded"]] as const) test(`resident and client-tool transports preserve safe ${code} failures`, async (t) => {
   const f = await fixture(t);
-  const check = (error: any) => error.status === 424 && error.code === "provider_authentication_failed" && !error.message.includes("PRIVATE_TOKEN_MARKER");
-  await assert.rejects(f.run("provider-auth-failure"), check);
+  const check = (error: any) => error.status === status && error.code === code && !error.message.includes("PRIVATE_TOKEN_MARKER");
+  await assert.rejects(f.run(text), check);
   const client = new ClientToolsRuntime({ settings: async () => ({ profile: { clientTools: { enabled: true, allowedTools: ["view_file"] } } }), launch: f.launch, transport: profile => f.runtime.clientTransport(profile) });
   t.after(() => client.close());
-  const input = (await client.select({ model: "support", input: "provider-auth-failure", tools: [{ type: "function", name: "view_file", parameters: { type: "object", properties: {} } }] })).client!;
+  const input = (await client.select({ model: "support", input: text, tools: [{ type: "function", name: "view_file", parameters: { type: "object", properties: {} } }] })).client!;
   await assert.rejects(client.execute(input, async () => {}, new AbortController().signal), check);
   assert.ok((await f.run()).text);
 });
