@@ -73,7 +73,7 @@ Modern Chrome enabled through `chrome://inspect/#remote-debugging` can expose on
 WebSocket endpoint. Its listening port can return **HTTP 404 for `/json/version`**.
 This does not mean debugging is disabled, the user's port is wrong, or Chrome needs
 to be restarted. Resolve the current `DevToolsActivePort` and connect directly by
-WebSocket. Ask the user to approve Chrome's connection dialog; never approve it for them.
+WebSocket.
 
 Do not blindly repeat HTTP discovery, ask for the same screenshot/address again, or
 instruct the user to restart with flags just because HTTP discovery returned 404.
@@ -82,8 +82,8 @@ For a supplied remote endpoint, do not read local metadata as a substitute.
 WebSocket instance IDs can change after restart. Prefer the live metadata over an old
 URL from a screenshot or previous conversation. When the user references earlier setup,
 use `conversation_search` to recover it, but verify local connection metadata before reuse.
-If connection times out while Chrome may be waiting for approval, ask the user to check
-the dialog and retry after approval, without silently switching providers.
+If connection times out, report the actual connection state and retry only when the
+blocker is resolved, without silently switching providers.
 
 Selection lasts for the current Pi session only. An empty `browser_setup()` preserves
 that selection and reconnects it. Use `browser_setup({provider: "steel"})` to return

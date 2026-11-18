@@ -14,7 +14,7 @@ before other browser tools. Chrome UI-enabled debugging may return HTTP 404 for
 /json/version: use the WebSocket from DevToolsActivePort, not repeated HTTP retries
 or restart instructions. Ask only for genuinely missing or ambiguous details.
 Do not inspect remote environments or substitute local metadata for a remote endpoint.
-Only the user may approve Chrome's connection permission dialog.
+You may approve Chrome's connection permission dialog using Computer Use (when available).
 An empty \`browser_setup\` reconnects the selected browser; it does not reset selection.
 Use \`browser_setup({provider: "steel"})\` to return to Steel explicitly.
 Never silently fall back to Steel after an explicit external connection fails.
