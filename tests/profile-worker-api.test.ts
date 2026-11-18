@@ -33,6 +33,7 @@ test("HTTP compatibility and Direct share a resident profile process, preserve s
       res.writeHead(401, { "content-type": "application/json" });
       res.end(JSON.stringify({ error: { message: "Invalid API key: PRIVATE_PROVIDER_TOKEN_MARKER", type: "invalid_request_error", code: "invalid_api_key" } })); return;
     }
+    if (JSON.stringify(body.messages).includes("TRACE_PROVIDER_DELAY_MARKER")) await new Promise(resolve => setTimeout(resolve, 160));
     res.writeHead(200, { "content-type": "text/event-stream" });
     const frame = (delta: unknown, finish_reason: unknown, usage?: unknown) => res.write(`data: ${JSON.stringify({ id: "fixture", object: "chat.completion.chunk", created: 0, model: "fixture", choices: [{ index: 0, delta, finish_reason }], ...(usage ? { usage } : {}) })}\n\n`);
     const messages = JSON.stringify(body.messages);
@@ -96,8 +97,13 @@ export default function(pi) {
   const ended = new Promise((resolve) => child.once("close", resolve));
   t.after(async () => { child.send?.("close"); await ended; });
   const address = await new Promise<any>((resolve, reject) => { child.once("message", resolve); child.once("error", reject); child.once("exit", (code) => reject(new Error(`API exited ${code}: ${diagnostics}`))); });
-  const post = async (path: string, payload: unknown, method = "POST", expected = 200) => {
-    const res = await fetch(`http://127.0.0.1:${address.port}${path}`, { method, headers: { authorization: "Bearer fixture-token", "content-type": "application/json" }, body: JSON.stringify(payload) });
+  const traces = () => diagnostics.split("\n").filter(line => line.startsWith("[pi-api-latency] ")).map(line => JSON.parse(line.slice("[pi-api-latency] ".length)));
+  let traceId: string | null;
+  const post = async (path: string, payload: unknown, method = "POST", expected = 200, trace = false) => {
+    const res = await fetch(`http://127.0.0.1:${address.port}${path}`, { method, headers: { authorization: "Bearer fixture-token", "content-type": "application/json", ...(trace ? { "x-pi-trace-latency": "1" } : {}) }, body: JSON.stringify(payload) });
+    traceId = res.headers.get("x-pi-trace-id");
+    if (trace) assert.match(traceId ?? "", /^(chatcmpl|resp)_[a-f0-9]{32}$/);
+    else assert.equal(traceId, null);
     const text = await res.text();
     if (expected === 200 && calls.length) {
       const messages = JSON.stringify(calls.at(-1).messages);
@@ -109,7 +115,8 @@ export default function(pi) {
   const wire = () => JSON.stringify(calls.at(-1).messages);
   const pid = () => wire().match(/WORKER_PID=(\d+)/)?.[1];
   const coldStart = performance.now();
-  const chat = await post("/v1/chat/completions", { model: "support", messages: [{ role: "user", content: "CHAT_MARKER" }] });
+  const chat = await post("/v1/chat/completions", { model: "support", messages: [{ role: "user", content: "CHAT_MARKER TRACE_PROVIDER_DELAY_MARKER" }] }, "POST", 200, true);
+  const coldId = traceId!; assert.equal(coldId, chat.id);
   const coldMs = performance.now() - coldStart;
   const firstPid = pid(); assert.ok(firstPid);
   assert.ok(wire().includes("EXTERNAL_EXTENSION_LOADED"));
@@ -119,7 +126,8 @@ export default function(pi) {
   const warmMs = performance.now() - warmStart;
   assert.ok(chatStream.includes("[DONE]"));
   assert.equal(chat.choices[0].message.content, "Fixture answer"); assert.equal(pid(), firstPid);
-  const response = await post("/v1/responses", { model: "support", input: "RESPONSES_MARKER", stream: true });
+  const response = await post("/v1/responses", { model: "support", input: "RESPONSES_MARKER", stream: true }, "POST", 200, true);
+  const warmId = traceId!; assert.ok(response.includes(warmId));
   assert.ok(response.includes("response.completed")); assert.equal(pid(), firstPid); assert.ok(!wire().includes("CHAT_MARKER"));
   if (process.env.PI_OPENAI_TEST_NONO === "1") {
     await post("/v1/responses", { model: "support", input: "READ_OWN_PROBE" });
@@ -196,5 +204,21 @@ export default function(pi) {
   assert.ok(quotaStream.includes('"type":"rate_limit_error"'));
   assert.ok(!quotaStream.includes("PRIVATE_PROVIDER_TOKEN_MARKER"));
   await post("/v1/responses", { model: "support", input: "AFTER_QUOTA_FAILURE" });
+  const records = traces();
+  assert.deepEqual(records.map(item => item.id), [coldId, warmId]);
+  const [cold, warm] = records;
+  assert.equal(cold.worker, "cold"); assert.equal(warm.worker, "reused");
+  assert.equal(String(cold.execution.workerPid), firstPid); assert.equal(cold.execution.workerPid, warm.execution.workerPid);
+  assert.equal(cold.launcherPid, warm.launcherPid);
+  assert.ok(cold.execution.modelActiveMs >= 150);
+  for (const trace of records) {
+    assert.equal(trace.outcome, "success"); assert.equal(trace.retired, false);
+    assert.equal(trace.execution.modelStreams, 1); assert.equal(trace.execution.modelStreamsCompleted, 1);
+    assert.ok(trace.execution.promptMs >= trace.execution.modelActiveMs);
+    assert.ok(trace.execution.agentInitMs > 0);
+    assert.ok(trace.untilReadyMs >= trace.dispatchMs && trace.dispatchMs >= trace.queueMs);
+    assert.ok(trace.totalMs >= trace.untilIdleMs && trace.untilIdleMs >= trace.untilResultMs && trace.untilResultMs >= trace.untilFirstTextMs && trace.untilFirstTextMs >= trace.untilReadyMs);
+  }
+  assert.doesNotMatch(JSON.stringify(records), /TRACE_PROVIDER_DELAY_MARKER|fixture-token|local-only|Fixture answer/);
   t.diagnostic(`Local mock HTTP timings: cold=${coldMs.toFixed(0)}ms warm=${warmMs.toFixed(0)}ms after-expiry=${restartMs.toFixed(0)}ms (not model latency).`);
 });

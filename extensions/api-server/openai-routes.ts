@@ -2,6 +2,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { randomUUID } from "node:crypto";
 import { handleClientToolResponse } from "./openai-client-routes.ts";
+import { LATENCY_ID_HEADER, LATENCY_TRACE_HEADER, latencyMs, type LatencyRecord, type LatencyTrace } from "./latency-trace.ts";
 import type { ClientToolsRuntime } from "./openai-client-runtime.ts";
 import { OPENAI_BODY_BYTES } from "../lib/openai-limits.ts";
 import { CompatibilityError, chatUsage, errorBody, normalizeRequest, outputMessage, responseObject, type CompletionRequest, type CompletionResult, type ExecutionEvent } from "./openai-contract.ts";
@@ -11,7 +12,8 @@ export type CompatibilityBackend = {
   authorized(authorization: string | undefined): boolean;
   profiles(): Promise<Array<{ name: string }>>;
   validateProfile(profile: string): Promise<void>;
-  execute(request: CompletionRequest, emit: (event: ExecutionEvent) => Promise<void>, signal: AbortSignal): Promise<CompletionResult>;
+  execute(request: CompletionRequest, emit: (event: ExecutionEvent) => Promise<void>, signal: AbortSignal, trace?: LatencyTrace): Promise<CompletionResult>;
+  logLatency?(record: LatencyRecord): void;
 };
 
 /** Wait for writable backpressure without leaving close/error listeners behind. */
@@ -52,7 +54,7 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
           legacy = selected.legacy;
         }
         const input = legacy ?? normalizeRequest(request.body, protocol);
-        await backend.validateProfile(input.profile);
+        const trace: LatencyTrace | undefined = backend.logLatency && request.headers[LATENCY_TRACE_HEADER] === "1" ? { started: performance.now() } : undefined;
         const controller = new AbortController();
         const disconnected = () => { if (!reply.raw.writableEnded) controller.abort(); };
         reply.raw.on("close", disconnected);
@@ -61,6 +63,8 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
         const id = `${protocol === "chat" ? "chatcmpl" : "resp"}_${randomUUID().replaceAll("-", "")}`;
         const itemId = `msg_${randomUUID().replaceAll("-", "")}`;
         const created = Math.floor(Date.now() / 1000);
+        if (trace) reply.header(LATENCY_ID_HEADER, id);
+        let outcome: LatencyRecord["outcome"] = "error";
         let streaming = false, sequence = 0, partial = "";
         const data = (value: unknown) => writeSse(reply, `data: ${typeof value === "string" ? value : JSON.stringify(value)}\n\n`, controller.signal);
         const event = (type: string, value: Record<string, unknown>) => writeSse(reply, `event: ${type}\ndata: ${JSON.stringify({ type, sequence_number: sequence++, ...value })}\n\n`, controller.signal);
@@ -92,8 +96,10 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
         };
         try {
           controller.signal.throwIfAborted();
-          const result = await backend.execute(input, emit, controller.signal);
+          await backend.validateProfile(input.profile);
+          const result = await backend.execute(input, emit, controller.signal, trace);
           if (!input.stream) {
+            outcome = "success";
             if (protocol === "chat") return { id, object: "chat.completion", created, model: input.profile, choices: [{ index: 0, message: { role: "assistant", content: result.text, refusal: null }, logprobs: null, finish_reason: result.finishReason }], usage: chatUsage(result.usage) };
             return responseObject(input, id, created, [outputMessage(itemId, result.text, result.finishReason === "length" ? "incomplete" : "completed")], result);
           }
@@ -110,6 +116,7 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
             await event(result.finishReason === "length" ? "response.incomplete" : "response.completed", { response: responseObject(input, id, created, [item], result) });
           }
           reply.raw.end();
+          outcome = "success";
         } catch (error) {
           if (controller.signal.aborted || reply.raw.destroyed) return;
           if (!streaming) throw error;
@@ -120,6 +127,11 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
             reply.raw.end();
           } catch { controller.abort(); reply.raw.destroy(); }
         } finally {
+          if (trace) {
+            const { started, ...metrics } = trace;
+            try { backend.logLatency?.({ id, protocol, stream: input.stream, outcome: controller.signal.aborted ? "aborted" : outcome, totalMs: latencyMs(performance.now() - started), ...metrics }); }
+            catch { /* Diagnostics must not change the response. */ }
+          }
           reply.raw.off("close", disconnected); request.raw.off("aborted", disconnected);
         }
       });

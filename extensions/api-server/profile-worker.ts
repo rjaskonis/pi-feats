@@ -10,6 +10,7 @@ import type { ClientRequest } from "./openai-client-contract.ts";
 export type ProfileJob = {
   request: CompletionRequest;
   client?: ClientRequest;
+  traceLatency?: true;
   application?: { sessionPath?: string; sessionId: string; application?: string; identityKey?: string; directContextMemory?: string; handoff?: string };
 };
 
@@ -88,7 +89,7 @@ export async function runProfileWorker(host: typeof import("@earendil-works/pi-c
         client = new ClientWorker(job.client);
         try { await runCompatibilityWorker(host, client, resident); }
         finally { client.close(); client = undefined; }
-      } else await runCompatibilityWorker(host, hooks, resident);
+      } else await runCompatibilityWorker(host, hooks, resident, job.traceLatency === true);
     } finally {
       clearExtensionCache();
       for (const key of Object.keys(process.env)) if (key.startsWith("PI_APPLICATION_")) delete process.env[key];

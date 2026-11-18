@@ -6,6 +6,7 @@ import { prepareAttachments, extractPreparedDocuments } from "./openai-attachmen
 import { CODEX_FILE_API, canAttemptVisualInput, hasNativePdfInput, installCodexFileBridge, type CodexFileBridge } from "./openai-codex-files.ts";
 import { attachmentError, attachmentFailures, classifyProviderFailure, providerFailure } from "./openai-errors.ts";
 import { initializeWorkerInfrastructure } from "./worker-infrastructure.ts";
+import { latencyMs, observeModelLatency, type WorkerLatency } from "./latency-trace.ts";
 import { OPENAI_BODY_BYTES, OPENAI_ATTACHMENT_BYTES, OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
 import { CompatibilityError, type CompletionRequest, type CompletionResult, type ExecutionEvent, type TokenUsage } from "./openai-contract.ts";
 
@@ -29,7 +30,7 @@ export function restoreHistory(manager: Pick<SessionManagerType, "appendMessage"
 }
 
 /** Execute a prepared session and dispose it on every success, failure, or abort. */
-export async function executeSession(session: AgentSession, request: CompletionRequest, emit: (event: ExecutionEvent) => void, signal: AbortSignal, application = false): Promise<CompletionResult> {
+export async function executeSession(session: AgentSession, request: CompletionRequest, emit: (event: ExecutionEvent) => void, signal: AbortSignal, application = false, timing?: ReturnType<typeof observeModelLatency>): Promise<CompletionResult> {
   const usage: TokenUsage = { input: 0, output: 0, cached: 0, reasoning: 0 };
   let text = "", current = "", lastReason = "", bytes = 0, needsSeparator = false;
   let eventError: unknown, providerError: CompatibilityError | undefined;
@@ -69,8 +70,11 @@ export async function executeSession(session: AgentSession, request: CompletionR
     if ((request.messages.some((message) => message.images?.length) || hasNativePdfInput(request)) && !canAttemptVisualInput(session.model)) throw attachmentError("unsupported_image_model");
     emit({ type: "ready" });
     const final = request.messages.at(-1)!;
-    await session.prompt(final.content, { source: "rpc", expandPromptTemplates: application, ...(final.images?.length ? { images: final.images } : {}) });
-    await session.waitForIdle();
+    timing?.start();
+    try {
+      await session.prompt(final.content, { source: "rpc", expandPromptTemplates: application, ...(final.images?.length ? { images: final.images } : {}) });
+      await session.waitForIdle();
+    } finally { timing?.end(); }
     if (eventError) throw eventError;
     signal.throwIfAborted();
     if (session.messages) {
@@ -131,7 +135,8 @@ export type ResidentExecution = {
   event?(event: AgentSessionEvent): void;
 };
 
-export async function runCompatibilityWorker(host?: typeof import("@earendil-works/pi-coding-agent"), hooks?: CompatibilityWorkerHooks, resident?: ResidentExecution): Promise<void> {
+export async function runCompatibilityWorker(host?: typeof import("@earendil-works/pi-coding-agent"), hooks?: CompatibilityWorkerHooks, resident?: ResidentExecution, traceLatency = false): Promise<void> {
+  const initStart = traceLatency ? performance.now() : 0;
   // Disable worker dispatch when the SDK reloads the shared API extension.
   process.env.PI_OPENAI_WORKER = "running";
   for (const key of Object.keys(process.env)) if ((!resident?.application && key.startsWith("PI_APPLICATION_")) || key === "PI_API_WORKER" || key === "PI_PROFILE_DISCOVER_TOOLS") delete process.env[key];
@@ -238,7 +243,17 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     if (request.messages.some((message) => message.documents?.length) || (session.model?.api === CODEX_FILE_API && (hooks || request.messages.some((message) => message.images?.length)))) nativeFiles = installCodexFileBridge(session, request, controller.signal, { toolImages: !!hooks });
     if (hooks) await hooks.started(session, request, host ?? await import("@earendil-works/pi-coding-agent"));
     if (resident?.event) session.subscribe(resident.event);
-    const result = await executeSession(session, request, write, controller.signal, !!resident?.application);
+    const metrics: WorkerLatency | undefined = traceLatency ? { workerPid: process.pid, agentInitMs: latencyMs(performance.now() - initStart) } : undefined;
+    const timing = metrics && observeModelLatency(runtime, metrics);
+    const sessionStarted = timing ? performance.now() : 0;
+    const result = await executeSession(session, request, write, controller.signal, !!resident?.application, timing).finally(() => {
+      timing?.restore();
+      if (metrics) {
+        // Non-prompt work here includes output/ledger validation and session shutdown.
+        metrics.sessionCleanupMs = latencyMs(performance.now() - sessionStarted - (metrics.promptMs ?? 0));
+        write({ type: "latency", metrics });
+      }
+    });
     nativeFiles?.assertDelivered();
     session = undefined;
     write({ type: "result", result });

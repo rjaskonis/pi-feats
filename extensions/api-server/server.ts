@@ -18,6 +18,7 @@ import { ApplicationRuntime, type Settings as ApplicationSettings } from "./appl
 import { ApplicationStore, type ApplicationRecord } from "./application-store.ts";
 import { buildStatelessPrompt } from "./stateless-prompt.ts";
 import { registerCompatibilityRoutes } from "./openai-routes.ts";
+import { LATENCY_ID_HEADER, LATENCY_TRACE_HEADER } from "./latency-trace.ts";
 import { CompatibilityError } from "./openai-contract.ts";
 import { ClientToolsRuntime } from "./openai-client-runtime.ts";
 import { ProfileWorkerRuntime, profileWorkerVersion } from "./profile-worker-runtime.ts";
@@ -507,9 +508,10 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
           throw error;
         }
       },
-      execute: async (request, emit, signal) => {
+      logLatency: (record) => console.info(`[pi-api-latency] ${JSON.stringify({ timestamp: new Date().toISOString(), ...record })}`),
+      execute: async (request, emit, signal, trace) => {
         try {
-          return await api.workers.execute(request.profile, { request }, emit, signal);
+          return await api.workers.execute(request.profile, { request }, emit, signal, undefined, undefined, trace);
         } catch (error) {
           if (!signal.aborted) console.error(`[pi-api] Compatibility execution failed for profile ${request.profile} (${error instanceof CompatibilityError ? error.code : "worker_error"}).`);
           throw error;
@@ -526,7 +528,8 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.addHook("onRequest", async (_request, reply) => {
       reply.header("access-control-allow-origin", config.cors.origin);
       reply.header("access-control-allow-methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-      reply.header("access-control-allow-headers", "Authorization, Content-Type");
+      reply.header("access-control-allow-headers", `Authorization, Content-Type, ${LATENCY_TRACE_HEADER}`);
+      if (_request.headers[LATENCY_TRACE_HEADER] === "1") reply.header("access-control-expose-headers", LATENCY_ID_HEADER);
     });
     server.options("/*", async (_request, reply) => reply.code(204).send());
     server.get("/api/health", async () => ({ ok: true, service: "pi-api", status: "running" }));

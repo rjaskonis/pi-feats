@@ -19,8 +19,10 @@ import type { ProfileJob } from "./profile-worker.ts";
 const TIMEOUT_KEY = "PI_API_WORKER_IDLE_TIMEOUT_SECONDS";
 const MAX_TIMER = 2_147_483_647;
 const failure = () => new CompatibilityError("Pi worker execution failed. Server actions were not replayed.", null, 502, "worker_transport_error");
+import { latencyMs, readWorkerLatency, type LatencyTrace } from "./latency-trace.ts";
+
 type Emit = (event: ExecutionEvent) => Promise<void>;
-type Pending = { emit: Emit; activity?: (event: Record<string, unknown>) => void; telemetry?: (value: any) => void; resolve(result: CompletionResult): void; reject(error: unknown): void; text: string; ready: boolean; result?: CompletionResult; error?: Error };
+type Pending = { trace?: LatencyTrace; emit: Emit; activity?: (event: Record<string, unknown>) => void; telemetry?: (value: any) => void; resolve(result: CompletionResult): void; reject(error: unknown): void; text: string; ready: boolean; result?: CompletionResult; error?: Error };
 type Lane = { tail: Promise<void>; reservations: number; worker?: Worker };
 
 class Worker {
@@ -80,7 +82,7 @@ class Worker {
     // if a descendant keeps a pipe open or ignores graceful shutdown.
     this.kill(); this.killTimer = setTimeout(() => this.kill(true), 1000); this.killTimer.unref();
   }
-  async execute(job: ProfileJob, emit: Emit, signal: AbortSignal, activity?: Pending["activity"], telemetry?: Pending["telemetry"]): Promise<CompletionResult> {
+  async execute(job: ProfileJob, emit: Emit, signal: AbortSignal, activity?: Pending["activity"], telemetry?: Pending["telemetry"], trace?: LatencyTrace): Promise<CompletionResult> {
     signal.throwIfAborted();
     if (!this.alive || this.pending) throw failure();
     if (this.timer) clearTimeout(this.timer);
@@ -89,13 +91,17 @@ class Worker {
     const startup = setTimeout(abort, 60_000); startup.unref();
     try {
       return await new Promise<CompletionResult>((resolve, reject) => {
-        this.pending = { emit: async (event) => {
+        this.pending = { trace, emit: async (event) => {
           if (event.type === "ready") {
             clearTimeout(startup);
             if (!this.initialized) {
               // Profile synchronization/sandbox preparation can create their
               // own resources. Snapshot after initialization, not before boot.
-              if (this.startupVersion) this.version = await this.startupVersion();
+              if (this.startupVersion) {
+                const baselineStart = trace ? performance.now() : 0;
+                try { this.version = await this.startupVersion(); }
+                finally { if (trace) trace.workerBaselineMs = latencyMs(performance.now() - baselineStart); }
+              }
               this.initialized = true;
             }
           }
@@ -103,6 +109,7 @@ class Worker {
         }, activity, telemetry, resolve, reject, text: "", ready: false };
         const wire = JSON.stringify({ type: "execute", job }) + "\n";
         if (Buffer.byteLength(wire) > 210 * 1024 * 1024) { this.stop(); return; }
+        if (trace) trace.dispatchMs = latencyMs(performance.now() - trace.started);
         this.child.stdin.write(wire, (error) => { if (error) this.stop(); });
         if (signal.aborted) abort();
       });
@@ -133,6 +140,10 @@ class Worker {
         if (!p) throw failure();
         if (value.type === "idle") {
           this.pending = undefined; this.idleSince = Date.now();
+          if (p.trace) {
+            p.trace.untilIdleMs = latencyMs(performance.now() - p.trace.started);
+            p.trace.retired = value.retire === true || !!p.error || !p.result;
+          }
           if (p.error) { p.reject(p.error); this.stop(); }
           else if (!p.result) { p.reject(failure()); this.stop(); }
           else { if (value.retire === true) this.stop(); p.resolve(p.result); }
@@ -141,16 +152,24 @@ class Worker {
           if (value.type === "result") p.result = value.result;
           await this.clientFrame(value);
         } else if (p.result || p.error) throw failure();
-        else if (value.type === "ready") { if (p.ready) throw failure(); p.ready = true; await p.emit({ type: "ready" }); }
+        else if (value.type === "ready") {
+          if (p.ready) throw failure();
+          p.ready = true;
+          if (p.trace) p.trace.untilReadyMs = latencyMs(performance.now() - p.trace.started);
+          await p.emit({ type: "ready" });
+        }
         else if (value.type === "text") {
           if (!p.ready || typeof value.delta !== "string") throw failure();
+          if (p.trace && value.delta) p.trace.untilFirstTextMs ??= latencyMs(performance.now() - p.trace.started);
           p.text += value.delta;
           if (Buffer.byteLength(p.text) > 16 * 1024 * 1024) throw failure();
           await p.emit({ type: "text", delta: value.delta });
-        } else if (value.type === "activity") p.activity?.(value.event);
+        } else if (value.type === "latency" && p.trace) p.trace.execution = readWorkerLatency(value.metrics);
+        else if (value.type === "activity") p.activity?.(value.event);
         else if (value.type === "result") {
           const r = value.result;
           if (!p.ready || !r || r.text !== p.text || !["stop", "length"].includes(r.finishReason) || !r.usage || ["input", "output", "cached", "reasoning"].some((key) => !Number.isFinite(r.usage[key]) || r.usage[key] < 0)) throw failure();
+          if (p.trace) p.trace.untilResultMs = latencyMs(performance.now() - p.trace.started);
           p.result = r;
         } else if (value.type === "failure") p.error = providerFailure(value.code) ?? (Object.hasOwn(attachmentFailures, value.code) ? attachmentError(value.code) : new CompatibilityError("Pi execution failed.", null, 502, ["output_rewritten", "output_limit_exceeded", "slow_consumer", "response_missing", "profile_model_unavailable"].includes(value.code) ? value.code : "generation_failed"));
         else throw failure();
@@ -210,8 +229,8 @@ export class ProfileWorkerRuntime {
     if (delay <= 0) { worker.stop(); return; }
     worker.timer = setTimeout(() => this.expire(lane), Math.min(delay, MAX_TIMER)); worker.timer.unref();
   }
-  async execute(profile: string, job: ProfileJob, emit: Emit, signal: AbortSignal, activity?: Pending["activity"], telemetry?: Pending["telemetry"]): Promise<CompletionResult> {
-    return this.run(profile, signal, (worker) => worker.execute(job, emit, signal, activity, telemetry));
+  async execute(profile: string, job: ProfileJob, emit: Emit, signal: AbortSignal, activity?: Pending["activity"], telemetry?: Pending["telemetry"], trace?: LatencyTrace): Promise<CompletionResult> {
+    return this.run(profile, signal, (worker) => worker.execute(trace ? { ...job, traceLatency: true } : job, emit, signal, activity, telemetry, trace), trace);
   }
   /** A request-scoped pipe facade preserves the validated client actor protocol.
    * Closing it releases the lane, not the healthy resident profile process. */
@@ -255,7 +274,7 @@ export class ProfileWorkerRuntime {
     Object.assign(transport, { stdin, stdout: output, stderr, pid: undefined, kill: () => { if (!ended) { controller.abort(); finish(1); } return true; } });
     return transport;
   }
-  private async run<T>(profile: string, signal: AbortSignal, operation: (worker: Worker) => Promise<T>): Promise<T> {
+  private async run<T>(profile: string, signal: AbortSignal, operation: (worker: Worker) => Promise<T>, trace?: LatencyTrace): Promise<T> {
     signal.throwIfAborted();
     if (this.closed) throw new CompatibilityError("The worker runtime is shutting down.", null, 503, "worker_unavailable");
     let lane = this.lanes.get(profile);
@@ -272,8 +291,10 @@ export class ProfileWorkerRuntime {
     // slot chained until predecessors finish, without keeping HTTP open.
     let aborted!: () => void;
     const cancelled = new Promise<never>((_, reject) => { aborted = () => reject(signal.reason ?? new Error("Aborted")); signal.addEventListener("abort", aborted, { once: true }); if (signal.aborted) aborted(); });
+    const queuedAt = trace ? performance.now() : 0;
     try {
-      await Promise.race([previous, cancelled]);
+      try { await Promise.race([previous, cancelled]); }
+      finally { if (trace) trace.queueMs = latencyMs(performance.now() - queuedAt); }
       signal.throwIfAborted();
       await this.initialize();
       if (this.closed) throw failure();
@@ -281,10 +302,12 @@ export class ProfileWorkerRuntime {
       if (lane.worker && (!lane.worker.alive || lane.worker.version !== version)) { lane.worker.stop(); await lane.worker.done; lane.worker = undefined; }
       signal.throwIfAborted();
       if (this.closed) throw failure();
+      if (trace) trace.worker = lane.worker ? "reused" : "cold";
       if (!lane.worker) {
         const worker = lane.worker = new Worker(this.options.launch(profile), version, this.options.version ? () => this.options.version!(profile) : undefined);
         this.workers.add(worker); void worker.done.then(() => this.workers.delete(worker));
       }
+      if (trace) trace.launcherPid = lane.worker.child.pid;
       return await operation(lane.worker);
     } finally {
       signal.removeEventListener("abort", aborted);
