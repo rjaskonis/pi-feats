@@ -411,14 +411,18 @@ class ApiServer {
   }
 
   private async runProfilePrompt(profile: string, id: string, message: string, stateful: boolean, handoff?: string, applicationContext?: { application: string; identityKey: string; directContextMemory?: string }, onData?: (text: string) => void, onEvent?: (event: Record<string, unknown>) => void, signal = new AbortController().signal): Promise<string> {
-    if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id)) throw Object.assign(new Error("Invalid sessionId"), { status: 400 });
+    if (!/^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/.test(id)) throw new CompatibilityError("Invalid sessionId", null, 400, "invalid_session_id");
     const key = `${profile}:${id}`;
-    if (this.sandboxBusy.has(key)) throw Object.assign(new Error("The session is already processing a request."), { status: 409 });
+    if (this.sandboxBusy.has(key)) throw new CompatibilityError("The session is already processing a request.", null, 409, "session_busy");
     this.sandboxBusy.add(key);
     try {
-      await this.profiles.readSettings(profile);
+      try { await this.profiles.readSettings(profile); }
+      catch (error) {
+        if ((error as { status?: number }).status === 404) throw new CompatibilityError("The requested Pi profile does not exist.", "model", 404, "model_not_found");
+        throw error;
+      }
       const session = stateful ? (await this.listProfileSessions(profile)).find((item) => item.id === id) : undefined;
-      if (stateful && !session) throw Object.assign(new Error(`No session found matching '${id}'`), { status: 404 });
+      if (stateful && !session) throw new CompatibilityError(`No session found matching '${id}'`, null, 404, "session_not_found");
       const job: ProfileJob = {
         request: { profile, messages: [{ role: "user", content: message }], stream: !!onData, includeUsage: false, metadata: null, instructions: null },
         application: { sessionPath: session?.path, sessionId: id, handoff, ...applicationContext },
@@ -453,8 +457,8 @@ class ApiServer {
         const response = await this.runProfilePrompt(profile, id, message, true, undefined, applicationContext, (text) => reply.raw.write(`event: token\ndata: ${JSON.stringify({ text })}\n\n`), (event) => { const activity = activityFromAgentEvent(event); if (activity) reply.raw.write(`event: activity\ndata: ${JSON.stringify(activity)}\n\n`); }, controller.signal);
         reply.raw.write(`event: done\ndata: ${JSON.stringify({ response, sessionId: id, profile })}\n\n`);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: message })}\n\n`);
+        const failure = error instanceof CompatibilityError ? { error: error.message, code: error.code } : { error: "Pi execution failed." };
+        reply.raw.write(`event: error\ndata: ${JSON.stringify(failure)}\n\n`);
       }
       reply.raw.removeListener("close", disconnected);
       reply.raw.end(); return;

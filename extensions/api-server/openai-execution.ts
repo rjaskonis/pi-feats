@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { prepareAttachments, extractPreparedDocuments } from "./openai-attachments.ts";
 import { CODEX_FILE_API, canAttemptVisualInput, hasNativePdfInput, installCodexFileBridge, type CodexFileBridge } from "./openai-codex-files.ts";
-import { attachmentError, attachmentFailures, classifyProviderFailure, providerFailure } from "./openai-errors.ts";
+import { attachmentError, attachmentFailures, classifyProviderFailure, profileModelFailure, providerFailure } from "./openai-errors.ts";
 import { initializeWorkerInfrastructure } from "./worker-infrastructure.ts";
 import { latencyMs, observeModelLatency, type WorkerLatency } from "./latency-trace.ts";
 import { OPENAI_BODY_BYTES, OPENAI_ATTACHMENT_BYTES, OPENAI_TEXT_CHARACTERS } from "../lib/openai-limits.ts";
@@ -212,7 +212,7 @@ export async function runCompatibilityWorker(host?: typeof import("@earendil-wor
     session = (await createAgentSession({ cwd, agentDir, settingsManager, resourceLoader: loader, sessionManager: manager, modelRuntime: runtime })).session;
     const configuredProvider = settingsManager.getDefaultProvider(), configuredModel = settingsManager.getDefaultModel();
     if ((configuredProvider && session.model?.provider !== configuredProvider) || (configuredModel && session.model?.id !== configuredModel)) {
-      throw new CompatibilityError("The profile's configured model is unavailable.", null, 502, "profile_model_unavailable");
+      throw profileModelFailure("profile_model_unavailable")!;
     }
     // The selected Codex provider accepts official input_file parts. Other
     // providers retain the existing extraction fallback; never change model,
@@ -328,7 +328,8 @@ export async function executeWorker(command: string, args: string[], options: { 
     }
     const code = await exited;
     signal.throwIfAborted();
-    if (failure && providerFailure(failureCode)) throw providerFailure(failureCode)!;
+    const publicFailure = failure ? providerFailure(failureCode) ?? profileModelFailure(failureCode) : undefined;
+    if (publicFailure) throw publicFailure;
     if (failure && Object.hasOwn(attachmentFailures, failureCode)) throw attachmentError(failureCode);
     if (buffer.trim() || code !== 0 || failure || !result || !ready || typeof result.text !== "string" || !["stop", "length"].includes(result.finishReason) || !result.usage || ["input", "output", "cached", "reasoning"].some((key) => !Number.isFinite(result!.usage[key as keyof TokenUsage]) || result!.usage[key as keyof TokenUsage] < 0)) throw new CompatibilityError("Pi execution failed.", null, 502, failureCode);
     if (Buffer.byteLength(result.text) !== outputBytes || outputHash.digest("hex") !== createHash("sha256").update(result.text).digest("hex")) throw new CompatibilityError("Pi stream did not match the completed output.", null, 502, "invalid_stream");

@@ -8,6 +8,13 @@ export class CompatibilityError extends Error {
   }
 }
 
+export function profileModelFailure(code: unknown): CompatibilityError | undefined {
+  if (code === "profile_model_unavailable") return new CompatibilityError(
+    "The profile's configured model is unavailable. Select a model that exists in the profile's provider catalog, or restore the missing entry in models.json.",
+    null, 502, code,
+  );
+}
+
 export function errorBody(error: unknown) {
   const known = error instanceof CompatibilityError;
   return { error: { message: known ? error.message : "Pi execution failed.", type: known && (error.status === 401 || error.code === "provider_authentication_failed") ? "authentication_error" : known && error.code === "provider_usage_limit_exceeded" ? "rate_limit_error" : known && error.status < 500 ? "invalid_request_error" : "server_error", param: known ? error.param : null, code: known ? error.code : "server_error" } };
