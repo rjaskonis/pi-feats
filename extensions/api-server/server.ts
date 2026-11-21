@@ -1028,6 +1028,15 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.post("/api/terminal/ticket", async (request, reply) => { if (!guard(request, reply)) return; if (!terminalEnabled) throw Object.assign(new Error("Console terminal is disabled."), { status: 403 }); const ticket = randomUUID(); terminalTickets.set(ticket, { expiresAt: Date.now() + 30_000 }); return { url: terminalUrl(ticket), cwd: terminalCwd }; });
     server.get("/api/terminal/stream", { websocket: true }, (socket, request) => { const ticket = (request.query as { ticket?: string }).ticket; const value = ticket && terminalTickets.get(ticket); if (!terminalEnabled || !value || value.expiresAt < Date.now()) return socket.close(1008, "Invalid ticket"); terminalTickets.delete(ticket!); let child: pty.IPty; try { child = pty.spawn(terminalShell, ["-l"], { name: "xterm-256color", cols: 80, rows: 24, cwd: terminalCwd, env: process.env }); } catch (error) { socket.send(JSON.stringify({ type: "error", data: (error as Error).message })); return socket.close(1011); } const send = (type: string, data: string) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ type, data })); }; child.onData((data) => send("output", data)); child.onExit(() => socket.close()); socket.on("message", (raw) => { try { const message = JSON.parse(raw.toString()) as { type?: string; data?: string; cols?: number; rows?: number }; if (message.type === "input" && typeof message.data === "string") child.write(message.data); if (message.type === "resize" && Number.isInteger(message.cols) && Number.isInteger(message.rows) && message.cols! > 0 && message.rows! > 0) child.resize(message.cols!, message.rows!); } catch { /* ignore malformed terminal messages */ } }); socket.on("close", () => child.kill()); });
     server.post<{ Params: { slug: string } }>("/api/applications/:slug/session-rollover", async (request, reply) => { if (!guard(request, reply)) return; return reply.code(201).send(await registeredApplication(request.params.slug).runtime.rollover(request.body)); });
+    const applicationResult = async (result: Promise<unknown>, reply: FastifyReply) => {
+      try { return await result; }
+      catch (error) {
+        if (error instanceof CompatibilityError && error.code === "profile_model_unavailable") {
+          return apiError(reply, 500, error.code, error.message);
+        }
+        throw error;
+      }
+    };
     server.post<{ Params: { slug: string } }>("/api/message/app/:slug", { bodyLimit: MAX_APPLICATION_BODY_BYTES }, async (request, reply) => {
       const application = registeredApplication(request.params.slug); if (!application.record.enabled) return apiError(reply, 404, "NOT_FOUND", "Application is disabled.");
       const headers = Object.fromEntries(Object.entries(request.headers).map(([key, value]) => [key, Array.isArray(value) ? value.join(", ") : value ?? ""])); const query = request.query && typeof request.query === "object" ? request.query as Record<string, unknown> : {};
@@ -1042,10 +1051,10 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
           return reply.code(202).send({ ok: true, accepted: true });
         }
         // In wait mode responseWebhookUrl is intentionally ignored.
-        return application.runtime.process(request.body, headers, query, direct);
+        return applicationResult(application.runtime.process(request.body, headers, query, direct), reply);
       }
       if (application.record.responseMode === "ack") { void application.runtime.process(request.body, headers, query).catch((error) => console.error(`[application:${application.record.slug}]`, error)); return reply.code(202).send({ ok: true, accepted: true }); }
-      return application.runtime.process(request.body, headers, query);
+      return applicationResult(application.runtime.process(request.body, headers, query), reply);
     });
 
     server.setNotFoundHandler(async (request, reply) => {

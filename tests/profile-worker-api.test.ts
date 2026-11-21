@@ -218,6 +218,9 @@ export default function(pi) {
   const compatUnavailable = await post("/v1/chat/completions", { model: "support", messages: [{ role: "user", content: "MODEL_UNAVAILABLE_MARKER" }] }, "POST", 502);
   assert.equal(compatUnavailable.error.code, data.code);
   assert.equal(compatUnavailable.error.message, data.error);
+  const applicationUnavailable = await post("/api/message/app/fixture", { identityKey: "alice", sessionType: "stateful", message: "MODEL_UNAVAILABLE_MARKER" }, "POST", 500);
+  assert.deepEqual(applicationUnavailable.error, { code: data.code, message: data.error });
+  assert.doesNotMatch(JSON.stringify(applicationUnavailable), /PRIVATE_MISSING_MODEL_MARKER/);
   assert.equal(calls.length, beforeUnavailable, "must not generate using a fallback model");
   await writeFile(settingsPath, originalSettings);
   await post("/v1/responses", { model: "support", input: "AFTER_MODEL_RESTORED" });
