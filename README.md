@@ -455,6 +455,8 @@ pi sessions rename <session-id> "Incident investigation"
 
 Extension names are shared by the CLI, API/Console, and profile runtime. Scoped package names are accepted as aliases; legacy entrypoint aliases remain valid only when unambiguous. Name collisions require an explicit path and never silently select the first match. The NAME column is not truncated. Disable/enable updates the default runtime, preserves the original resource declaration for re-enabling, and applies to named profiles after reload or restart. Required runtime extensions cannot be disabled through these commands.
 
+`sessions list` reads each new or changed transcript once and reuses metadata for unchanged files. The disposable `.session-list-index.json` lives in the active agent directory (the named profile directory for named profiles). It contains listing metadata and a bounded first-message preview, not full transcripts; it is written with owner-only permissions. Deleting it forces a fresh scan. Listing does not migrate or rewrite transcripts.
+
 ### Guardrails, Pulse, API, and Console
 
 ```bash

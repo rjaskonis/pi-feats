@@ -1,4 +1,4 @@
-import { SessionManager, type ExtensionAPI, type SessionInfo } from "@earendil-works/pi-coding-agent";
+import { SessionManager, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, relative, resolve } from "node:path";
@@ -11,6 +11,7 @@ export { updatedExtensionSettings } from "./lib/extension-catalog.ts";
 import { withoutTuiModeArgs } from "./lib/cli-tui-mode.ts";
 import { piCommand } from "./lib/pi-command.ts";
 import { type PulseExecutionSession } from "./pulse/store.ts";
+import { listSessionMetadata, type ListedSession } from "./lib/session-list-metadata.ts";
 import { sessionFileHasAlias } from "./lib/session-files.ts";
 import { sessionListDirectoryEnvironment, sessionsInDirectory } from "./lib/session-list-directory.ts";
 
@@ -92,7 +93,7 @@ function SourceTable({ title, detailHeader, rows }: { title: string; detailHeade
   return [title, top, row(["NAME", "STATUS", "SOURCE", detailHeader]), line, ...rows.map(row), bottom].join("\n");
 }
 
-function SessionTable({ sessions }: { sessions: SessionInfo[] }): string {
+function SessionTable({ sessions }: { sessions: ListedSession[] }): string {
   const terminalWidth = Math.max(80, process.stdout.columns ?? 80);
   const available = terminalWidth - 13;
   const widths = {
@@ -116,22 +117,16 @@ function SessionTable({ sessions }: { sessions: SessionInfo[] }): string {
   return ["SESSIONS", top, row(["ID", "SESSION", "LAST ACTIVITY", "PATH"]), line, ...sessions.map((session) => row([session.id, session.name ?? session.firstMessage, formatActivity(session.modified), session.path])), bottom].join("\n");
 }
 
-type PulseListedSession = SessionInfo & { source: "execution" | "injected-result"; pulse?: PulseExecutionSession };
-function isPulseOnlySession(session: SessionInfo, sessionDir: string | undefined): boolean {
-  const entries = SessionManager.open(session.path, sessionDir, session.cwd).getBranch() as Array<{ type?: string; customType?: string; message?: { role?: string } }>;
-  const relevant = entries.filter((entry) => entry.type === "pulse" || entry.type === "custom_message" || entry.type === "compaction" || entry.type === "branch_summary" || (entry.type === "message" && entry.message?.role !== "system"));
-  return relevant.length > 0 && relevant.every((entry) => entry.type === "pulse" || (entry.type === "custom_message" && entry.customType === "pulse"));
-}
-
-export function partitionPulseSessions(sessions: SessionInfo[], executions: Map<string, PulseExecutionSession>, sessionDir?: string): { normal: SessionInfo[]; pulses: PulseListedSession[] } {
-  const normal: SessionInfo[] = [], pulses: PulseListedSession[] = [];
+type PulseListedSession = ListedSession & { source: "execution" | "injected-result"; pulse?: PulseExecutionSession };
+export function partitionPulseSessions(sessions: ListedSession[], executions: Map<string, PulseExecutionSession>): { normal: ListedSession[]; pulses: PulseListedSession[] } {
+  const normal: ListedSession[] = [], pulses: PulseListedSession[] = [];
   const runs = [...executions.values()];
   for (const session of sessions) {
     // Old Pulse rows stored a filename alias rather than the header's real ID.
     // Require a database reference: a Pulse-like name or prompt alone is not proof.
     const pulse = executions.get(session.id) ?? runs.find((run) => sessionFileHasAlias(session.path, run.sessionId));
     if (pulse) pulses.push({ ...session, source: "execution", pulse: { ...pulse, sessionId: session.id } });
-    else if (isPulseOnlySession(session, sessionDir)) pulses.push({ ...session, source: "injected-result" });
+    else if (session.pulseOnly) pulses.push({ ...session, source: "injected-result" });
     else normal.push(session);
   }
   return { normal, pulses };
@@ -505,8 +500,11 @@ export default async function (pi: ExtensionAPI) {
   const sessionRequested = args.some((arg) => arg === "--list-sessions" || arg === "--list-sessions=true") || sessionListIndex >= 0;
   if (!kind && !action && !packageRequested && !packageAction && !sessionRequested && !sessionRename) return;
 
-  // Run CLI operations in an ephemeral child so they never create an empty session.
-  if (process.env.PI_CLI_RESOURCES !== "1" && !sessionRename) {
+  // These listings finish during extension initialization, before Pi creates a
+  // session. An explicit --profile still needs the existing profile dispatch.
+  const staticList = !action && !packageAction && !sessionRequested && !sessionRename && (packageRequested || kind === "skills" || kind === "extensions");
+  const inline = !requestedProfile() && (staticList || sessionRequested);
+  if (!inline && process.env.PI_CLI_RESOURCES !== "1" && !sessionRename) {
     const profile = requestedProfile();
     const root = process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
     const target = profile ? join(root, "profiles", profile) : process.env.PI_CODING_AGENT_DIR;
@@ -524,12 +522,13 @@ export default async function (pi: ExtensionAPI) {
 
   if (sessionRequested) {
     const sessionDir = process.env.PI_CODING_AGENT_SESSION_DIR;
-    const sessions = sessionDir ? await SessionManager.listAll(sessionDir) : await SessionManager.listAll();
+    const agentDir = process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
+    const sessions = await listSessionMetadata(agentDir, sessionDir);
     const profile = process.env.PI_ACTIVE_PROFILE ?? requestedProfile() ?? "default", root = process.env.PI_PROFILE_ROOT ?? process.env.PI_CODING_AGENT_DIR ?? join(process.env.HOME ?? "", ".pi", "agent");
     const pulseExecutions = pulseExecutionSessions(root, profile);
     const directory = sessionFilter === "." ? process.env.PI_SESSION_LIST_CWD ?? process.cwd() : undefined;
     const selected = directory === undefined ? sessions : await sessionsInDirectory(sessions, directory);
-    const listed = partitionPulseSessions(selected, pulseExecutions, sessionDir);
+    const listed = partitionPulseSessions(selected, pulseExecutions);
     if (sessionFilter === "pulses") await writeTable(PulseSessionTable(listed.pulses));
     else await writeTable([SessionTable({ sessions: listed.normal }), ApplicationSessionTable(root, profile, directory === undefined ? undefined : new Set(listed.normal.map((session) => session.id)))].filter(Boolean).join("\n\n"));
     process.exit(0);
@@ -573,7 +572,7 @@ export default async function (pi: ExtensionAPI) {
     }
   }
 
-  pi.on("session_start", async () => {
+  const list = async () => {
     if (packageRequested) {
       const { resourceRoot, runtimeSettings } = await readSettings();
       await writeTable(ResourceTable({ title: "PACKAGES", headers: ["NAME", "STATUS", "VERSION / DESCRIPTION"], rows: await packageRows(resourceRoot, runtimeSettings), highlightStatus: true }));
@@ -610,7 +609,8 @@ export default async function (pi: ExtensionAPI) {
       });
       await writeTable(SourceTable({ title: kind.toUpperCase(), detailHeader: "PATH", rows }));
     }
-    // This command always runs in an ephemeral child process.
     process.exit(0);
-  });
+  };
+  if (inline && staticList) await list();
+  else pi.on("session_start", list);
 }

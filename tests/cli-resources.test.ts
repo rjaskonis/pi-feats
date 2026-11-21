@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { listSessionMetadata } from "../extensions/lib/session-list-metadata.ts";
 import { type PulseExecutionSession } from "../extensions/pulse/store.ts";
 import { activeBuiltinTools, updatedBuiltinTools } from "../extensions/lib/builtin-tools.ts";
 import { ProfileStore } from "../extensions/api-server/profile-store.ts";
@@ -33,13 +33,13 @@ test("session listing hides real and legacy Pulse executions without hiding ordi
     await fixture("only-results", "only-results", [{ type: "session_info", name: "Results" }, { type: "model_change", provider: "test", modelId: "test" }, injected]);
     const run = (sessionId: string): PulseExecutionSession => ({ sessionId, pulseId: "pulse", pulseName: "test", pulseType: "heartbeat", runId: sessionId, status: "success", startedAt: timestamp, finishedAt: timestamp });
     const executions = new Map([legacy, "new-real-id"].map((id) => [id, run(id)]));
-    const sessions = await SessionManager.listAll(root);
-    const listed = partitionPulseSessions(sessions, executions, root);
+    const sessions = await listSessionMetadata(root, root);
+    const listed = partitionPulseSessions(sessions, executions);
     assert.deepEqual(listed.normal.map((s) => s.id).sort(), ["mixed", "normal"]);
     assert.deepEqual(listed.pulses.map((s) => s.id).sort(), ["legacy-real-id", "new-real-id", "only-results"]);
     assert.equal(listed.pulses.find((s) => s.id === "legacy-real-id")?.pulse?.sessionId, "legacy-real-id");
     // Without database evidence, a Pulse-like prompt or filename is not enough.
-    const degraded = partitionPulseSessions(sessions, new Map(), root);
+    const degraded = partitionPulseSessions(sessions, new Map());
     assert.equal(degraded.normal.length, 4);
     assert.equal(degraded.pulses.length, 1);
   } finally { await rm(root, { recursive: true, force: true }); }
