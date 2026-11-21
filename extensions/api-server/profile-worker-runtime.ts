@@ -306,7 +306,9 @@ export class ProfileWorkerRuntime {
       if (trace) trace.worker = lane.worker ? "reused" : "cold";
       if (!lane.worker) {
         const launchSignal = AbortSignal.any([signal, this.shutdown.signal, AbortSignal.timeout(60_000)]);
+        const prepareStart = trace ? performance.now() : 0;
         const launch = await this.options.launch(profile, launchSignal);
+        if (trace) trace.launchPrepMs = latencyMs(performance.now() - prepareStart);
         signal.throwIfAborted();
         if (this.closed) throw failure();
         if (launchSignal.aborted) throw failure();

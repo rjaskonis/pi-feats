@@ -4,12 +4,13 @@ export const LATENCY_TRACE_HEADER = "x-pi-trace-latency";
 export const LATENCY_ID_HEADER = "x-pi-trace-id";
 export const latencyMs = (duration: number) => Math.round(Math.max(0, duration) * 10) / 10;
 
-const workerKeys = ["workerPid", "agentInitMs", "promptMs", "firstModelStartMs", "modelActiveMs", "modelStreams", "modelStreamsCompleted", "sessionCleanupMs"] as const;
+const workerKeys = ["nodeToEntryMs", "sdkSetupMs", "sdkImportMs", "workerModulesMs", "nodeToFirstJobMs", "workerPid", "agentInitMs", "promptMs", "firstModelStartMs", "modelActiveMs", "modelStreams", "modelStreamsCompleted", "sessionCleanupMs"] as const;
 export type WorkerLatency = Partial<Record<(typeof workerKeys)[number], number>>;
 export type LatencyTrace = {
   started: number;
   queueMs?: number;
   dispatchMs?: number;
+  launchPrepMs?: number;
   untilReadyMs?: number;
   untilFirstTextMs?: number;
   untilResultMs?: number;

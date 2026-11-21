@@ -20,16 +20,17 @@ const rounds = Number(process.env.PI_OPENAI_TEST_LAUNCH_ROUNDS ?? 5);
 const run = promisify(execFile);
 const median = (values: number[]) => [...values].sort((a, b) => a - b)[Math.floor(values.length / 2)];
 const ms = (number: number) => Math.round(number);
+const optionalMedian = (values: Array<number | undefined>) => values.every(value => value !== undefined) ? median(values as number[]) : undefined;
 
-async function residentPss(pid: number | undefined): Promise<number | undefined> {
+async function treeMemory(pid: number | undefined, kind: "Pss" | "VmRSS"): Promise<number | undefined> {
   if (pid === undefined || process.platform !== "linux") return;
   try {
     const root = `/proc/${pid}`;
-    const pss = (await readFile(`${root}/smaps_rollup`, "utf8")).match(/^Pss:\s+(\d+) kB$/m);
+    const memory = (await readFile(`${root}/${kind === "Pss" ? "smaps_rollup" : "status"}`, "utf8")).match(new RegExp(`^${kind}:\\s+(\\d+) kB$`, "m"));
     const children = (await readFile(`${root}/task/${pid}/children`, "utf8")).trim().split(/\s+/).filter(Boolean);
-    const descendants = await Promise.all(children.map(child => residentPss(Number(child))));
-    if (pss && descendants.every(value => value !== undefined)) return Number(pss[1]) + descendants.reduce<number>((sum, value) => sum + (value ?? 0), 0);
-  } catch { /* PSS is optional; process permissions can prevent sampling. */ }
+    const descendants = await Promise.all(children.map(child => treeMemory(Number(child), kind)));
+    if (memory && descendants.every(value => value !== undefined)) return Number(memory[1]) + descendants.reduce<number>((sum, value) => sum + (value ?? 0), 0);
+  } catch { /* Processes can exit during sampling or deny access to PSS. */ }
 }
 
 test("benchmark CLI and direct worker launch with a localhost model and sandbox parity", { skip: !enabled, timeout: 360_000 }, async (t) => {
@@ -112,7 +113,7 @@ export default function (pi) {
     }
   }
 
-  const rows: Array<{ profile: string; mode: string; coldReadyMs: number; coldTotalMs: number; prepMs: number; beforeInitMs: number; initMs: number; warmReadyMs: number; pssMiB?: number }> = [];
+  const rows: Array<{ profile: string; mode: string; coldReadyMs: number; coldTotalMs: number; prepMs: number; beforeInitMs: number; initMs: number; nodeToFirstJobMs: number; sdkImportMs: number; workerModulesMs: number; warmReadyMs: number; pssMiB?: number; sampledBootRssMiB?: number; warmRssMiB?: number }> = [];
   for (let i = 0; i < rounds; i++) for (const profile of ["default", "support"]) {
     const named = profile !== "default", dir = named ? support : root;
     // Alternate ordering within each profile so cache and load drift do not
@@ -129,27 +130,41 @@ export default function (pi) {
         finally { prepMs = performance.now() - prepareStart; }
       }, version: () => profileWorkerVersion(root, dir) });
       try {
-        const execute = async (started: number) => {
+        let peakRss: number | undefined;
+        const execute = async (started: number, cold = false) => {
           const trace: LatencyTrace = { started };
           const before = contexts.length;
-          const result = await pool.execute(profile, { request: normalizeRequest({ model: profile, input: "Reply with OK only." }, "responses") }, async () => {}, AbortSignal.timeout(30_000), undefined, undefined, trace);
+          let sampling: Promise<void> | undefined;
+          const timer = cold && process.platform === "linux" ? setInterval(() => {
+            if (sampling || !trace.launcherPid || trace.untilReadyMs !== undefined) return;
+            sampling = treeMemory(trace.launcherPid, "VmRSS").then(value => {
+              if (value !== undefined) peakRss = Math.max(peakRss ?? 0, value);
+            }).finally(() => { sampling = undefined; });
+          }, 50) : undefined;
+          const result = await pool.execute(profile, { request: normalizeRequest({ model: profile, input: "Reply with OK only." }, "responses") }, async () => {}, AbortSignal.timeout(30_000), undefined, undefined, trace).finally(async () => {
+            clearInterval(timer);
+            await sampling;
+          });
           assert.equal(result.text, "OK"); assert.equal(contexts.length, before + 1);
           assert.deepEqual(contexts.at(-1), { active: profile, env: named ? "profile-env" : null, own: named ? "OWN_FIXTURE_MARKER" : "denied", neighbor: named ? "denied" : "NEIGHBOR_FIXTURE_MARKER", turns: 1 });
           assert.equal(trace.retired, false); assert.equal(trace.execution?.modelStreamsCompleted, 1);
           return trace;
         };
-        const cold = await execute(start), warm = await execute(performance.now());
+        const cold = await execute(start, true), warm = await execute(performance.now());
         assert.equal(cold.worker, "cold"); assert.equal(warm.worker, "reused");
         assert.equal(cold.execution?.workerPid, warm.execution?.workerPid);
         assert.ok(cold.untilReadyMs && cold.execution?.agentInitMs && warm.untilReadyMs);
-        const pss = await residentPss(warm.launcherPid);
-        rows.push({ profile, mode, coldReadyMs: ms(cold.untilReadyMs), coldTotalMs: ms(cold.untilIdleMs!), prepMs: ms(prepMs), beforeInitMs: ms(cold.untilReadyMs - prepMs - cold.execution.agentInitMs), initMs: ms(cold.execution.agentInitMs), warmReadyMs: ms(warm.untilReadyMs), ...(pss === undefined ? {} : { pssMiB: ms(pss / 1024) }) });
+        const { sdkImportMs, nodeToFirstJobMs, workerModulesMs } = cold.execution;
+        assert.ok(sdkImportMs !== undefined && nodeToFirstJobMs !== undefined && workerModulesMs !== undefined);
+        assert.equal(warm.execution?.sdkImportMs, undefined);
+        const [pss, rss] = await Promise.all([treeMemory(warm.launcherPid, "Pss"), treeMemory(warm.launcherPid, "VmRSS")]);
+        rows.push({ profile, mode, coldReadyMs: ms(cold.untilReadyMs), coldTotalMs: ms(cold.untilIdleMs!), prepMs: ms(prepMs), beforeInitMs: ms(cold.untilReadyMs - prepMs - cold.execution.agentInitMs), initMs: ms(cold.execution.agentInitMs), sdkImportMs: ms(sdkImportMs), nodeToFirstJobMs: ms(nodeToFirstJobMs), workerModulesMs: ms(workerModulesMs), warmReadyMs: ms(warm.untilReadyMs), ...(pss === undefined ? {} : { pssMiB: ms(pss / 1024) }), ...(rss === undefined ? {} : { warmRssMiB: ms(rss / 1024) }), ...(peakRss === undefined ? {} : { sampledBootRssMiB: ms(peakRss / 1024) }) });
         t.diagnostic(JSON.stringify(rows.at(-1)));
       } finally { await pool.close(); }
     }
   }
   for (const profile of ["default", "support"]) for (const mode of modes) {
     const group = rows.filter(row => row.profile === profile && row.mode === mode);
-    t.diagnostic(JSON.stringify({ profile, mode, medianColdReadyMs: median(group.map(row => row.coldReadyMs)), medianColdTotalMs: median(group.map(row => row.coldTotalMs)), medianPrepMs: median(group.map(row => row.prepMs)), medianBeforeInitMs: median(group.map(row => row.beforeInitMs)), medianAgentInitMs: median(group.map(row => row.initMs)), coldReadyRangeMs: [Math.min(...group.map(row => row.coldReadyMs)), Math.max(...group.map(row => row.coldReadyMs))], medianWarmReadyMs: median(group.map(row => row.warmReadyMs)), medianPssMiB: group.every(row => row.pssMiB !== undefined) ? median(group.map(row => row.pssMiB!)) : undefined }));
+    t.diagnostic(JSON.stringify({ profile, mode, medianColdReadyMs: median(group.map(row => row.coldReadyMs)), medianColdTotalMs: median(group.map(row => row.coldTotalMs)), medianPrepMs: median(group.map(row => row.prepMs)), medianBeforeInitMs: median(group.map(row => row.beforeInitMs)), medianAgentInitMs: median(group.map(row => row.initMs)), coldReadyRangeMs: [Math.min(...group.map(row => row.coldReadyMs)), Math.max(...group.map(row => row.coldReadyMs))], medianWarmReadyMs: median(group.map(row => row.warmReadyMs)), medianSdkImportMs: median(group.map(row => row.sdkImportMs)), medianNodeToFirstJobMs: median(group.map(row => row.nodeToFirstJobMs)), medianWorkerModulesMs: median(group.map(row => row.workerModulesMs)), medianPssMiB: optionalMedian(group.map(row => row.pssMiB)), medianSampledBootRssMiB: optionalMedian(group.map(row => row.sampledBootRssMiB)), medianWarmRssMiB: optionalMedian(group.map(row => row.warmRssMiB)) }));
   }
 });

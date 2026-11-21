@@ -226,6 +226,13 @@ export default function(pi) {
   const [cold, warm] = records;
   assert.equal(cold.worker, "cold"); assert.equal(warm.worker, "reused");
   assert.equal(String(cold.execution.workerPid), firstPid); assert.equal(cold.execution.workerPid, warm.execution.workerPid);
+  assert.ok(cold.launchPrepMs >= 0 && cold.launchPrepMs <= cold.dispatchMs);
+  assert.equal(warm.launchPrepMs, undefined);
+  for (const key of ["nodeToEntryMs", "sdkSetupMs", "sdkImportMs", "workerModulesMs", "nodeToFirstJobMs"]) {
+    assert.ok(cold.execution[key] >= 0);
+    assert.equal(warm.execution[key], undefined);
+  }
+  assert.ok(cold.execution.nodeToFirstJobMs >= cold.execution.sdkImportMs);
   assert.equal(cold.launcherPid, warm.launcherPid);
   assert.ok(cold.execution.modelActiveMs >= 150);
   for (const trace of records) {

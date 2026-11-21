@@ -10,6 +10,28 @@ node --experimental-strip-types --test tests/profile-worker-launch-benchmark.tes
 
 Use Node 22 and make `nono` available on `PATH`. The test uses temporary profiles under the home cache, alternates launch order, and reports individual measurements and medians. It makes one cold and one warm request per arm, profile and round (40 requests by default; set `PI_OPENAI_TEST_LAUNCH_ROUNDS` to select 1–10 rounds). Set `PI_OPENAI_TEST_LAUNCH_SHIPPED=1` to load all shipped extensions. `PI_OPENAI_TEST_EXTERNAL_EXTENSIONS` may contain a JSON array of absolute local extension entrypoints; `PI_OPENAI_TEST_RUNTIME_NPM_DIR` can point to the shared npm runtime exposed to Nono read-only. The test asserts job isolation and launch behavior, not machine-dependent latency thresholds. It checks profile environment, workspace access, denial of adjacent-profile reads under Nono, extension state reset, and worker reuse. PSS is measured for the launcher plus descendants where Linux permits reading the entire tree; inaccessible samples are omitted.
 
+## Boot phases and sampled memory: Pi 1.5.2 on Linux
+
+Three rounds with the minimal extension set and a localhost model. Times are medians through the cold worker's first request. The RSS columns sum the resident sizes of the launcher and its descendants; they may count shared pages multiple times. Boot RSS is the largest observed sample in each launch (50 ms sampling before `ready`), not a guaranteed maximum. Warm RSS is sampled after the second request. Full-tree PSS was not available for Nono.
+
+| Profile | CLI → direct cold `ready` | Direct SDK import | Direct Node start to first job | CLI → direct boot RSS | CLI → direct warm RSS |
+|---|---:|---:|---:|---:|---:|
+| Default fixture | 3,172 → 1,990 ms | 1,286 ms | 1,455 ms | 289 → 155 MiB | 294 → 161 MiB |
+| Named fixture (Nono) | 3,578 → 2,818 ms | 1,151 ms | 1,361 ms | 303 → 172 MiB | 309 → 175 MiB |
+
+Direct Nono launch preparation measured 25 ms; session preparation inside that worker measured 480 ms. The median per-launch residual after subtracting launch preparation, Node startup through the first job, and agent preparation from cold `ready` was 32 ms without sandbox and 1,051 ms with Nono for direct launch. This is not a measurement of Nono in isolation: it also includes unmeasured launch overhead, scheduling, fingerprinting, and IPC. The SDK import is inside the Node-to-first-job interval, not additive. For the default fixture, warm PSS declined from 196 to 111 MiB. Neither memory figure describes the SDK process alone.
+
+## Isolating the Nono startup cost
+
+```sh
+PI_OPENAI_TEST_NONO_LAUNCH_OVERHEAD=1 \
+node --experimental-strip-types --test tests/nono-launch-overhead.test.ts
+```
+
+With Nono 0.74.0 and managed Node 22.23.2, the median time to stdout over seven launches per case was 3 ms without Nono and 54 ms with Nono for `/usr/bin/printf`, versus 38 ms and 787 ms for a Node process that only writes `ready`. The Pi SDK was not imported. A separate run put the Node delta at 931 ms, versus 749 ms in the checked-in probe run.
+
+A separate `strace` run showed the Nono process reading 124,836,408 bytes from the Node executable in 15,239 reads, before spawning the process that applied Landlock and executed Node. This identifies a sizable pre-execution binary read, not time spent executing JavaScript or applying the Landlock rules. Do not use the timing under `strace` as the production estimate. This probe leaves the normal Nono policy and checks enabled. Any change to how the executable is read or verified belongs upstream and must preserve executable integrity checks.
+
 ## Production launcher comparison: Pi 1.5.2 on Linux
 
 Five rounds using both production launch functions and the expanded extension set. The named fixture goes through the shared profile synchronization and Nono policy validation in both arms.

@@ -5,6 +5,7 @@ import { initializeWorkerInfrastructure, preserveComputerUseConfiguration } from
 import { ClientWorker } from "./openai-client-worker.ts";
 import { runCompatibilityWorker, WORKER_EVENT_PREFIX, type CompatibilityWorkerHooks, type ResidentExecution } from "./openai-execution.ts";
 import type { CompletionRequest } from "./openai-contract.ts";
+import type { WorkerLatency } from "./latency-trace.ts";
 import type { ClientRequest } from "./openai-client-contract.ts";
 
 export type ProfileJob = {
@@ -14,7 +15,7 @@ export type ProfileJob = {
   application?: { sessionPath?: string; sessionId: string; application?: string; identityKey?: string; directContextMemory?: string; handoff?: string };
 };
 
-export async function runProfileWorker(host: typeof import("@earendil-works/pi-coding-agent"), clearExtensionCache: () => void): Promise<void> {
+export async function runProfileWorker(host: typeof import("@earendil-works/pi-coding-agent"), clearExtensionCache: () => void, bootstrap?: WorkerLatency): Promise<void> {
   process.env.PI_OPENAI_WORKER = "running";
   initializeWorkerInfrastructure(host);
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -39,13 +40,16 @@ export async function runProfileWorker(host: typeof import("@earendil-works/pi-c
     if (frame.type === "shutdown" && !busy) return stop();
     if (frame.type !== "execute" || busy || !frame.job?.request) return process.exit(1);
     busy = true;
-    void run(frame.job).then((reusable) => {
+    // Boot metrics belong only to the first job, even if it did not opt in.
+    const boot = bootstrap && { ...bootstrap, nodeToFirstJobMs: performance.now() };
+    bootstrap = undefined;
+    void run(frame.job, boot).then((reusable) => {
       busy = false;
       if (stopping) process.exit(0);
       write({ type: "idle", ...(!reusable ? { retire: true } : {}) });
     }).catch(() => process.exit(1));
   });
-  async function run(job: ProfileJob): Promise<boolean> {
+  async function run(job: ProfileJob, boot?: WorkerLatency): Promise<boolean> {
     clearExtensionCache();
     delete process.env.PI_PROFILE_WORKER_RETIRE;
     // Initialize lazy stdio handles before the job's lifecycle snapshot.
@@ -78,7 +82,11 @@ export async function runProfileWorker(host: typeof import("@earendil-works/pi-c
     } : undefined;
     const hooks: CompatibilityWorkerHooks = {
       readRequest: async () => job.request,
-      write,
+      write: boot && job.traceLatency === true ? value => {
+        if (value && typeof value === "object" && "type" in value && value.type === "latency" && "metrics" in value) {
+          write({ ...value, metrics: { ...boot, ...(value.metrics as WorkerLatency) } });
+        } else write(value);
+      } : write,
       factory: () => {},
       attachmentBudget: { count: 0, bytes: 0 },
       prepare: async () => {},
