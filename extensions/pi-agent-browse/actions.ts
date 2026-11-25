@@ -18,7 +18,8 @@ export async function browserAction(broker: Pick<BrowserBroker, "status" | "conn
     return url.href;
   };
   let tabId = input.tabId;
-  if (input.action === "navigate" && tabId === undefined) {
+  // Some tool adapters supply 0 for an omitted numeric argument. Only navigation may create a new tab.
+  if (input.action === "navigate" && (tabId === undefined || tabId === 0)) {
     const url = validateUrl(input.url);
     const tab = await broker.rpc(connection, "tabs.create", { active: false }) as { tabId: number };
     tabId = tab.tabId;

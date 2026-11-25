@@ -29,8 +29,8 @@ function fixture(options: { groupId?: number; failGrouping?: boolean } = {}) {
 
 test("new background tabs are grouped before navigation with a stable profile label", async () => {
   const f = fixture();
-  for (let count = 0; count < 2; count++) {
-    const result = await browserAction(f.broker, "support", { action: "navigate", url: "https://example.com" });
+  for (const tabId of [undefined, 0]) {
+    const result = await browserAction(f.broker, "support", { action: "navigate", url: "https://example.com", tabId });
     assert.deepEqual(result, { browser: "chrome", tabId: 42 });
   }
   const expected = [
@@ -42,6 +42,13 @@ test("new background tabs are grouped before navigation with a stable profile la
     { method: "debugger.sendCommand", params: { tabId: 42, method: "Page.navigate", params: { url: "https://example.com/" } } },
   ];
   assert.deepEqual(f.calls, [...expected, ...expected]);
+});
+
+test("zero does not target a tab for other actions, and foreign tab IDs remain rejected", async () => {
+  const f = fixture();
+  await assert.rejects(browserAction(f.broker, "support", { action: "close", tabId: 0 }), /not owned/);
+  await assert.rejects(browserAction(f.broker, "support", { action: "navigate", tabId: 99, url: "https://example.com" }), /not owned/);
+  assert.deepEqual(f.calls, []);
 });
 
 test("extension grouping disabled is respected; existing tabs are not regrouped", async () => {
