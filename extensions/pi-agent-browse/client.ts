@@ -1,6 +1,9 @@
 import { localBrowserCapability, localBrowserPort } from "./local-access.ts";
 import type { BrowserAction } from "./actions.ts";
 import { browserStatusGuidance } from "./guidance.ts";
+import { expectsServerBrowser } from "./server-access.ts";
+
+const serverUnavailable = "The server browser service is unavailable. Do not start a local relay or pair again.";
 
 export async function browserConnection(agentDir: string, environment: NodeJS.ProcessEnv = process.env) {
   if (environment.PI_BROWSER_ENDPOINT || environment.PI_BROWSER_TOKEN) {
@@ -9,6 +12,7 @@ export async function browserConnection(agentDir: string, environment: NodeJS.Pr
     if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" || endpoint.pathname !== "/" || endpoint.search || endpoint.hash || endpoint.username || endpoint.password) throw new Error("Browser worker endpoint must be the local API broker");
     return { endpoint: endpoint.origin, token: environment.PI_BROWSER_TOKEN };
   }
+  if (expectsServerBrowser(environment)) throw Object.assign(new Error(serverUnavailable), { code: "BROWSER_SERVER_UNAVAILABLE" });
   const token = environment.PI_BROWSER_LOCAL_CAPABILITY ?? (environment.PI_ACTIVE_PROFILE && environment.PI_ACTIVE_PROFILE !== "default"
     ? undefined : await localBrowserCapability(agentDir, "default"));
   if (!token) throw new Error("Restart this Pi Profile to load its shared browser capability");
@@ -28,7 +32,7 @@ export async function browserRequest(connection: { endpoint: string; token: stri
   return data;
 }
 export async function executeBrowserAction(agentDir: string, action: BrowserAction, signal?: AbortSignal, environment: NodeJS.ProcessEnv = process.env) {
-  const mode = environment.PI_BROWSER_ENDPOINT || environment.PI_BROWSER_TOKEN ? "console" : "local";
+  const mode = environment.PI_BROWSER_ENDPOINT || environment.PI_BROWSER_TOKEN || expectsServerBrowser(environment) ? "console" : "local";
   try {
     const connection = await browserConnection(agentDir, environment);
     const result = (await browserRequest(connection, "/api/browser/worker/command", action, signal)).result;
@@ -37,6 +41,10 @@ export async function executeBrowserAction(agentDir: string, action: BrowserActi
     const code = (error as NodeJS.ErrnoException).code ?? (error as { cause?: NodeJS.ErrnoException }).cause?.code;
     if (action.action === "status" && mode === "local" && ["ENOENT", "ECONNREFUSED"].includes(code ?? "")) {
       return browserStatusGuidance({ browsers: [], pairingPending: false }, mode, false);
+    }
+    if (mode === "console" && (["BROWSER_SERVER_UNAVAILABLE", "ECONNREFUSED", "ECONNRESET"].includes(code ?? "") || (error as Error).message === "Invalid browser worker capability")) {
+      if (action.action === "status") return browserStatusGuidance({ browsers: [] }, "console", false);
+      throw new Error(serverUnavailable);
     }
     throw error;
   }

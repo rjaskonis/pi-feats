@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { browserRequest, executeBrowserAction } from "./client.ts";
 import { browserProfileName, localBrowserCapability, localBrowserDirectory, localBrowserKey, localBrowserPort, localBrowserSecret } from "./local-access.ts";
 import { browserRuntimeVersion } from "./version.ts";
+import { expectsServerBrowser, serverBrowserEnvironment } from "./server-access.ts";
 
 const wait = () => new Promise(resolve => setTimeout(resolve, 100));
 const localStatus = "/api/browser/local/status";
@@ -52,15 +53,18 @@ export async function handleBrowserCli(args: string[], profile: string, root: st
     throw new Error("Usage: pi browser install | pair | status | unpair | stop");
   }
   if (profileSession && profile !== process.env.PI_ACTIVE_PROFILE) throw new Error("Cannot inspect another browser profile from this session.");
-  if (profile !== "default" || profileSession || process.env.PI_BROWSER_ENDPOINT || process.env.PI_BROWSER_TOKEN) {
+  const environment = { ...process.env, ...await serverBrowserEnvironment(root, profile, process.env) };
+  const remote = !!(environment.PI_BROWSER_ENDPOINT || environment.PI_BROWSER_TOKEN || expectsServerBrowser(environment));
+  if (remote && action !== "status") throw new Error("Use the Console to manage server browser pairing. This server does not use the local relay.");
+  if (profile !== "default" || profileSession || remote) {
     if (action !== "status") throw new Error("The browser relay is shared. Run pi browser pair once from a terminal outside the named profile.");
     const directory = profile === "default" ? root : join(root, "profiles", profile);
-    const result = !profileSession && !process.env.PI_BROWSER_ENDPOINT && !process.env.PI_BROWSER_TOKEN
+    const result = !profileSession && !remote
       ? await localBrowserCapability(root, profile).then(token => executeBrowserAction(directory, { action: "status" }, undefined, { PI_BROWSER_LOCAL_CAPABILITY: token })).catch(error => {
         if (error.code === "ENOENT") return { connectionState: "relay_not_running" };
         throw error;
       })
-      : await executeBrowserAction(directory, { action: "status" });
+      : await executeBrowserAction(directory, { action: "status" }, undefined, environment);
     console.log(JSON.stringify(result, null, 2));
     return;
   }

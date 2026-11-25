@@ -256,9 +256,11 @@ async function reexecWithProfile(name: string, args: string[]) {
   const launch = await prepareProfileLaunch({
     root: rootAgentDir(), name, cwd: process.cwd(), runtimeEntry,
     extraEnvironment: async () => {
-      const extra = await sessionListDirectoryEnvironment(args);
+      const { serverBrowserEnvironment, serverBrowserMarker } = await import("./pi-agent-browse/server-access.ts");
+      const serverBrowser = await serverBrowserEnvironment(rootAgentDir(), name, process.env);
+      const extra = { ...await sessionListDirectoryEnvironment(args), ...serverBrowser };
       // Local workers get only their own capability, never the relay key.
-      if (name !== "default" && !process.env.PI_BROWSER_ENDPOINT && !process.env.PI_BROWSER_TOKEN) {
+      if (name !== "default" && !process.env.PI_BROWSER_ENDPOINT && !process.env.PI_BROWSER_TOKEN && !serverBrowser[serverBrowserMarker]) {
         const { localBrowserCapability } = await import("./pi-agent-browse/local-access.ts");
         extra.PI_BROWSER_LOCAL_CAPABILITY = await localBrowserCapability(rootAgentDir(), name, true);
       }

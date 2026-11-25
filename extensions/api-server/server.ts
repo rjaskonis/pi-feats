@@ -32,6 +32,7 @@ import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
 import { piCommand } from "../lib/pi-command.ts";
 import { registerBrowserRoutes } from "../pi-agent-browse/routes.ts";
+import { serverBrowserMarker, startServerBrowserAccess } from "../pi-agent-browse/server-access.ts";
 import { browserPublicOrigin } from "./browser-extension-archive.ts";
 import { PulseStore } from "../pulse/store.ts";
 import { SkillSourceStore } from "../skill-sources/store.ts";
@@ -547,6 +548,9 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     const terminalEnabled = process.env.PI_CONSOLE_TERMINAL_ENABLED !== "false";
     const terminalCwd = process.env.PI_CONSOLE_TERMINAL_CWD ?? options.agentDir;
     const terminalShell = process.env.PI_CONSOLE_TERMINAL_SHELL ?? "/bin/bash";
+    const terminalEnvironment: NodeJS.ProcessEnv = { ...process.env, [serverBrowserMarker]: "1" };
+    delete terminalEnvironment.PI_BROWSER_ENDPOINT;
+    delete terminalEnvironment.PI_BROWSER_TOKEN;
     const terminalUrl = (ticket: string) => { const base = new URL(config.publicBaseUrl ?? `http://127.0.0.1:${config.port}`); base.protocol = base.protocol === "https:" ? "wss:" : "ws:"; base.pathname = "/api/terminal/stream"; base.search = `ticket=${encodeURIComponent(ticket)}`; return base.toString(); }; 
 
     server.addHook("onRequest", async (_request, reply) => {
@@ -1044,7 +1048,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.post<{ Params: { slug: string } }>("/api/applications/:slug/logs/ticket", async (request, reply) => { if (!guard(request, reply)) return; const application = registeredApplication(request.params.slug), ticket = randomUUID(); applicationLogTickets.set(ticket, { slug: application.record.slug, expiresAt: Date.now() + 60_000 }); const base = new URL(config.publicBaseUrl ?? `http://127.0.0.1:${config.port}`); base.protocol = base.protocol === "https:" ? "wss:" : "ws:"; base.pathname = `/api/applications/${encodeURIComponent(application.record.slug)}/logs/stream`; base.search = `ticket=${encodeURIComponent(ticket)}`; return { ticket, url: base.toString() }; });
     server.get("/api/applications/:slug/logs/stream", { websocket: true }, (socket, request) => { const ticket = (request.query as { ticket?: string }).ticket; const value = ticket && applicationLogTickets.get(ticket); if (!value || value.slug !== (request.params as { slug: string }).slug || value.expiresAt < Date.now()) return socket.close(1008, "Invalid ticket"); applicationLogTickets.delete(ticket!); const unsubscribe = registeredApplication(value.slug).runtime.logs.on((event) => socket.send(JSON.stringify(event))); socket.on("close", unsubscribe); });
     server.post("/api/terminal/ticket", async (request, reply) => { if (!guard(request, reply)) return; if (!terminalEnabled) throw Object.assign(new Error("Console terminal is disabled."), { status: 403 }); const ticket = randomUUID(); terminalTickets.set(ticket, { expiresAt: Date.now() + 30_000 }); return { url: terminalUrl(ticket), cwd: terminalCwd }; });
-    server.get("/api/terminal/stream", { websocket: true }, (socket, request) => { const ticket = (request.query as { ticket?: string }).ticket; const value = ticket && terminalTickets.get(ticket); if (!terminalEnabled || !value || value.expiresAt < Date.now()) return socket.close(1008, "Invalid ticket"); terminalTickets.delete(ticket!); let child: pty.IPty; try { child = pty.spawn(terminalShell, ["-l"], { name: "xterm-256color", cols: 80, rows: 24, cwd: terminalCwd, env: process.env }); } catch (error) { socket.send(JSON.stringify({ type: "error", data: (error as Error).message })); return socket.close(1011); } const send = (type: string, data: string) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ type, data })); }; child.onData((data) => send("output", data)); child.onExit(() => socket.close()); socket.on("message", (raw) => { try { const message = JSON.parse(raw.toString()) as { type?: string; data?: string; cols?: number; rows?: number }; if (message.type === "input" && typeof message.data === "string") child.write(message.data); if (message.type === "resize" && Number.isInteger(message.cols) && Number.isInteger(message.rows) && message.cols! > 0 && message.rows! > 0) child.resize(message.cols!, message.rows!); } catch { /* ignore malformed terminal messages */ } }); socket.on("close", () => child.kill()); });
+    server.get("/api/terminal/stream", { websocket: true }, (socket, request) => { const ticket = (request.query as { ticket?: string }).ticket; const value = ticket && terminalTickets.get(ticket); if (!terminalEnabled || !value || value.expiresAt < Date.now()) return socket.close(1008, "Invalid ticket"); terminalTickets.delete(ticket!); let child: pty.IPty; try { child = pty.spawn(terminalShell, ["-l"], { name: "xterm-256color", cols: 80, rows: 24, cwd: terminalCwd, env: terminalEnvironment }); } catch (error) { socket.send(JSON.stringify({ type: "error", data: (error as Error).message })); return socket.close(1011); } const send = (type: string, data: string) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify({ type, data })); }; child.onData((data) => send("output", data)); child.onExit(() => socket.close()); socket.on("message", (raw) => { try { const message = JSON.parse(raw.toString()) as { type?: string; data?: string; cols?: number; rows?: number }; if (message.type === "input" && typeof message.data === "string") child.write(message.data); if (message.type === "resize" && Number.isInteger(message.cols) && Number.isInteger(message.rows) && message.cols! > 0 && message.rows! > 0) child.resize(message.cols!, message.rows!); } catch { /* ignore malformed terminal messages */ } }); socket.on("close", () => child.kill()); });
     server.post<{ Params: { slug: string } }>("/api/applications/:slug/session-rollover", async (request, reply) => { if (!guard(request, reply)) return; return reply.code(201).send(await registeredApplication(request.params.slug).runtime.rollover(request.body)); });
     const applicationResult = async (result: Promise<unknown>, reply: FastifyReply) => {
       try { return await result; }
@@ -1087,7 +1091,19 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       return apiError(reply, 500, "INTERNAL_ERROR", "Internal API error.");
     });
 
+    let closeBrowserLauncher: (() => Promise<void>) | undefined;
+    server.addHook("onClose", async () => { await closeBrowserLauncher?.(); });
     await server.listen({ port: config.port, host: config.host });
+    try {
+      const address = server.server.address();
+      closeBrowserLauncher = await startServerBrowserAccess(options.agentDir, typeof address === "object" && address ? address.port : config.port, async profile => {
+        await api.profiles.readSettings(profile);
+        return browser.workerToken(profile);
+      });
+    } catch (error) {
+      await server.close();
+      throw error;
+    }
     return server;
   })();
   try { return await serverPromise; } catch (error) { serverPromise = undefined; throw error; }
