@@ -31,15 +31,9 @@ No separate download is needed. Identical files are left untouched. On a bundled
 
 ## Download from the pi-feats API
 
-A server running the private build can serve the bundled extension archive at `GET /api/browser/pi-agent-browse-extension.zip`. It requires the standard pi-feats API Bearer token and returns `404` if the installation has no archive. A third-party web app should use its backend to fetch and forward the download to its authenticated users, keeping the pi-feats token server-side. Do not put the token in a download URL.
+In **Administrative Settings → Pi Agent Browse**, use **Copy link** to share the full URL or **Download ZIP**. Anyone with the URL can download the bundled extension at `GET /api/browser/pi-agent-browse-extension.zip` without authentication. Only the ZIP is public; the Console and `/api/browser/download-status` still require authentication. The published HTTPS origin must route the download path to either the Pi API or the Console WebUI.
 
-```sh
-curl --fail -H "Authorization: Bearer $PI_API_TOKEN" \
-  "$PI_API_BASE_URL/api/browser/pi-agent-browse-extension.zip" \
-  -o pi-agent-browse-extension.zip
-```
-
-With `PI_PUBLIC_BASE_URL` (or `api.publicBaseUrl`) set to a public HTTPS origin, the download embeds `wss://<host>/api/browser/connect` and permits that destination in the Chrome extension policy. The Settings pairing form defaults to **Remote server**, shows the configured host and also offers **Local relay**. Without a public origin, the download and the extension bundled with `pi-feats` remain local-only. Rebuild old extension archives before staging them; the API returns `503` for incompatible archives or invalid public origins instead of serving a local ZIP as a remote one.
+With `PI_PUBLIC_BASE_URL` (or `api.publicBaseUrl`) set to a public HTTPS origin, the download embeds `wss://<host>/api/browser/connect` and permits that destination in the Chrome extension policy. The Settings pairing form defaults to **Remote server**, shows the configured host and also offers **Local relay**. Without a public origin, the download is unavailable; the extension bundled with `pi-feats` remains local-only. Rebuild old extension archives before staging them; the API returns `503` for incompatible archives or invalid public origins instead of serving a local ZIP as a remote one.
 
 The ZIP contains no relay, API token or pairing credentials. **Remote relay transport and profile-bound pairing are not implemented yet.** The configured URL is the intended browser WebSocket endpoint, not an active relay route. Local pairing remains available.
 

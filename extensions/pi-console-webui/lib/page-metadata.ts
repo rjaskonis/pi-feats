@@ -18,12 +18,13 @@ const sectionLabels: Record<string, string> = {
   extensions: "Extensions",
   applications: "Applications",
   models: "Models",
+  browser: "Pi Agent Browse",
   "api-server": "API Server",
   "pi-console-webui": "Console WebUI",
   "skill-sources": "Skill Sources",
 };
 
-const administrativeSections = new Set(["applications", "models", "api-server", "pi-console-webui", "skill-sources"]);
+const administrativeSections = new Set(["applications", "models", "browser", "api-server", "pi-console-webui", "skill-sources"]);
 
 export function sectionMetadata(section: string, profile?: string): Metadata {
   const label = sectionLabels[section] ?? "Pi Console";

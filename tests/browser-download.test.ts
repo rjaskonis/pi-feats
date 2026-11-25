@@ -9,29 +9,33 @@ import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 import { cloudExtensionArchive } from "../extensions/api-server/browser-extension-archive.ts";
 import { registerBrowserDownload } from "../extensions/api-server/browser-download.ts";
 
-test("the extension download requires authorization and returns only the bundled ZIP", async (t) => {
+test("only the ZIP download is public; metadata requires authorization", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "pi-browser-download-"));
   const archive = join(directory, "extension.zip");
-  const zip = Buffer.from("504b0506000000000000000000000000000000000000", "hex");
+  const endpoint = "wss://pi-agent-browse.invalid/api/browser/connect";
+  const manifest = { content_security_policy: { extension_pages: "connect-src 'self'" } };
+  const zip = zipSync({ "manifest.json": strToU8(JSON.stringify(manifest)), "background.js": strToU8(endpoint) });
   const app = Fastify();
   t.after(async () => { await app.close(); await rm(directory, { force: true, recursive: true }); });
   registerBrowserDownload(app, (request, reply) => {
     if (request.headers.authorization === "Bearer test-token") return true;
     void reply.code(401).send();
     return false;
-  }, { source: pathToFileURL(archive) });
+  }, { source: pathToFileURL(archive), publicBaseUrl: "https://pi.example.test" });
   const request = { method: "GET" as const, url: "/api/browser/pi-agent-browse-extension.zip" };
+  const metadata = { method: "GET" as const, url: "/api/browser/download-status" };
   const headers = { authorization: "Bearer test-token" };
-  assert.equal((await app.inject(request)).statusCode, 401);
-  assert.equal((await app.inject({ ...request, headers })).statusCode, 404);
+  assert.equal((await app.inject(request)).statusCode, 404);
+  assert.equal((await app.inject(metadata)).statusCode, 401);
+  assert.equal((await app.inject({ ...metadata, headers })).json().available, false);
   await writeFile(archive, zip);
-  assert.equal((await app.inject(request)).statusCode, 401);
-  const response = await app.inject({ ...request, headers });
+  const response = await app.inject(request);
   assert.equal(response.statusCode, 200);
   assert.equal(response.headers["content-type"], "application/zip");
   assert.equal(response.headers["content-disposition"], 'attachment; filename="pi-agent-browse-extension.zip"');
-  assert.equal(response.headers["cache-control"], "private, no-store");
-  assert.deepEqual(response.rawPayload, zip);
+  assert.equal(response.headers["cache-control"], "no-store");
+  assert.equal(strFromU8(unzipSync(response.rawPayload)["background.js"]), "wss://pi.example.test/api/browser/connect");
+  assert.deepEqual((await app.inject({ ...metadata, headers })).json(), { available: true, url: "https://pi.example.test/api/browser/pi-agent-browse-extension.zip" });
 });
 
 test("a configured API download embeds only the public secure relay address", () => {
