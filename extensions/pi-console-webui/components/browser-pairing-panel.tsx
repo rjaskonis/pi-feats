@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Check, Copy } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
 
@@ -10,6 +11,28 @@ async function request(path: string, method = "GET", signal?: AbortSignal) {
   const data = await response.json();
   if (!response.ok) throw new Error(data.error?.message ?? data.error ?? "Browser request failed");
   return data;
+}
+function CopyPairingCode({ code }: { code: string }) {
+  const [notice, setNotice] = useState("");
+  useEffect(() => {
+    if (notice !== "Code copied.") return;
+    const timer = window.setTimeout(() => setNotice(""), 2000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(code);
+      setNotice("Code copied.");
+    } catch { setNotice("Could not copy. Select the code above and copy it manually."); }
+  }
+  const copied = notice === "Code copied.";
+  return <>
+    <Button type="button" className="inline-flex items-center gap-2" onClick={() => void copy()}>
+      {copied ? <Check size={16} aria-hidden="true"/> : <Copy size={16} aria-hidden="true"/>}
+      {copied ? "Copied" : "Copy code"}
+    </Button>
+    <span role="status" className="ml-2 text-sm">{notice}</span>
+  </>;
 }
 function RemoteBrowserPairing() {
   const [status, setStatus] = useState<BrowserStatus>();
@@ -49,7 +72,7 @@ function RemoteBrowserPairing() {
           <Button disabled={busy} onClick={() => void act("pair")}>Generate pairing code</Button>
         </div>
         {code && <div role="status" className="rounded-md border p-3 text-sm">
-          {now >= code.expiresAt ? <p>Pairing code expired. Generate a new code.</p> : !status.pairingPending ? <p>Pairing code used or invalidated. Check the browser connection below.</p> : <><p className="font-mono text-2xl">{code.code}</p><p>One use. Expires at {new Date(code.expiresAt).toLocaleTimeString()}. Generating another code replaces this one.</p><Button onClick={() => void navigator.clipboard.writeText(code.code).catch(() => setError("Select the code above and copy it manually."))}>Copy code</Button></>} 
+          {now >= code.expiresAt ? <p>Pairing code expired. Generate a new code.</p> : !status.pairingPending ? <p>Pairing code used or invalidated. Check the browser connection below.</p> : <><p className="font-mono text-2xl">{code.code}</p><p>One use. Expires at {new Date(code.expiresAt).toLocaleTimeString()}. Generating another code replaces this one.</p><CopyPairingCode key={code.code} code={code.code}/></>}
         </div>}
       </>}
     {status && (status.browsers.length > 0 || status.pairingPending) && <Button disabled={busy} onClick={() => { if (window.confirm("Revoke all remote browser connections and pending codes for this server?")) void act("unpair"); }}>Revoke browser access</Button>}
