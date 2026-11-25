@@ -16,38 +16,24 @@ Install Pi and the package on the Chrome computer, using the normal installation
 
 ```sh
 pi install npm:pi-feats
-pi browser install
 pi browser pair
 ```
 
-`pair` also installs/starts the relay automatically. In extension Settings, choose **Local relay**, copy the exact address and the short-lived code printed by the CLI, then **Connect**.
+`pair` starts the shared relay if needed. In extension Settings, choose **Local relay**, enter `127.0.0.1:20087` and the five-minute, single-use code, then click **Connect**. Pairing connects Chrome but does not grant any profile access. Run these commands in a terminal outside a named profile:
 
 ```sh
-pi browser status
-pi browser unpair
-pi browser stop
-```
-
-- `install`: start the package's local Node relay; no sudo, platform-specific native archive, or separate runtime installation is needed.
-- `pair`: start the relay if necessary, then generate an eight-character, five-minute, single-use pairing code. A new code replaces the previous one.
-- `status`: report paired browsers and live connections without exposing tokens.
-- `unpair`: invalidate pending codes, revoke all browser credentials for this profile, and disconnect those browsers.
-- `stop`: stop the local relay through an authenticated loopback request. Credentials remain available for reconnection.
-
-The Node relay uses the same Node >=22 runtime and package dependencies as Pi. Linux has been tested locally; macOS and Windows use the same implementation but still require platform smoke tests. Its source remains in the shared root package, never in a profile's `node_modules` or extension directory. Local state lives in `<profile workspace>/browser-local/`, with private files. The default relay listens on `127.0.0.1:20087`. Named profiles use deterministic distinct loopback ports; use the exact printed address. If a port is occupied, startup fails and points to the profile's `relay.log`; it does not connect an agent to another profile's relay.
-
-Named profile commands follow existing Pi conventions:
-
-```sh
-pi profile create support
-pi profile support browser install
-pi profile support browser pair
+pi browser grant default         # optional: allow the default profile
+pi browser grant support         # allow an existing named profile
+pi browser status                # show Chrome connections and grants
 pi profile support browser status
+pi browser revoke support        # remove only this profile's access
 ```
 
-Stop an older native Pi Agent Browse relay before using the new default relay on port 20087. The legacy native state is not imported; pair once with the new relay. No native binary is downloaded by the public package.
+The same Chrome can serve multiple authorized profiles at the same time. No profile-specific relay, Chrome address change, or additional pairing is required. If several browsers are paired, `grant` requires a browser ID from `status`. `revoke` can also take a browser ID; without one it revokes that profile's access to all local browsers. Each profile can only operate tabs it created on the current connection. Profiles using the same Chrome profile still share cookies and logged-in accounts.
 
-After updating Pi Agent Browse, `install` or `pair` detects changed relay source and restarts an authenticated existing Node relay while preserving credentials. A relay already running remains on its previous code until that restart. Reload the extension from the same extracted directory after replacing its files.
+One loopback Node relay runs under the default runtime using private files in `<agent root>/browser-local/shared/`. A named sandbox gets only a profile-specific worker capability. It cannot administer the relay or use another profile's tabs. `pi browser install` starts or updates the daemon while preserving Chrome credentials and grants; `pi browser stop` stops it for all profiles without deleting state. `pi browser unpair` revokes every local Chrome pairing and grant. These commands do not modify remote Console pairing.
+
+On first startup, the shared relay attempts to stop previous Pi Node relays through their authenticated local APIs. It does not import their credentials or grants: pair Chrome once at the shared address and grant only the profiles intended to use it. The existing Chrome extension can be reused. If a standalone native relay or unrelated process occupies port 20087, stop it yourself or free the port; Pi will not kill it. The shared relay's startup log is `browser-local/shared/relay.log`.
 
 ## Remote: Pi on another server
 

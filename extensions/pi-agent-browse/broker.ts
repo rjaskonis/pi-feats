@@ -9,7 +9,7 @@ const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 export type Credential = { profile: string; browser: string; token: string };
 export type CredentialStore = { load(): Promise<unknown>; save(credentials: Credential[]): Promise<void> };
 type Code = { profile: string; material: string; expiresAt: number };
-type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout };
+type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; owner: Connection };
 export type Connection = { socket: WebSocket; profile: string; browser: string; tabs: Set<number>; pending: Map<number, Pending> };
 
 export class BrowserBroker {
@@ -25,7 +25,34 @@ export class BrowserBroker {
   private file: string | CredentialStore;
   private port: number;
   private endpoint?: string;
-  constructor(file: string | CredentialStore, port: number, endpoint?: string) { this.file = file; this.port = port; this.endpoint = endpoint; }
+  private shared: boolean;
+  private scopes = new Map<string, Map<string, Connection>>();
+  constructor(file: string | CredentialStore, port: number, endpoint?: string, shared = false) { this.file = file; this.port = port; this.endpoint = endpoint; this.shared = shared; }
+  clearScope(profile: string, browser: string) {
+    const scopes = this.scopes.get(browser);
+    const scope = scopes?.get(profile);
+    if (!scope) return;
+    scopes!.delete(profile);
+    for (const [id, pending] of scope.pending) if (pending.owner === scope) {
+      scope.pending.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(new Error("Browser access is no longer authorized"));
+    }
+  }
+  browserStatus() { return this.status("default"); }
+  sharedStatus(profile: string, browsers: string[]) {
+    const status = this.browserStatus();
+    return { ...status, browsers: status.browsers.filter(item => browsers.includes(item.id)).map(item => ({ ...item, tabs: this.scopes.get(item.id)?.get(profile)?.tabs.size ?? 0 })) };
+  }
+  sharedConnection(profile: string, browsers: string[], browser?: string) {
+    const candidates = [...this.connections.values()].filter(item => browsers.includes(item.browser) && (!browser || browser === item.browser) && item.socket.readyState === item.socket.OPEN);
+    if (candidates.length !== 1) throw new Error(candidates.length ? "Select a browser ID" : "No authorized browser connected to this profile");
+    const transport = candidates[0];
+    const scopes = this.scopes.get(transport.browser)!;
+    let scope = scopes.get(profile);
+    if (!scope) { scope = { ...transport, profile, tabs: new Set() }; scopes.set(profile, scope); }
+    return scope;
+  }
   async load() {
     try {
       const value: unknown = typeof this.file === "string" ? JSON.parse(await readFile(this.file, "utf8")) : await this.file.load();
@@ -163,6 +190,7 @@ export class BrowserBroker {
         previous?.socket.close(1000, "Reconnected");
         connection = { socket, browser, profile: credential.profile, tabs: new Set(), pending: new Map() };
         this.connections.set(browser, connection);
+        if (this.shared) this.scopes.set(browser, new Map());
         stage = "connected";
         void this.rpc(connection, "relay.settings", { browser: { id: browser, name: credential.profile } }).catch(() => {});
       } else if (connection) {
@@ -172,7 +200,10 @@ export class BrowserBroker {
             connection.pending.delete(message.id); clearTimeout(pending.timer);
             if (typeof message.error === "string") pending.reject(new Error(message.error)); else pending.resolve(message.result);
           }
-        } else if (message.method === "debugger.detached" || message.method === "tabs.removed") connection.tabs.delete(params.tabId);
+        } else if (message.method === "debugger.detached" || message.method === "tabs.removed") {
+          connection.tabs.delete(params.tabId);
+          if (this.connections.get(browser) === connection) for (const scope of this.scopes.get(browser)?.values() ?? []) scope.tabs.delete(params.tabId);
+        }
         // Personal tabs are not automatically adopted. Only agent-created tabs are exposed.
       }
     };
@@ -189,7 +220,7 @@ export class BrowserBroker {
     socket.on("close", () => {
       clearTimeout(timeout); clearInterval(heartbeat); this.sockets.delete(socket);
       if (connection) {
-        if (this.connections.get(browser) === connection) this.connections.delete(browser);
+        if (this.connections.get(browser) === connection) { this.connections.delete(browser); this.scopes.delete(browser); }
         for (const pending of connection.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error("Browser disconnected")); }
       }
     });
@@ -201,11 +232,12 @@ export class BrowserBroker {
   }
   rpc(connection: Connection, method: string, params: object): Promise<unknown> {
     if (connection.socket.readyState !== connection.socket.OPEN) return Promise.reject(new Error("Browser disconnected"));
+    if (this.shared && this.connections.get(connection.browser) !== connection && this.scopes.get(connection.browser)?.get(connection.profile) !== connection) return Promise.reject(new Error("Browser access is no longer authorized"));
     if (connection.pending.size >= 32) return Promise.reject(new Error("Too many browser commands"));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { connection.pending.delete(id); reject(new Error("Browser command timed out")); }, 30_000);
-      connection.pending.set(id, { resolve, reject, timer });
+      connection.pending.set(id, { resolve, reject, timer, owner: connection });
       connection.socket.send(JSON.stringify({ id, method, params }), error => {
         if (error) { clearTimeout(timer); connection.pending.delete(id); reject(error); }
       });

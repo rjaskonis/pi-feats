@@ -8,8 +8,12 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
   guard(request: FastifyRequest, reply: FastifyReply): boolean;
   validateProfile(profile: string): Promise<unknown>;
   local?: boolean;
+  sharedLocal?: {
+    workerProfile(token: string): Promise<string | undefined>;
+    authorizedBrowsers(profile: string, token: string): Promise<() => string[]>;
+  };
 }) {
-  const broker = new BrowserBroker(options.file, options.port, options.endpoint);
+  const broker = new BrowserBroker(options.file, options.port, options.endpoint, !!options.sharedLocal);
   await broker.load();
   server.addHook("preClose", async () => broker.close());
   const attempts = new Map<string, { count: number; until: number }>();
@@ -47,13 +51,23 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
   server.post<{ Body: BrowserAction }>("/api/browser/worker/command", { bodyLimit: 128 * 1024 }, async (request, reply) => {
     reply.header("cache-control", "private, no-store");
     const authorization = request.headers.authorization;
-    const profile = broker.workerProfile(authorization?.startsWith("Bearer ") ? authorization.slice(7) : "");
+    const token = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
+    const profile = options.sharedLocal ? await options.sharedLocal.workerProfile(token) : broker.workerProfile(token);
     if (!profile) return reply.code(401).send({ error: "Invalid browser worker capability" });
     if (!request.body || typeof request.body !== "object" || typeof request.body.action !== "string") return reply.code(400).send({ error: "A browser action is required" });
     try {
       await options.validateProfile(profile);
-      const actionResult = await browserAction(broker, profile, request.body);
-      const result = request.body.action === "status" ? { ...(actionResult as object), available: options.available } : actionResult;
+      const shared = options.sharedLocal;
+      const browsers = shared ? (await shared.authorizedBrowsers(profile, token))() : [];
+      const actionResult = await browserAction(shared ? {
+        status: name => broker.sharedStatus(name, browsers),
+        connection: (name, browser) => broker.sharedConnection(name, browsers, browser),
+        rpc: broker.rpc.bind(broker),
+      } : broker, profile, request.body);
+      const result = request.body.action === "status" ? {
+        ...(actionResult as object), available: options.available,
+        ...(shared ? { sharedBrowserPaired: broker.browserStatus().browsers.length > 0, profileAuthorized: browsers.length > 0 } : {}),
+      } : actionResult;
       if (JSON.stringify(result)?.length > 8 * 1024 * 1024) return reply.code(413).send({ error: "Browser result too large; return a bounded slice" });
       return { result };
     } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Browser command failed" }); }

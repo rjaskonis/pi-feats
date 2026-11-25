@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { localBrowserCapability } from "../extensions/pi-agent-browse/local-access.ts";
+import { browserRequest } from "../extensions/pi-agent-browse/client.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
@@ -25,7 +29,7 @@ async function fixture(available = true) {
   const endpoint = `ws://127.0.0.1:${address.port}/api/browser/connect`;
   return { directory, server, broker, endpoint, async close() { await server.close(); await rm(directory, { recursive: true, force: true }); } };
 }
-async function connect(endpoint: string, browser: string, secret: { code: string } | { token: string }, proofEndpoint = remoteEndpoint) {
+async function connect(endpoint: string, browser: string, secret: { code: string } | { token: string }, proofEndpoint: string | null = remoteEndpoint, port = 443) {
   const socket = new WebSocket(endpoint, { origin: extensionOrigin });
   const messages: any[] = [];
   const waiting: { resolve(value: any): void; reject(error: Error): void }[] = [];
@@ -45,20 +49,105 @@ async function connect(endpoint: string, browser: string, secret: { code: string
   assert.equal(challenge.method, "auth.challenge");
   let token = "token" in secret ? secret.token : "";
   if (exchange && "code" in secret) {
-    const key = await pairingSessionKey(await pairingCodeMaterial(normalizePairingCode(secret.code)!), (await exchange.secret(challenge.params.ecdh))!, { endpoint: proofEndpoint, port: 443, extensionNonce: nonce, relayNonce: challenge.params.nonce, extensionKey: exchange.publicKey, relayKey: challenge.params.ecdh });
+    const key = await pairingSessionKey(await pairingCodeMaterial(normalizePairingCode(secret.code)!), (await exchange.secret(challenge.params.ecdh))!, { endpoint: proofEndpoint ?? undefined, port, extensionNonce: nonce, relayNonce: challenge.params.nonce, extensionKey: exchange.publicKey, relayKey: challenge.params.ecdh });
     send("auth.code", { proof: await sessionProof(key, "extension") });
     const response = await next();
     assert.equal(response.method, "auth.token");
     assert.ok(sameSecret(await sessionProof(key, "relay"), response.params.proof));
     token = (await unwrapToken(key, response.params.wrapped))!;
-  } else assert.ok(sameSecret(await pairingProof(token, "relay", 443, challenge.params.nonce, nonce, proofEndpoint), challenge.params.proof));
-  send("auth.response", { proof: await pairingProof(token, "extension", 443, nonce, challenge.params.nonce, proofEndpoint) });
+  } else assert.ok(sameSecret(await pairingProof(token, "relay", port, challenge.params.nonce, nonce, proofEndpoint ?? undefined), challenge.params.proof));
+  send("auth.response", { proof: await pairingProof(token, "extension", port, nonce, challenge.params.nonce, proofEndpoint ?? undefined) });
   send("ready");
   const settings = await next();
   assert.equal(settings.method, "relay.settings");
   socket.send(JSON.stringify({ id: settings.id, result: {} }));
   return { socket, token, next, send };
 }
+
+test("shared local daemon pairs once, isolates simultaneous profile tabs and persists grants", { timeout: 40_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-shared-browser-"));
+  const profileDir = join(root, "profiles", "support");
+  const createProfile = async () => { await mkdir(profileDir, { recursive: true }); await writeFile(join(profileDir, "settings.json"), "{}"); };
+  await createProfile();
+  const legacy = Fastify();
+  const legacyToken = "z".repeat(43);
+  let retired = false;
+  legacy.get("/api/browser/profiles/default/status", (request, reply) => request.headers.authorization === `Bearer ${legacyToken}` ? { available: true, browsers: [] } : reply.code(401).send({}));
+  legacy.post("/api/browser/local/stop", (request, reply) => {
+    if (request.headers.authorization !== `Bearer ${legacyToken}`) return reply.code(401).send({});
+    retired = true;
+    setTimeout(() => { void legacy.close(); }, 25);
+    return { stopping: true };
+  });
+  await legacy.listen({ port: 0, host: "127.0.0.1" });
+  const localBrowserPort = (legacy.server.address() as {port: number}).port;
+  const script = `const jiti = require('jiti').createJiti(process.cwd() + '/package.json'); jiti.import('./extensions/pi-agent-browse/cli.ts').then(m => m.handleBrowserCli(['browser', ...process.argv.slice(3)], 'default', process.argv[1], false, Number(process.argv[2]))).catch(e=>{console.error(e);process.exit(1)})`;
+  const run = async (...args: string[]) => (await promisify(execFile)(process.execPath, ["-e", script, root, String(localBrowserPort), ...args], { timeout: 15_000 })).stdout;
+  const endpoint = `http://127.0.0.1:${localBrowserPort}`;
+  const ws = `ws://127.0.0.1:${localBrowserPort}/extension`;
+  const workerPath = "/api/browser/worker/command";
+  let started = false;
+  try {
+    await assert.rejects(run("install"), /port conflict/);
+    assert.equal(retired, false, "an unrelated listener must not be stopped without its legacy state");
+    await writeFile(join(root, "browser-local", "connection.json"), JSON.stringify({ profile: "default", port: localBrowserPort, token: legacyToken }));
+    const pair = await run("pair");
+    started = true;
+    assert.equal(retired, true);
+    assert.match(pair, /Previous profile relays stopped/);
+    const code = pair.match(/Pairing code: ([A-Z0-9]{4}-[A-Z0-9]{4})/)![1];
+    const browser = await connect(ws, "shared-browser", { code }, null, localBrowserPort);
+    const support = await localBrowserCapability(root, "support");
+    const defaultToken = await localBrowserCapability(root, "default");
+    const command = (token: string, body: object) => browserRequest({ endpoint, token }, workerPath, body).then(data => data.result);
+    assert.equal((await command(support, { action: "status" })).profileAuthorized, false);
+    await assert.rejects(browserRequest({ endpoint, token: support }, "/api/browser/local/grant", { profile: "support" }), /Unauthorized/);
+    await assert.rejects(browserRequest({ endpoint, token: support }, "/api/browser/local/stop", {}), /Unauthorized/);
+    await assert.rejects(command(support.replace("support.", "default."), { action: "status" }), /Invalid browser worker capability/);
+    await run("grant", "default");
+    await run("grant", "support");
+    const open = (token: string) => command(token, { action: "navigate", url: "https://example.com" });
+    const opens = [open(defaultToken), open(support)];
+    const groups = new Set<string>();
+    let id = 20;
+    for (let i = 0; i < 12; i++) {
+      const message = await browser.next();
+      if (message.method === "tabs.create") assert.equal(message.params.active, false);
+      if (message.method === "tabs.group") groups.add(message.params.sessionId);
+      browser.socket.send(JSON.stringify({ id: message.id, result: message.method === "tabs.create" ? { tabId: id++ } : {} }));
+    }
+    assert.deepEqual(groups, new Set(["Pi: default", "Pi: support"]));
+    const [a, b] = await Promise.all(opens);
+    assert.deepEqual((await command(support, { action: "tabs" })).tabs, [b.tabId]);
+    assert.deepEqual((await command(defaultToken, { action: "tabs" })).tabs, [a.tabId]);
+    await assert.rejects(command(support, { action: "close", tabId: a.tabId, profile: "default" }), /not owned/);
+    await assert.rejects(command(support, { action: "close", tabId: 99 }), /not owned/);
+    const inFlight = assert.rejects(command(support, { action: "evaluate", tabId: b.tabId, expression: "document.title" }), /no longer authorized/);
+    assert.equal((await browser.next()).method, "debugger.sendCommand");
+    await run("revoke", "support");
+    await inFlight;
+    assert.deepEqual((await command(defaultToken, { action: "tabs" })).tabs, [a.tabId]);
+    await run("grant", "support");
+    assert.deepEqual((await command(support, { action: "tabs" })).tabs, []);
+    const closed = once(browser.socket, "close");
+    await run("stop");
+    await closed;
+    await run("install");
+    await connect(ws, "shared-browser", { token: browser.token }, null, localBrowserPort);
+    assert.equal((await command(support, { action: "status" })).browsers[0].connected, true);
+    await rename(profileDir, `${profileDir}-old`);
+    await createProfile();
+    await assert.rejects(command(support, { action: "status" }), /Invalid browser worker capability/);
+    assert.equal((await command(await localBrowserCapability(root, "support"), { action: "status" })).profileAuthorized, false);
+    assert.deepEqual(JSON.parse(await readFile(join(root, "browser-local", "shared", "grants.json"), "utf8")).map((g: {profile: string}) => g.profile), ["default", "support"]);
+    await run("unpair");
+    assert.deepEqual(JSON.parse(await readFile(join(root, "browser-local", "shared", "grants.json"), "utf8")), []);
+  } finally {
+    if (started) { await run("stop").catch(() => {}); await new Promise(resolve => setTimeout(resolve, 300)); }
+    await legacy.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("profile-bound pairing, command routing, persistence, reconnection and revocation", { timeout: 15_000 }, async () => {
   const f = await fixture();

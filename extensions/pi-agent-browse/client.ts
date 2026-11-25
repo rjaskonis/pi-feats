@@ -1,5 +1,4 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { localBrowserCapability, localBrowserPort } from "./local-access.ts";
 import type { BrowserAction } from "./actions.ts";
 import { browserStatusGuidance } from "./guidance.ts";
 
@@ -10,9 +9,10 @@ export async function browserConnection(agentDir: string, environment: NodeJS.Pr
     if (endpoint.protocol !== "http:" || endpoint.hostname !== "127.0.0.1" || endpoint.pathname !== "/" || endpoint.search || endpoint.hash || endpoint.username || endpoint.password) throw new Error("Browser worker endpoint must be the local API broker");
     return { endpoint: endpoint.origin, token: environment.PI_BROWSER_TOKEN };
   }
-  const state = JSON.parse(await readFile(join(agentDir, "browser-local", "connection.json"), "utf8"));
-  if (!Number.isSafeInteger(state.port) || state.port < 1024 || state.port > 65535 || !/^[A-Za-z0-9_-]{43}$/.test(state.token)) throw new Error("Invalid local browser configuration");
-  return { endpoint: `http://127.0.0.1:${state.port}`, token: state.token };
+  const token = environment.PI_BROWSER_LOCAL_CAPABILITY ?? (environment.PI_ACTIVE_PROFILE && environment.PI_ACTIVE_PROFILE !== "default"
+    ? undefined : await localBrowserCapability(agentDir, "default"));
+  if (!token) throw new Error("Restart this Pi Profile to load its shared browser capability");
+  return { endpoint: `http://127.0.0.1:${localBrowserPort}`, token };
 }
 export async function browserRequest(connection: { endpoint: string; token: string }, path: string, body?: unknown, signal?: AbortSignal) {
   const response = await fetch(`${connection.endpoint}${path}`, {

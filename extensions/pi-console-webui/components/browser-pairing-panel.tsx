@@ -69,7 +69,6 @@ export function BrowserPairingPanel() {
     }).catch(error => { if (!controller.signal.aborted) setError(error.message); });
     return () => controller.abort();
   }, []);
-  const command = profile === "default" ? "pi browser" : `pi profile ${profile} browser`;
   return <Card className="space-y-5">
     <CardTitle>Connect Chrome</CardTitle>
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
@@ -79,11 +78,11 @@ export function BrowserPairingPanel() {
       <p className="text-sm text-zinc-500">Install Pi on the Chrome computer with <code>npm install -g @earendil-works/pi-coding-agent</code>, then <code>pi install npm:pi-feats</code>. The relay uses Pi&apos;s existing Node runtime; no separate native binary, sudo, or incoming public port is required. Linux is validated; macOS/Windows platform smoke tests are pending.</p>
       <ol className="list-decimal space-y-1 pl-5 text-sm">
         <li>Install the extension using the ZIP above.</li>
-        <li>In a terminal on that same computer, run <code>{command} install</code>, then <code>{command} pair</code>. Pair also installs/starts the relay automatically.</li>
-        <li>In extension Settings, choose <strong>Local relay</strong>. Copy the exact address and pairing code printed by the CLI, then Connect.</li>
-        <li>Check with <code>{command} status</code>. Use <code>{command} unpair</code> to revoke access or <code>{command} stop</code> to stop the relay.</li>
+        <li>In a terminal outside any named profile, run <code>pi browser pair</code>. This starts the shared relay and prints a code. Skip this step if Chrome is already paired with the shared relay.</li>
+        <li>In extension Settings, choose <strong>Local relay</strong>. Copy the address and code printed by the CLI, then click <strong>Connect</strong>.</li>
+        <li>Run <code>pi browser grant {profile}</code> to authorize that local profile. Check access with <code>pi browser status</code> or remove access with <code>pi browser revoke {profile}</code>.</li>
       </ol>
-      <p className="text-sm text-zinc-500">For a named profile, create it on the local machine first. State and pairing credentials stay in that profile; runtime code is shared. After a Pi update, run install or pair to restart an outdated relay while preserving existing browser credentials. If the previous native relay owns port 20087, stop it before starting this relay.</p>
+      <p className="text-sm text-zinc-500">Create the named profile on this computer first if needed. Additional profiles need a grant, not another pairing. After a Pi update, run pi browser install once to update the shared relay without clearing grants or re-pairing Chrome.</p>
     </section>
     <section className="space-y-2"><h3 className="font-medium">Pi on another server</h3><RemoteBrowserProfile key={profile} profile={profile}/></section>
   </Card>;

@@ -7,7 +7,7 @@ For a generic “use my browser” or “open this in my Chrome” request, pref
 
 ## Guided connection: do the technical work, explain only the next user action
 
-A request to connect authorizes checking status and generating a temporary local pairing code. It does not authorize installing packages, modifying remote configuration, revoking existing credentials or taking control of an existing personal tab. Reply in the user's language; keep the English labels they will see in Chrome. Do not expose browser IDs, JSON, internal paths or implementation terms such as broker/worker unless troubleshooting requires them.
+A request to connect authorizes checking status and generating a temporary local pairing code from the default local terminal. It does not authorize granting a named profile access on the user's behalf, installing packages, modifying remote configuration, revoking existing credentials or taking control of an existing personal tab. Reply in the user's language; keep the English labels they will see in Chrome. Do not expose browser IDs, JSON, internal paths or implementation terms such as broker/worker unless troubleshooting requires them.
 
 1. Check `pi_browser` with `action: "status"`. Read `connectionState` and `setup.mode/nextStep`. A saved browser with `connected: false` is NOT a live connection, and does not prove the extension is installed or ready on this computer. Never say "connected" until a live status check confirms it.
 2. If connected, confirm briefly and perform the requested task. Do not generate a code, explain installation, or ask them to pair again.
@@ -15,7 +15,9 @@ A request to connect authorizes checking status and generating a temporary local
 
 ### Local connection
 
-When `setup.mode` is `local`, run `pi browser pair` yourself using the available shell in this session's profile context. For an explicitly selected named profile use `pi profile <name> browser pair`; otherwise preserve the current profile environment. The command starts the package's Node relay and generates a five-minute single-use code without revoking existing browser credentials. Do not delegate the terminal command to the user when you can run it. Never guess an address, code or expiry; use the actual command result. If you cannot run it or startup fails, state that specific blocker instead of pretending a code exists.
+One relay and one Chrome pairing serve all authorized local profiles. If `setup.nextStep` is `grant_profile_access`, ask the user to run `pi browser grant <active-profile>` in a terminal outside the named profile (use `default` for the default profile). Do not re-pair or try to self-authorize. If it is `check_chrome_connection`, ask the user to open Chrome and check extension settings; generate another code only if the extension actually needs pairing.
+
+If Chrome has not been paired or the relay is not running, use `pi browser pair` from the default local terminal to start the shared relay and generate a five-minute single-use code. A named profile cannot administer the relay: ask the user to run that command outside it. If Chrome was already paired before the relay stopped, use `pi browser install` to restart it, then check status before generating another code. Never guess an address, code or expiry; use the command result.
 
 Show a short, complete checklist, using the returned address and code:
 
@@ -25,7 +27,7 @@ Show a short, complete checklist, using the returned address and code:
 
 Do not assume the user knows where settings or the pairing form are. If they say the extension is already installed, skip download and installation instructions. If it is not installed, give only the missing installation steps: download ZIP from Console → Administrative Settings → Pi Agent Browse, extract to a stable folder, then `chrome://extensions` → Developer mode → **Load unpacked**, selecting the folder containing `manifest.json`. Generate the code after installation if the initial code would expire. Do not claim a standard folder is installed without checking.
 
-After presenting the checklist, offer to verify the connection. Recheck status once after a short bounded wait if execution can continue; otherwise check immediately when the user responds. Never end with only "tell me when connected" without verification. Do not poll indefinitely, regenerate codes while waiting, repeat installation instructions, or open an unrelated task. If still disconnected, explain the one next check: exact address from this code generation, correct Local relay mode, or the error shown in the extension. Ask for that error or a screenshot rather than cycling through generic advice. Do not claim there is a **Reconnect** button unless it is actually shown.
+After Chrome connects, ask for an explicit `pi browser grant <active-profile>` from the default local terminal if needed. Subsequent profiles need only a grant, not another Chrome pairing. Offer to verify the connection and profile access. Recheck status once after a short bounded wait if execution can continue; otherwise check immediately when the user responds. Never end with only "tell me when connected" without verification. Do not poll indefinitely, regenerate codes while waiting, repeat installation instructions, or open an unrelated task. If still disconnected, explain the one next check: exact address from this code generation, correct Local relay mode, or the error shown in the extension. Ask for that error or a screenshot rather than cycling through generic advice. Do not claim there is a **Reconnect** button unless it is actually shown.
 
 ### Console / server connection
 

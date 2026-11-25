@@ -3,7 +3,7 @@ import type { BrowserBroker } from "./broker.ts";
 export type BrowserAction = { action: string; browser?: string; tabId?: number; url?: string; ref?: string; text?: string; expression?: string; key?: string; deltaY?: number };
 const allowed = new Set(["status", "tabs", "navigate", "snapshot", "click", "fill", "press", "scroll", "evaluate", "screenshot", "close"]);
 
-export async function browserAction(broker: BrowserBroker, profile: string, input: BrowserAction) {
+export async function browserAction(broker: Pick<BrowserBroker, "status" | "connection" | "rpc">, profile: string, input: BrowserAction) {
   if (!allowed.has(input.action)) throw new Error("Unsupported browser action");
   if (input.action === "status") return broker.status(profile);
   const connection = broker.connection(profile, input.browser);

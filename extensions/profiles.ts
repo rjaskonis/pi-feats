@@ -255,7 +255,15 @@ async function reexecWithProfile(name: string, args: string[]) {
   const compatibilityWorker = process.env.PI_OPENAI_WORKER === "1";
   const launch = await prepareProfileLaunch({
     root: rootAgentDir(), name, cwd: process.cwd(), runtimeEntry,
-    extraEnvironment: () => sessionListDirectoryEnvironment(args),
+    extraEnvironment: async () => {
+      const extra = await sessionListDirectoryEnvironment(args);
+      // Local workers get only their own capability, never the relay key.
+      if (name !== "default" && !process.env.PI_BROWSER_ENDPOINT && !process.env.PI_BROWSER_TOKEN) {
+        const { localBrowserCapability } = await import("./pi-agent-browse/local-access.ts");
+        extra.PI_BROWSER_LOCAL_CAPABILITY = await localBrowserCapability(rootAgentDir(), name, true);
+      }
+      return extra;
+    },
     arguments: (extensionArgs, sessionArgs) => compatibilityWorker
       ? [fileURLToPath(new URL("./api-server/openai-worker.mjs", import.meta.url)), runtimeEntry, ...extensionArgs]
       : [runtimeEntry, ...extensionArgs, ...sessionArgs, ...args],
@@ -285,6 +293,11 @@ export default async function (pi: ExtensionAPI) {
     await reexecWithProfile(resume.profile, ["--session", resume.sessionId]);
   }
 
+  if (args[0] === "profile" && args[2] === "browser" && validProfileName(args[1])) {
+    const { handleBrowserCli } = await import("./pi-agent-browse/cli.ts");
+    await handleBrowserCli(args.slice(2), args[1], rootAgentDir(), !!process.env.PI_ACTIVE_PROFILE && process.env.PI_ACTIVE_PROFILE !== "default");
+    process.exit(0);
+  }
   if (args[0] === "profile") {
     await handleProfileCommand(args);
     process.exit(0);
@@ -301,7 +314,7 @@ export default async function (pi: ExtensionAPI) {
   }
   if (guardrailArgs[0] === "browser") {
     const { handleBrowserCli } = await import("./pi-agent-browse/cli.ts");
-    await handleBrowserCli(guardrailArgs, selectedProfile, rootAgentDir());
+    await handleBrowserCli(guardrailArgs, selectedProfile, rootAgentDir(), !!process.env.PI_ACTIVE_PROFILE && process.env.PI_ACTIVE_PROFILE !== "default");
     process.exit(0);
   }
   if (guardrailArgs[0] === "pulse") {
