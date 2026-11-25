@@ -38,6 +38,21 @@ test("only the ZIP download is public; metadata requires authorization", async (
   assert.deepEqual((await app.inject({ ...metadata, headers })).json(), { available: true, url: "https://pi.example.test/api/browser/pi-agent-browse-extension.zip" });
 });
 
+test("the shipped archive downloads without public URL configuration and supports HTTPS customization", async (t) => {
+  const app = Fastify();
+  t.after(() => app.close());
+  registerBrowserDownload(app, () => true);
+  const url = "/api/browser/pi-agent-browse-extension.zip";
+  const response = await app.inject(url);
+  assert.equal(response.statusCode, 200);
+  const files = unzipSync(response.rawPayload);
+  assert.equal(JSON.parse(strFromU8(files["manifest.json"])).name, "Pi Agent Browse");
+  assert.ok(files.LICENSE);
+  assert.deepEqual((await app.inject("/api/browser/download-status")).json(), { available: true, url });
+  const cloud = unzipSync(cloudExtensionArchive(response.rawPayload, "https://pi.example.test"));
+  assert.match(strFromU8(cloud["manifest.json"]), /wss:\/\/pi\.example\.test/);
+});
+
 test("a configured API download embeds only the public secure relay address", () => {
   const endpoint = "wss://pi-agent-browse.invalid/api/browser/connect";
   const manifest = { key: "stable-id", content_security_policy: { extension_pages: "script-src 'self'; connect-src 'self' ws://127.0.0.1:20087" } };

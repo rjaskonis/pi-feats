@@ -549,7 +549,7 @@ The harness opens dedicated agent tabs. To control an existing external tab expl
 
 Pi Agent Browse is an optional, privately distributed alternative for a local Chrome. Its extension opens agent tabs in the background and connects to a paired loopback relay. It does not replace the Browser Harness or change the Steel/CDP defaults. Pi recommends it first when asked to use the user's own Chrome without a preferred method. The bundled skill explains first-time setup or operates the paired local CLI.
 
-See [the private build and installation guide](docs/pi-agent-browse.md). A private distribution can bundle both components: install and update copy them to `~/pi-feats/browse/{extension,relay}`. The public npm package does not include the binaries.
+See [the private build and installation guide](docs/pi-agent-browse.md). A private distribution can bundle both components: install and update copy them to `~/pi-feats/browse/{extension,relay}`. The public package includes the Chrome extension ZIP for the Console download, but not the native relay binaries.
 
 ## Installation
 

@@ -5,9 +5,9 @@ import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { brand, extensionId, upstream } from './brand.mjs';
 
-const [checkoutArg, outputArg] = process.argv.slice(2);
-if (!checkoutArg || !outputArg || process.platform === 'win32') {
-  console.error('Usage (Linux or macOS): node scripts/pi-agent-browse/build.mjs <browse-checkout> <new-output-directory>');
+const [checkoutArg, outputArg, mode, ...extra] = process.argv.slice(2);
+if (!checkoutArg || !outputArg || (mode && mode !== '--extension-only') || extra.length || process.platform === 'win32') {
+  console.error('Usage (Linux or macOS): node scripts/pi-agent-browse/build.mjs <browse-checkout> <new-output-directory> [--extension-only]');
   process.exit(2);
 }
 const checkout = resolve(checkoutArg);
@@ -36,26 +36,29 @@ try {
   run('bun', ['run', 'build']);
   const extension = join(source, 'dist');
   copyFileSync(join(source, 'LICENSE'), join(extension, 'LICENSE'));
-  const cargoTarget = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(source, 'rust/target');
-  run(process.env.CARGO || 'cargo', ['build', '--locked', '--release', '-p', 'browse'], join(source, 'rust'), { ...process.env, CARGO_TARGET_DIR: cargoTarget });
-  const relay = join(source, 'relay-package');
-  mkdirSync(relay);
-  copyFileSync(join(cargoTarget, 'release/browse'), join(relay, 'pi-agent-browse-relay'));
-  copyFileSync(join(here, 'pi-agent-browse.sh'), join(relay, 'pi-agent-browse'));
-  copyFileSync(join(source, 'LICENSE'), join(relay, 'LICENSE'));
-  chmodSync(join(relay, 'pi-agent-browse'), 0o755);
-  chmodSync(join(relay, 'pi-agent-browse-relay'), 0o755);
   mkdirSync(output, { recursive: true });
   const extensionZip = join(output, 'pi-agent-browse-extension.zip');
-  const relayZip = join(output, `pi-agent-browse-relay-${process.platform}-${process.arch}.zip`);
   run('zip', ['-qr', extensionZip, '.'], extension);
-  run('zip', ['-qr', relayZip, '.'], relay);
-  const artifacts = [extensionZip, relayZip];
+  const artifacts = [extensionZip];
+  if (mode !== '--extension-only') {
+    const cargoTarget = process.env.CARGO_TARGET_DIR ? resolve(process.env.CARGO_TARGET_DIR) : join(source, 'rust/target');
+    run(process.env.CARGO || 'cargo', ['build', '--locked', '--release', '-p', 'browse'], join(source, 'rust'), { ...process.env, CARGO_TARGET_DIR: cargoTarget });
+    const relay = join(source, 'relay-package');
+    mkdirSync(relay);
+    copyFileSync(join(cargoTarget, 'release/browse'), join(relay, 'pi-agent-browse-relay'));
+    copyFileSync(join(here, 'pi-agent-browse.sh'), join(relay, 'pi-agent-browse'));
+    copyFileSync(join(source, 'LICENSE'), join(relay, 'LICENSE'));
+    chmodSync(join(relay, 'pi-agent-browse'), 0o755);
+    chmodSync(join(relay, 'pi-agent-browse-relay'), 0o755);
+    const relayZip = join(output, `pi-agent-browse-relay-${process.platform}-${process.arch}.zip`);
+    run('zip', ['-qr', relayZip, '.'], relay);
+    artifacts.push(relayZip);
+  }
   const { createHash } = await import('node:crypto');
   const { readFileSync } = await import('node:fs');
   writeFileSync(join(output, 'SHA256SUMS'), artifacts.map(file => `${createHash('sha256').update(readFileSync(file)).digest('hex')}  ${basename(file)}`).join('\n') + '\n');
   writeFileSync(join(output, 'BUILD.txt'), `Upstream: ${upstream}\nChrome extension ID: ${extensionId}\n`);
-  console.log(`Private artifacts are ready in ${output}`);
+  console.log(`Browse artifacts are ready in ${output}`);
 } finally {
   rmSync(source, { recursive: true, force: true });
 }

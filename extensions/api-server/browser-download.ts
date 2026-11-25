@@ -4,7 +4,7 @@ import { cloudExtensionArchive } from "./browser-extension-archive.ts";
 
 const filename = "pi-agent-browse-extension.zip";
 const downloadPath = `/api/browser/${filename}`;
-const archive = new URL(`../../assets/pi-agent-browse/${filename}`, import.meta.url);
+const archive = new URL(`../../assets/browser-downloads/${filename}`, import.meta.url);
 
 class DownloadUnavailable extends Error {
   readonly status: number;
@@ -29,7 +29,7 @@ export function registerBrowserDownload(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       throw new DownloadUnavailable(404, "BROWSER_EXTENSION_NOT_AVAILABLE", "This installation does not bundle the Pi Agent Browse extension archive.");
     }
-    if (!publicBaseUrl) throw new DownloadUnavailable(503, "BROWSER_PUBLIC_URL_MISSING", "Configure PI_PUBLIC_BASE_URL or api.publicBaseUrl with the public HTTPS address of this server.");
+    if (!publicBaseUrl) return { zip: template, url: downloadPath };
     try {
       return { zip: cloudExtensionArchive(template, publicBaseUrl), url: new URL(downloadPath, publicBaseUrl).href };
     } catch (error) {

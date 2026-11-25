@@ -15,7 +15,8 @@ export function BrowserDownloadPanel() {
     fetch("/api/pi/browser/download-status", { cache: "no-store", signal: controller.signal })
       .then(async (response) => {
         if (!response.ok) throw new Error("Could not check the download. Check that the Pi API is running and reload this page.");
-        setStatus(await response.json() as Status);
+        const result = await response.json() as Status;
+        setStatus(result.available ? { ...result, url: new URL(result.url, window.location.origin).href } : result);
       })
       .catch((error: Error) => { if (!controller.signal.aborted) setStatus({ available: false, reason: error.message }); });
     return () => controller.abort();
