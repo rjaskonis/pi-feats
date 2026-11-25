@@ -14,13 +14,6 @@ test("a disconnected saved browser gets actionable local pairing guidance, not a
   assert.match(result.setup.extensionSettingsUrl, /^chrome-extension:\/\/heidjicdbehhgidkhaofophkickmhijo\/settings.html$/);
 });
 
-test("an existing shared pairing without a grant does not prompt another pairing", () => {
-  const result = browserStatusGuidance({ browsers: [], sharedBrowserPaired: true, profileAuthorized: false }, "local");
-  assert.equal(result.connectionState, "profile_not_authorized");
-  assert.equal(result.setup.nextStep, "grant_profile_access");
-  assert.match(result.setup.instruction, /pi browser grant/);
-});
-
 test("connected browsers are ready and do not request new pairing", () => {
   for (const mode of ["local", "console"] as const) {
     const result = browserStatusGuidance({ browsers: [{ connected: true }, { connected: false }] }, mode);

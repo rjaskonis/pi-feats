@@ -9,8 +9,8 @@ const alphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 export type Credential = { profile: string; browser: string; token: string };
 export type CredentialStore = { load(): Promise<unknown>; save(credentials: Credential[]): Promise<void> };
 type Code = { profile: string; material: string; expiresAt: number };
-type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; owner: Connection };
-export type Connection = { socket: WebSocket; profile: string; browser: string; tabs: Set<number>; pending: Map<number, Pending> };
+type Pending = { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout };
+export type Connection = { socket: WebSocket; profile: string; browser: string; scopeKey?: string; tabs: Set<number>; pending: Map<number, Pending> };
 
 export class BrowserBroker {
   private credentials: Credential[] = [];
@@ -28,29 +28,20 @@ export class BrowserBroker {
   private shared: boolean;
   private scopes = new Map<string, Map<string, Connection>>();
   constructor(file: string | CredentialStore, port: number, endpoint?: string, shared = false) { this.file = file; this.port = port; this.endpoint = endpoint; this.shared = shared; }
-  clearScope(profile: string, browser: string) {
-    const scopes = this.scopes.get(browser);
-    const scope = scopes?.get(profile);
-    if (!scope) return;
-    scopes!.delete(profile);
-    for (const [id, pending] of scope.pending) if (pending.owner === scope) {
-      scope.pending.delete(id);
-      clearTimeout(pending.timer);
-      pending.reject(new Error("Browser access is no longer authorized"));
-    }
+  sharedStatus(scopeKey: string) {
+    const status = this.status("default");
+    return { ...status, browsers: status.browsers.map(item => ({ ...item, tabs: this.scopes.get(item.id)?.get(scopeKey)?.tabs.size ?? 0 })) };
   }
-  browserStatus() { return this.status("default"); }
-  sharedStatus(profile: string, browsers: string[]) {
-    const status = this.browserStatus();
-    return { ...status, browsers: status.browsers.filter(item => browsers.includes(item.id)).map(item => ({ ...item, tabs: this.scopes.get(item.id)?.get(profile)?.tabs.size ?? 0 })) };
-  }
-  sharedConnection(profile: string, browsers: string[], browser?: string) {
-    const candidates = [...this.connections.values()].filter(item => browsers.includes(item.browser) && (!browser || browser === item.browser) && item.socket.readyState === item.socket.OPEN);
+  sharedConnection(profile: string, scopeKey: string, browser?: string) {
+    const candidates = [...this.connections.values()].filter(item => (!browser || browser === item.browser) && item.socket.readyState === item.socket.OPEN);
     if (candidates.length !== 1) throw new Error(candidates.length ? "Select a browser ID" : "No authorized browser connected to this profile");
     const transport = candidates[0];
     const scopes = this.scopes.get(transport.browser)!;
-    let scope = scopes.get(profile);
-    if (!scope) { scope = { ...transport, profile, tabs: new Set() }; scopes.set(profile, scope); }
+    let scope = scopes.get(scopeKey);
+    if (!scope) {
+      for (const [key, previous] of scopes) if (previous.profile === profile) scopes.delete(key);
+      scope = { ...transport, profile, scopeKey, tabs: new Set() }; scopes.set(scopeKey, scope);
+    }
     return scope;
   }
   async load() {
@@ -232,12 +223,12 @@ export class BrowserBroker {
   }
   rpc(connection: Connection, method: string, params: object): Promise<unknown> {
     if (connection.socket.readyState !== connection.socket.OPEN) return Promise.reject(new Error("Browser disconnected"));
-    if (this.shared && this.connections.get(connection.browser) !== connection && this.scopes.get(connection.browser)?.get(connection.profile) !== connection) return Promise.reject(new Error("Browser access is no longer authorized"));
+    if (this.shared && this.connections.get(connection.browser) !== connection && this.scopes.get(connection.browser)?.get(connection.scopeKey ?? "") !== connection) return Promise.reject(new Error("Browser access is no longer authorized"));
     if (connection.pending.size >= 32) return Promise.reject(new Error("Too many browser commands"));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { connection.pending.delete(id); reject(new Error("Browser command timed out")); }, 30_000);
-      connection.pending.set(id, { resolve, reject, timer, owner: connection });
+      connection.pending.set(id, { resolve, reject, timer });
       connection.socket.send(JSON.stringify({ id, method, params }), error => {
         if (error) { clearTimeout(timer); connection.pending.delete(id); reject(error); }
       });

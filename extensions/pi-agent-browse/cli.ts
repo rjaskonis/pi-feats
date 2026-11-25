@@ -43,18 +43,17 @@ async function retireLegacyRelays(root: string, defaultPort: number) {
     }
     retired = true;
   }
-  if (retired) console.log("Previous profile relays stopped. Pair Chrome once with the shared relay; old profile grants are not carried over.");
+  if (retired) console.log("Previous profile relays stopped. Pair Chrome once with the shared relay.");
 }
 
 export async function handleBrowserCli(args: string[], profile: string, root: string, profileSession = false, port = localBrowserPort) {
   const action = args[1] ?? "status";
-  const accessChange = action === "grant" || action === "revoke";
-  if (!(["install", "pair", "status", "unpair", "stop"].includes(action) && args.length <= 2) && !(accessChange && args.length >= 3 && args.length <= 4 && browserProfileName(args[2]))) {
-    throw new Error("Usage: pi browser install | pair | status | unpair | stop | grant <profile> [browser-id] | revoke <profile> [browser-id]");
+  if (!["install", "pair", "status", "unpair", "stop"].includes(action) || args.length > 2) {
+    throw new Error("Usage: pi browser install | pair | status | unpair | stop");
   }
   if (profileSession && profile !== process.env.PI_ACTIVE_PROFILE) throw new Error("Cannot inspect another browser profile from this session.");
   if (profile !== "default" || profileSession || process.env.PI_BROWSER_ENDPOINT || process.env.PI_BROWSER_TOKEN) {
-    if (action !== "status") throw new Error("The browser relay is shared. Run pi browser pair or pi browser grant <profile> from a terminal outside the named profile.");
+    if (action !== "status") throw new Error("The browser relay is shared. Run pi browser pair once from a terminal outside the named profile.");
     const directory = profile === "default" ? root : join(root, "profiles", profile);
     const result = !profileSession && !process.env.PI_BROWSER_ENDPOINT && !process.env.PI_BROWSER_TOKEN
       ? await localBrowserCapability(root, profile).then(token => executeBrowserAction(directory, { action: "status" }, undefined, { PI_BROWSER_LOCAL_CAPABILITY: token })).catch(error => {
@@ -72,7 +71,6 @@ export async function handleBrowserCli(args: string[], profile: string, root: st
   });
   const connection = key && { endpoint: `http://127.0.0.1:${port}`, token: localBrowserSecret(key, "admin") };
   if (!connection) {
-    if (accessChange) throw new Error("Start and pair the shared browser relay with pi browser pair first.");
     console.log("Shared browser relay is not running. Run pi browser install to start it."); return;
   }
   const running = () => browserRequest(connection, localStatus, undefined, AbortSignal.timeout(1000)).catch(() => undefined);
@@ -105,19 +103,15 @@ export async function handleBrowserCli(args: string[], profile: string, root: st
     } finally { await handle.close(); await unlink(lock); }
   }
   if (!status) {
-    if (accessChange) throw new Error("Start and pair the shared browser relay with pi browser pair first.");
     console.log("Shared browser relay is not running. Run pi browser install to start it."); return;
   }
   if (action === "install") console.log(`Shared browser relay ready at 127.0.0.1:${port}. Run pi browser pair if Chrome has not been paired.`);
   else if (action === "pair") {
     const result = await browserRequest(connection, "/api/browser/profiles/default/pair", {});
-    console.log(`Pairing code: ${result.code}\nExpires: ${new Date(result.expiresAt).toISOString()}\nOpen Pi Agent Browse Settings, choose Local relay, enter 127.0.0.1:${port}, paste the code and Connect. Then run pi browser grant <profile> (including default if needed).`);
+    console.log(`Pairing code: ${result.code}\nExpires: ${new Date(result.expiresAt).toISOString()}\nOpen Pi Agent Browse Settings, choose Local relay, enter 127.0.0.1:${port}, paste the code and Connect. Once connected, Chrome is ready to use from any local Pi Profile.`);
   } else if (action === "unpair") {
     await browserRequest(connection, "/api/browser/local/unpair", {});
-    console.log("All local Chrome pairings and grants revoked.");
-  } else if (accessChange) {
-    await browserRequest(connection, "/api/browser/local/grant", { profile: args[2], browser: args[3], revoke: action === "revoke" });
-    console.log(`Browser access ${action === "grant" ? "granted to" : "revoked for"} ${args[2]}.`);
+    console.log("All local Chrome pairings removed.");
   } else if (action === "stop") {
     await browserRequest(connection, stop, {});
     console.log("Shared browser relay is stopping for all profiles.");

@@ -64,7 +64,7 @@ async function connect(endpoint: string, browser: string, secret: { code: string
   return { socket, token, next, send };
 }
 
-test("shared local daemon pairs once, isolates simultaneous profile tabs and persists grants", { timeout: 40_000 }, async () => {
+test("shared local daemon pairs once and isolates simultaneous profile tabs without extra setup", { timeout: 40_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-shared-browser-"));
   const profileDir = join(root, "profiles", "support");
   const createProfile = async () => { await mkdir(profileDir, { recursive: true }); await writeFile(join(profileDir, "settings.json"), "{}"); };
@@ -100,12 +100,10 @@ test("shared local daemon pairs once, isolates simultaneous profile tabs and per
     const support = await localBrowserCapability(root, "support");
     const defaultToken = await localBrowserCapability(root, "default");
     const command = (token: string, body: object) => browserRequest({ endpoint, token }, workerPath, body).then(data => data.result);
-    assert.equal((await command(support, { action: "status" })).profileAuthorized, false);
-    await assert.rejects(browserRequest({ endpoint, token: support }, "/api/browser/local/grant", { profile: "support" }), /Unauthorized/);
+    assert.equal((await command(support, { action: "status" })).browsers[0].connected, true);
+    await assert.rejects(browserRequest({ endpoint, token: support }, "/api/browser/local/unpair", {}), /Unauthorized/);
     await assert.rejects(browserRequest({ endpoint, token: support }, "/api/browser/local/stop", {}), /Unauthorized/);
     await assert.rejects(command(support.replace("support.", "default."), { action: "status" }), /Invalid browser worker capability/);
-    await run("grant", "default");
-    await run("grant", "support");
     const open = (token: string) => command(token, { action: "navigate", url: "https://example.com" });
     const opens = [open(defaultToken), open(support)];
     const groups = new Set<string>();
@@ -122,26 +120,20 @@ test("shared local daemon pairs once, isolates simultaneous profile tabs and per
     assert.deepEqual((await command(defaultToken, { action: "tabs" })).tabs, [a.tabId]);
     await assert.rejects(command(support, { action: "close", tabId: a.tabId, profile: "default" }), /not owned/);
     await assert.rejects(command(support, { action: "close", tabId: 99 }), /not owned/);
-    const inFlight = assert.rejects(command(support, { action: "evaluate", tabId: b.tabId, expression: "document.title" }), /no longer authorized/);
-    assert.equal((await browser.next()).method, "debugger.sendCommand");
-    await run("revoke", "support");
-    await inFlight;
-    assert.deepEqual((await command(defaultToken, { action: "tabs" })).tabs, [a.tabId]);
-    await run("grant", "support");
-    assert.deepEqual((await command(support, { action: "tabs" })).tabs, []);
+    await rename(profileDir, `${profileDir}-old`);
+    await createProfile();
+    await assert.rejects(command(support, { action: "status" }), /Invalid browser worker capability/);
+    const recreated = await localBrowserCapability(root, "support");
+    assert.deepEqual((await command(recreated, { action: "tabs" })).tabs, []);
+    await assert.rejects(command(recreated, { action: "close", tabId: b.tabId }), /not owned/);
     const closed = once(browser.socket, "close");
     await run("stop");
     await closed;
     await run("install");
     await connect(ws, "shared-browser", { token: browser.token }, null, localBrowserPort);
-    assert.equal((await command(support, { action: "status" })).browsers[0].connected, true);
-    await rename(profileDir, `${profileDir}-old`);
-    await createProfile();
-    await assert.rejects(command(support, { action: "status" }), /Invalid browser worker capability/);
-    assert.equal((await command(await localBrowserCapability(root, "support"), { action: "status" })).profileAuthorized, false);
-    assert.deepEqual(JSON.parse(await readFile(join(root, "browser-local", "shared", "grants.json"), "utf8")).map((g: {profile: string}) => g.profile), ["default", "support"]);
+    assert.equal((await command(recreated, { action: "status" })).browsers[0].connected, true);
     await run("unpair");
-    assert.deepEqual(JSON.parse(await readFile(join(root, "browser-local", "shared", "grants.json"), "utf8")), []);
+    assert.deepEqual((await command(recreated, { action: "status" })).browsers, []);
   } finally {
     if (started) { await run("stop").catch(() => {}); await new Promise(resolve => setTimeout(resolve, 300)); }
     await legacy.close();

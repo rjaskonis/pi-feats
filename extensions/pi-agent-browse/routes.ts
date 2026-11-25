@@ -10,7 +10,6 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
   local?: boolean;
   sharedLocal?: {
     workerProfile(token: string): Promise<string | undefined>;
-    authorizedBrowsers(profile: string, token: string): Promise<() => string[]>;
   };
 }) {
   const broker = new BrowserBroker(options.file, options.port, options.endpoint, !!options.sharedLocal);
@@ -58,16 +57,12 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
     try {
       await options.validateProfile(profile);
       const shared = options.sharedLocal;
-      const browsers = shared ? (await shared.authorizedBrowsers(profile, token))() : [];
       const actionResult = await browserAction(shared ? {
-        status: name => broker.sharedStatus(name, browsers),
-        connection: (name, browser) => broker.sharedConnection(name, browsers, browser),
+        status: () => broker.sharedStatus(token),
+        connection: (name, browser) => broker.sharedConnection(name, token, browser),
         rpc: broker.rpc.bind(broker),
       } : broker, profile, request.body);
-      const result = request.body.action === "status" ? {
-        ...(actionResult as object), available: options.available,
-        ...(shared ? { sharedBrowserPaired: broker.browserStatus().browsers.length > 0, profileAuthorized: browsers.length > 0 } : {}),
-      } : actionResult;
+      const result = request.body.action === "status" ? { ...(actionResult as object), available: options.available } : actionResult;
       if (JSON.stringify(result)?.length > 8 * 1024 * 1024) return reply.code(413).send({ error: "Browser result too large; return a bounded slice" });
       return { result };
     } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Browser command failed" }); }

@@ -43,7 +43,7 @@ function RemoteBrowserProfile({ profile }: { profile: string }) {
   return <div className="space-y-3">
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
     {!status ? <p role="status" className="text-sm text-zinc-500">Checking remote pairing…</p> : !status.available ?
-      <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">Remote pairing is unavailable. Configure the Pi API public HTTPS origin and proxy WebSocket upgrades for /api/browser/connect. Local pairing below works without a public address.</p> : <>
+      <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">Remote pairing is unavailable. Configure the Pi API public HTTPS origin and proxy WebSocket upgrades for /api/browser/connect. Local pairing works without a public address.</p> : <>
         <p className="text-sm text-zinc-500">Generate a code here, then open the extension on the Chrome computer, choose <strong>Remote server</strong>, paste the code and Connect. No local relay is required on that computer. Download the ZIP from this server to embed its address.</p>
         <div className="flex flex-wrap gap-2">
           <Button disabled={busy} onClick={() => void act("pair")}>Generate pairing code</Button>
@@ -71,8 +71,6 @@ export function BrowserPairingPanel() {
   }, []);
   return <Card className="space-y-5">
     <CardTitle>Connect Chrome</CardTitle>
-    {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-    <div className="space-x-2"><label htmlFor="browser-profile" className="text-sm font-medium">Pi Profile</label><select id="browser-profile" className="rounded-md border p-2 text-sm" value={profile} onChange={event => setProfile(event.target.value)}>{(profiles.length ? profiles : ["default"]).map(name => <option key={name}>{name}</option>)}</select></div>
     <section className="space-y-2">
       <h3 className="font-medium">Pi and Chrome on this computer</h3>
       <p className="text-sm text-zinc-500">Install Pi on the Chrome computer with <code>npm install -g @earendil-works/pi-coding-agent</code>, then <code>pi install npm:pi-feats</code>. The relay uses Pi&apos;s existing Node runtime; no separate native binary, sudo, or incoming public port is required. Linux is validated; macOS/Windows platform smoke tests are pending.</p>
@@ -80,10 +78,15 @@ export function BrowserPairingPanel() {
         <li>Install the extension using the ZIP above.</li>
         <li>In a terminal outside any named profile, run <code>pi browser pair</code>. This starts the shared relay and prints a code. Skip this step if Chrome is already paired with the shared relay.</li>
         <li>In extension Settings, choose <strong>Local relay</strong>. Copy the address and code printed by the CLI, then click <strong>Connect</strong>.</li>
-        <li>Run <code>pi browser grant {profile}</code> to authorize that local profile. Check access with <code>pi browser status</code> or remove access with <code>pi browser revoke {profile}</code>.</li>
       </ol>
-      <p className="text-sm text-zinc-500">Create the named profile on this computer first if needed. Additional profiles need a grant, not another pairing. After a Pi update, run pi browser install once to update the shared relay without clearing grants or re-pairing Chrome.</p>
+      <p className="text-sm">Once connected, Chrome is ready to use from any local Pi Profile. No profile selection or extra setup is needed. Each profile can operate only the tabs it opens.</p>
     </section>
-    <section className="space-y-2"><h3 className="font-medium">Pi on another server</h3><RemoteBrowserProfile key={profile} profile={profile}/></section>
+    <section className="space-y-2 border-t pt-4">
+      <h3 className="font-medium">Pi on another server</h3>
+      <p className="text-sm text-zinc-500">Remote pairing is specific to a profile on this server.</p>
+      {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+      <div className="space-x-2"><label htmlFor="browser-profile" className="text-sm font-medium">Remote Pi Profile</label><select id="browser-profile" className="rounded-md border p-2 text-sm" value={profile} onChange={event => setProfile(event.target.value)}>{(profiles.length ? profiles : ["default"]).map(name => <option key={name}>{name}</option>)}</select></div>
+      <RemoteBrowserProfile key={profile} profile={profile}/>
+    </section>
   </Card>;
 }

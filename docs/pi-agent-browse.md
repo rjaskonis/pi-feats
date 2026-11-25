@@ -19,21 +19,18 @@ pi install npm:pi-feats
 pi browser pair
 ```
 
-`pair` starts the shared relay if needed. In extension Settings, choose **Local relay**, enter `127.0.0.1:20087` and the five-minute, single-use code, then click **Connect**. Pairing connects Chrome but does not grant any profile access. Run these commands in a terminal outside a named profile:
+`pair` starts the shared relay if needed. In extension Settings, choose **Local relay**, enter `127.0.0.1:20087` and the five-minute, single-use code, then click **Connect**. Once Chrome is connected, all local Pi Profiles on this installation can use it immediately. No profile selection or separate authorization is needed. To check the connection:
 
 ```sh
-pi browser grant default         # optional: allow the default profile
-pi browser grant support         # allow an existing named profile
-pi browser status                # show Chrome connections and grants
+pi browser status
 pi profile support browser status
-pi browser revoke support        # remove only this profile's access
 ```
 
-The same Chrome can serve multiple authorized profiles at the same time. No profile-specific relay, Chrome address change, or additional pairing is required. If several browsers are paired, `grant` requires a browser ID from `status`. `revoke` can also take a browser ID; without one it revokes that profile's access to all local browsers. Each profile can only operate tabs it created on the current connection. Profiles using the same Chrome profile still share cookies and logged-in accounts.
+The same Chrome can serve multiple profiles at the same time. No profile-specific relay, Chrome address change, or additional pairing is required. Each profile can only operate tabs it created on the current connection. Profiles using the same Chrome profile still share cookies and logged-in accounts.
 
-One loopback Node relay runs under the default runtime using private files in `<agent root>/browser-local/shared/`. A named sandbox gets only a profile-specific worker capability. It cannot administer the relay or use another profile's tabs. `pi browser install` starts or updates the daemon while preserving Chrome credentials and grants; `pi browser stop` stops it for all profiles without deleting state. `pi browser unpair` revokes every local Chrome pairing and grant. These commands do not modify remote Console pairing.
+One loopback Node relay runs under the default runtime using private files in `<agent root>/browser-local/shared/`. A named sandbox gets only a profile-specific worker capability. It cannot administer the relay or use another profile's tabs. `pi browser install` starts or updates the daemon while preserving Chrome credentials; `pi browser stop` stops it for all profiles without deleting state. `pi browser unpair` removes every local Chrome pairing. These commands do not modify remote Console pairing.
 
-On first startup, the shared relay attempts to stop previous Pi Node relays through their authenticated local APIs. It does not import their credentials or grants: pair Chrome once at the shared address and grant only the profiles intended to use it. The existing Chrome extension can be reused. If a standalone native relay or unrelated process occupies port 20087, stop it yourself or free the port; Pi will not kill it. The shared relay's startup log is `browser-local/shared/relay.log`.
+On first startup, the shared relay attempts to stop previous Pi Node relays through their authenticated local APIs. It does not import their credentials: pair Chrome once at the shared address. If Chrome is already paired with the shared relay, the existing pairing still works after updating it. The existing Chrome extension can be reused. If a standalone native relay or unrelated process occupies port 20087, stop it yourself or free the port; Pi will not kill it. The shared relay's startup log is `browser-local/shared/relay.log`.
 
 ## Remote: Pi on another server
 
