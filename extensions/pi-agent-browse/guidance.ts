@@ -22,7 +22,7 @@ export function browserStatusGuidance(status: Status, mode: "local" | "console",
             : "Pair Chrome once with the shared relay using pi browser pair from the default local terminal. All local Pi Profiles can use it once connected."
           : status.available === false
             ? "Remote pairing is unavailable. Explain that the server administrator must configure HTTPS/WSS; do not generate a local code in an API worker."
-            : "Guide the user to Console > Administrative Settings > Pi Agent Browse > Connect Chrome > Pi on another server. Select this session's profile, generate a code, and paste it into the extension's Remote server form. Do not generate a loopback pairing code in an API worker.",
+            : "Guide the user to Console > Administrative Settings > Pi Agent Browse > Connect Chrome > Pi on another server. Generate a code and paste it into the extension's Remote server form. The pairing makes Chrome available to all profiles on that server. Do not generate a loopback pairing code in an API worker.",
     },
   };
 }

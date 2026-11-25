@@ -32,7 +32,6 @@ import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
 import { piCommand } from "../lib/pi-command.ts";
 import { registerBrowserRoutes } from "../pi-agent-browse/routes.ts";
-import { profileBrowserCredentials } from "../pi-agent-browse/credential-store.ts";
 import { browserPublicOrigin } from "./browser-extension-archive.ts";
 import { PulseStore } from "../pulse/store.ts";
 import { SkillSourceStore } from "../skill-sources/store.ts";
@@ -500,7 +499,9 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     let publicOrigin: URL | undefined;
     try { if (config.publicBaseUrl) publicOrigin = browserPublicOrigin(config.publicBaseUrl); } catch { /* Download metadata explains invalid public-origin configuration. */ }
     const browser = await registerBrowserRoutes(server, {
-      file: await profileBrowserCredentials(options.agentDir, () => api.profiles.list(), profile => api.profiles.directory(profile)),
+      // Do not promote existing profile-scoped pairings into shared access.
+      file: join(options.agentDir, "browser", "shared-credentials.json"),
+      sharedRemote: true,
       port: publicOrigin ? Number(publicOrigin.port || "443") : 443,
       endpoint: publicOrigin ? `wss://${publicOrigin.host}/api/browser/connect` : undefined,
       available: publicOrigin?.protocol === "https:", guard,
@@ -618,7 +619,6 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       if (objectBody(request.body).force !== true) throw Object.assign(new Error('Profile deletion requires { "force": true }.'), { status: 400 });
       const name = profileName(request);
       await api.deleteProfile(name);
-      await browser.revoke(name);
       browser.workerTokens.delete(name);
       return reply.code(204).send();
     });

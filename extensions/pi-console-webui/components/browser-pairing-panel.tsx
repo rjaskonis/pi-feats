@@ -11,13 +11,13 @@ async function request(path: string, method = "GET", signal?: AbortSignal) {
   if (!response.ok) throw new Error(data.error?.message ?? data.error ?? "Browser request failed");
   return data;
 }
-function RemoteBrowserProfile({ profile }: { profile: string }) {
+function RemoteBrowserPairing() {
   const [status, setStatus] = useState<BrowserStatus>();
   const [code, setCode] = useState<{ code: string; expiresAt: number }>();
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const path = `profiles/${encodeURIComponent(profile)}`;
+  const path = "shared";
   useEffect(() => {
     const controller = new AbortController();
     let fetching = false;
@@ -52,23 +52,12 @@ function RemoteBrowserProfile({ profile }: { profile: string }) {
           {now >= code.expiresAt ? <p>Pairing code expired. Generate a new code.</p> : !status.pairingPending ? <p>Pairing code used or invalidated. Check the browser connection below.</p> : <><p className="font-mono text-2xl">{code.code}</p><p>One use. Expires at {new Date(code.expiresAt).toLocaleTimeString()}. Generating another code replaces this one.</p><Button onClick={() => void navigator.clipboard.writeText(code.code).catch(() => setError("Select the code above and copy it manually."))}>Copy code</Button></>} 
         </div>}
       </>}
-    {status && (status.browsers.length > 0 || status.pairingPending) && <Button disabled={busy} onClick={() => { if (window.confirm(`Revoke pending codes and all browser connections for ${profile}?`)) void act("unpair"); }}>Revoke browser access</Button>}
-    <ul className="space-y-1 text-sm">{status?.browsers.map(browser => <li key={browser.id}><code>{browser.id}</code> — {browser.connected ? "Connected" : "Disconnected"} · {browser.tabs} agent tabs</li>)}</ul>
-    <p className="text-sm text-zinc-500">Browser access is limited to the selected Pi Profile. Revocation disconnects existing sessions; restarting the server requires browser reconnection. Personal tabs are not automatically exposed.</p>
+    {status && (status.browsers.length > 0 || status.pairingPending) && <Button disabled={busy} onClick={() => { if (window.confirm("Revoke all remote browser connections and pending codes for this server?")) void act("unpair"); }}>Revoke browser access</Button>}
+    <ul className="space-y-1 text-sm">{status?.browsers.map(browser => <li key={browser.id}><code>{browser.id}</code> — {browser.connected ? "Connected" : "Disconnected"}</li>)}</ul>
+    <p className="text-sm text-zinc-500">Each Pi Profile can control only the tabs it opens. Profiles using the same Chrome profile share its website logins.</p>
   </div>;
 }
 export function BrowserPairingPanel() {
-  const [profiles, setProfiles] = useState<string[]>([]);
-  const [profile, setProfile] = useState("default");
-  const [error, setError] = useState("");
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch("/api/pi/profiles", { signal: controller.signal, cache: "no-store" }).then(async response => {
-      if (!response.ok) throw new Error("Could not load Pi Profiles");
-      const data = await response.json(); setProfiles(data.profiles.map((item: { name: string }) => item.name));
-    }).catch(error => { if (!controller.signal.aborted) setError(error.message); });
-    return () => controller.abort();
-  }, []);
   return <Card className="space-y-5">
     <CardTitle>Connect Chrome</CardTitle>
     <section className="space-y-2">
@@ -83,10 +72,8 @@ export function BrowserPairingPanel() {
     </section>
     <section className="space-y-2 border-t pt-4">
       <h3 className="font-medium">Pi on another server</h3>
-      <p className="text-sm text-zinc-500">Remote pairing is specific to a profile on this server.</p>
-      {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
-      <div className="space-x-2"><label htmlFor="browser-profile" className="text-sm font-medium">Remote Pi Profile</label><select id="browser-profile" className="rounded-md border p-2 text-sm" value={profile} onChange={event => setProfile(event.target.value)}>{(profiles.length ? profiles : ["default"]).map(name => <option key={name}>{name}</option>)}</select></div>
-      <RemoteBrowserProfile key={profile} profile={profile}/>
+      <p className="text-sm">Pair Chrome once to make it available to all Pi Profiles on this server. Only pair browsers you intend to share with those profiles.</p>
+      <RemoteBrowserPairing/>
     </section>
   </Card>;
 }

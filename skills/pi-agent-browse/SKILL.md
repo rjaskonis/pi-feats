@@ -1,6 +1,6 @@
 ---
 name: pi-agent-browse
-description: Use paired Pi Agent Browse for personal Chrome requests, or guide local Node relay and remote profile-bound WSS pairing without replacing an explicit CDP/Steel choice.
+description: Use paired Pi Agent Browse for personal Chrome requests, or guide local Node relay and remote WSS pairing without replacing an explicit CDP/Steel choice.
 ---
 
 For a generic “use my browser” or “open this in my Chrome” request, prefer **Pi Agent Browse** when available. It uses background tabs after one-time pairing. Honor explicit Browser Harness, CDP or Steel choices instead; follow the browser-harness skill for those methods. Never silently switch providers.
@@ -31,7 +31,7 @@ After Chrome connects, verify the connection and continue the user's task. Do no
 
 ### Console / server connection
 
-When `setup.mode` is `console`, local shell commands run on the server, NOT the user's Chrome computer. Never run `pi browser pair` there to supply a supposed local code. Guide the user to **Console → Administrative Settings → Pi Agent Browse → Connect Chrome → Pi on another server**, select this session's Pi Profile, and generate a code. In extension settings, open the pairing form as above, choose **Remote server**, check the server address, paste the code and click **Connect**. If authorized Console access is actually available, perform the permitted steps yourself instead of making the user repeat them. Do not claim Console generation occurred unless its real response was observed; worker capabilities cannot administer pairing.
+When `setup.mode` is `console`, local shell commands run on the server, NOT the user's Chrome computer. Never run `pi browser pair` there to supply a supposed local code. Guide the user to **Console → Administrative Settings → Pi Agent Browse → Connect Chrome → Pi on another server** and generate a code. This shares the Chrome connection with Pi Profiles on that server; there is no profile picker. In extension settings, open the pairing form as above, choose **Remote server**, check the server address, paste the code and click **Connect**. If authorized Console access is actually available, perform the permitted steps yourself instead of making the user repeat them. Do not claim Console generation occurred unless its real response was observed; worker capabilities cannot administer pairing.
 
 If `setup.nextStep` is `administrator_setup_required`, explain plainly that the server's secure browser connection must be configured by its administrator. The ZIP alone is not sufficient. Do not switch modes, install a local relay, guess a public URL, or attempt remote configuration. The server requires a public HTTPS origin and WSS routing.
 

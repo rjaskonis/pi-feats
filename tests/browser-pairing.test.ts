@@ -15,12 +15,12 @@ import { registerBrowserRoutes, extensionOrigin } from "../extensions/pi-agent-b
 import { ecdhKeyPair, normalizePairingCode, pairingCodeMaterial, pairingProof, pairingSessionKey, randomNonce, sameSecret, sessionProof, unwrapToken } from "../extensions/pi-agent-browse/pairing.ts";
 
 const remoteEndpoint = "wss://pi.example/api/browser/connect";
-async function fixture(available = true) {
+async function fixture(available = true, sharedRemote = false) {
   const directory = await mkdtemp(join(tmpdir(), "pi-browser-test-"));
   const server = Fastify();
   await server.register(websocket, { options: { maxPayload: 8 * 1024 * 1024 } });
   const broker = await registerBrowserRoutes(server, {
-    file: join(directory, "credentials.json"), port: 443, endpoint: remoteEndpoint, available,
+    file: join(directory, "credentials.json"), port: 443, endpoint: remoteEndpoint, available, sharedRemote,
     guard: (request, reply) => { if (request.headers.authorization === "Bearer admin") return true; reply.code(401).send({ error: "Unauthorized" }); return false; },
     validateProfile: async profile => { if (!["default", "support"].includes(profile)) throw new Error("Unknown profile"); },
   });
@@ -139,6 +139,32 @@ test("shared local daemon pairs once and isolates simultaneous profile tabs with
     await legacy.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("remote Console pairs without a profile and shares Chrome without sharing tabs", { timeout: 15_000 }, async () => {
+  const f = await fixture(true, true);
+  try {
+    const admin = { authorization: "Bearer admin" };
+    const support = { authorization: `Bearer ${f.broker.workerToken("support")}` };
+    const other = { authorization: `Bearer ${f.broker.workerToken("default")}` };
+    const act = (headers: typeof admin, payload: object) => f.server.inject({ method: "POST", url: "/api/browser/worker/command", headers, payload });
+    assert.equal((await f.server.inject({ method: "POST", url: "/api/browser/shared/pair", headers: support })).statusCode, 401);
+    assert.equal((await f.server.inject({ method: "POST", url: "/api/browser/profiles/default/pair", headers: admin })).statusCode, 404);
+    const pair = await f.server.inject({ method: "POST", url: "/api/browser/shared/pair", headers: admin });
+    assert.equal(pair.statusCode, 200);
+    const browser = await connect(f.endpoint, "shared-remote-chrome", { code: pair.json().code });
+    for (const headers of [support, other]) assert.equal((await act(headers, { action: "status" })).json().result.browsers[0].connected, true);
+    const open = act(support, { action: "navigate", url: "https://example.com" });
+    for (let i = 0; i < 6; i++) {
+      const message = await browser.next();
+      browser.socket.send(JSON.stringify({ id: message.id, result: message.method === "tabs.create" ? { tabId: 41 } : {} }));
+    }
+    assert.equal((await open).json().result.tabId, 41);
+    assert.deepEqual((await act(other, { action: "tabs" })).json().result.tabs, []);
+    assert.match((await act(other, { action: "close", tabId: 41 })).json().error, /not owned/);
+    assert.equal((await f.server.inject({ method: "POST", url: "/api/browser/shared/unpair", headers: admin })).statusCode, 200);
+    assert.deepEqual((await act(support, { action: "status" })).json().result.browsers, []);
+  } finally { await f.close(); }
 });
 
 test("profile-bound pairing, command routing, persistence, reconnection and revocation", { timeout: 15_000 }, async () => {
