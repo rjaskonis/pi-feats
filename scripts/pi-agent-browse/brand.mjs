@@ -20,7 +20,7 @@ export function brand(root) {
   };
   const manifest = JSON.parse(read('public/manifest.json'));
   manifest.name = name;
-  manifest.version_name = `${manifest.version}-pi.2`;
+  manifest.version_name = `${manifest.version}-pi.4`;
   manifest.description = 'Lets your Pi agent work in background Chrome tabs and hand control back when needed.';
   manifest.action.default_title = `${name} · Click to let agents use this tab`;
   manifest.key = key;
@@ -50,7 +50,8 @@ export function brand(root) {
   replace(discovery, 'relayAddress(stored[RELAY_ADDRESS_KEY])', 'relayAddress(stored[RELAY_ADDRESS_KEY] ?? cloudAddress)');
   const worker = 'src/background/agent-relay.ts';
   replace(worker, 'import { createRelayDiscovery, relayTarget }', 'import { cloudAddress, cloudRelay } from "../shared/pi-relay"\nimport { createRelayDiscovery, relayTarget }');
-  replace(worker, 'const url = `ws://${host}:${port}/extension`', 'const address = `${host}:${port}`\n    if (address !== cloudAddress && !/^127\\.0\\.0\\.1:[0-9]{4,5}$/.test(address)) { setStatus("offline"); return }\n    const url = address === cloudAddress ? cloudRelay.href : `ws://${address}/extension`'.replace('${port}', String(port)));
+  replace(worker, 'const url = `ws://${host}:${port}/extension`', 'const address = `${host}:${port}`\n    if (address !== cloudAddress && !/^127\\.0\\.0\\.1:[0-9]{4,5}$/.test(address)) { setStatus("offline"); return }\n    const url = address === cloudAddress ? cloudRelay.href : `ws://${address}/extension`');
+  // Keep the dialed port dynamic: remote addresses use HTTPS, not the local relay port.
   const handshake = 'src/background/agent-relay/handshake.ts';
   replace(handshake, 'import { defaultRelayPort,', 'import { cloudAddress } from "../../shared/pi-relay"\nimport { defaultRelayPort,');
   replace(handshake, 'port: Number(new URL(current.url).port),', 'port: Number(new URL(current.url).port || (new URL(current.url).protocol === "wss:" ? "443" : "80")),');
@@ -70,6 +71,27 @@ export function brand(root) {
   replace(handshake, '(before[RELAY_ADDRESS_KEY] ?? "") !== value', 'before[RELAY_ADDRESS_KEY] !== value');
   replace(handshake, 'const clearDiscovered = scannedOnly', 'const switchRelay = (before[RELAY_ADDRESS_KEY] ?? cloudAddress) !== value\n    const clearDiscovered = scannedOnly');
   replace(handshake, '[RELAY_ADDRESS_KEY]: value,\n        ...(hinted', '[RELAY_ADDRESS_KEY]: value,\n        ...(switchRelay && code === undefined ? { [PAIRING_KEY]: "" } : {}),\n        ...(hinted');
+  const settings = 'src/status/settings.tsx';
+  const settingsText = read(settings);
+  const pairingShortcut = settingsText.indexOf('  // The pairing code fields live in Advanced;');
+  const diagnostics = settingsText.indexOf('  const copyDiagnostics', pairingShortcut);
+  if (pairingShortcut < 0 || diagnostics < 0) throw new Error('Unexpected upstream pairing shortcut');
+  write(settings, settingsText.slice(0, pairingShortcut) + settingsText.slice(diagnostics));
+  replace(settings, 'onClick={kind() === "pair" ? openAdvanced : reconnect}', 'onClick={reconnect}');
+  replace(settings, '{kind() === "pair" ? "Pair with a code" : "Reconnect"}', 'Reconnect');
+  replace(settings, 'state?.status === "unpaired" || state?.status === "untrusted" ? "pair" : ', '');
+  replace(settings, '        </header>', '        </header>\n\n        <Section title="Connect Chrome">\n          <RelayForm relay={relay} />\n        </Section>');
+  replace(settings, '<details class="advanced" ref={advanced}>', '<details class="advanced">');
+  replace(settings, '<span class="advanced-hint">relay address, pairing code, diagnostics</span>', '<span class="advanced-hint">connection details and diagnostics</span>');
+  replace(settings, '            <RelayForm relay={relay} />\n            <p class="row-desc">', '            <p class="row-desc">');
+  replace(settings, '`Waiting for the relay at ${remote}` : "Waiting for an agent"', '`Not connected to ${remote}` : "Not connected on this computer"');
+  replace(settings, 'It starts the first time an agent there uses the browse tools.', 'Check that the server is reachable. Enter a code below to pair or click Connect to retry.');
+  replace(settings, 'The relay starts the first time an agent uses the browse tools.', 'Start the local relay with `pi browser install`, or run `pi browser pair` if Chrome has not been paired yet.');
+  replace(settings, 'Enter a new code from `browse pair` on the relay\'s computer.', 'The connection was refused. Get a fresh pairing code and enter it below.');
+  const describe = 'src/status/describe.ts';
+  write(describe, read(describe).replaceAll('under Advanced', 'under Connect Chrome'));
+  replace(describe, 'No relay answered ${at}. Check the address, that an agent has started the relay there, and that \\`browse set hostname 0.0.0.0\\` was run there.', 'Could not reach the server ${at}. Check your connection or ask the server administrator to verify WebSocket routing.');
+  replace(describe, 'Code saved. No relay answered ${at} yet; it pairs as soon as one runs there (within 10 minutes of \\`pair\\`).', 'Code saved, but the relay did not answer ${at}. Check the connection and retry before the code expires.');
   const form = 'src/status/relay-form.tsx';
   replace(form, 'import { createEffect,', 'import { cloudAddress, cloudAvailable, cloudRelay, localAddress } from "../shared/pi-relay"\nimport { createEffect,');
   replace(form, 'const [address, setAddress] = createSignal("")', 'const [address, setAddress] = createSignal(cloudAvailable ? cloudAddress : localAddress)');
@@ -80,7 +102,7 @@ export function brand(root) {
   const fieldStart = formText.indexOf('          <Field.Label>Relay address');
   const fieldEnd = formText.indexOf('        </Field>', fieldStart);
   if (fieldStart < 0 || fieldEnd < 0) throw new Error('Unexpected upstream pairing form');
-  write(form, formText.slice(0, fieldStart) + `          <label for="relay-mode">Connect to</label>\n          <select id="relay-mode" value={cloudAvailable && address() === cloudAddress ? "remote" : "local"} disabled={pending()} onChange={(event) => {\n            setEdited(true)\n            setAddress(event.currentTarget.value === "remote" ? cloudAddress : localAddress)\n            setCode("")\n            setResult(undefined)\n          }}>\n            <Show when={cloudAvailable}><option value="remote">Remote server</option></Show>\n            <option value="local">Local relay</option>\n          </select>\n          <Show when={!cloudAvailable || address() !== cloudAddress}><label for="local-address">Local relay address</label><input id="local-address" value={address()} disabled={pending()} onInput={(event) => { setAddress(event.currentTarget.value); setEdited(true) }} placeholder={localAddress} /></Show>\n          <p class="hint">{address() === cloudAddress && cloudAvailable ? cloudRelay.host + " — Generate a profile pairing code in Console → Pi Agent Browse. No local relay required." : "Run pi browser pair on this computer. Use the address and code shown by the CLI."}</p>\n` + formText.slice(fieldEnd));
+  write(form, formText.slice(0, fieldStart) + `          <label for="relay-mode">Connect to</label>\n          <select id="relay-mode" value={cloudAvailable && address() === cloudAddress ? "remote" : "local"} disabled={pending()} onChange={(event) => {\n            setEdited(true)\n            setAddress(event.currentTarget.value === "remote" ? cloudAddress : localAddress)\n            setCode("")\n            setResult(undefined)\n          }}>\n            <Show when={cloudAvailable}><option value="remote">Remote server</option></Show>\n            <option value="local">Local relay</option>\n          </select>\n          <Show when={!cloudAvailable || address() !== cloudAddress}><label for="local-address">Local relay address</label><input id="local-address" value={address()} disabled={pending()} onInput={(event) => { setAddress(event.currentTarget.value); setEdited(true) }} placeholder={localAddress} /></Show>\n          <p class="hint">{address() === cloudAddress && cloudAvailable ? cloudRelay.host + " — Generate a pairing code in Console → Pi Agent Browse. No local relay required." : "Run pi browser pair on this computer. Use the address and code shown by the CLI."}</p>\n` + formText.slice(fieldEnd));
   replace('src/agent-relay/protocol.ts', 'defaultRelayPort = 19988', `defaultRelayPort = ${port}`);
   replace('src/agent-relay/protocol.ts', '[19990, 19991, 19992, 19993, 19994, 19995, 19996, 19997] as const', '[] as const');
   const origins = 'rust/crates/browse-relay/src/origins.rs';

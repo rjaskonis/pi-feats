@@ -22,7 +22,7 @@ If Chrome has not been paired or the relay is not running, use `pi browser pair`
 Show a short, complete checklist, using the returned address and code:
 
 1. Open Pi Agent Browse settings in Chrome. Offer the `setup.extensionSettingsUrl` to copy into the Chrome address bar, or `chrome://extensions` → **Pi Agent Browse** → **Details** → **Extension options**. Clicking the toolbar icon is NOT a reliable way to open settings: it may authorize the current personal tab.
-2. Click **Pair with a code** if shown; otherwise expand **advanced** ("relay address, pairing code, diagnostics"). Under **Connect to**, choose **Local relay**.
+2. In **Connect Chrome**, choose **Local relay** under **Connect to**. In older extension builds, the form may be under **advanced**.
 3. Give separate clearly labeled **Local relay address** and **Pairing code** values, then say to click **Connect**. Explain in one sentence that the code expires in five minutes and only the latest generated code is valid. Do not describe a loopback address as a public website.
 
 Do not assume the user knows where settings or the pairing form are. If they say the extension is already installed, skip download and installation instructions. If it is not installed, give only the missing installation steps: download ZIP from Console → Administrative Settings → Pi Agent Browse, extract to a stable folder, then `chrome://extensions` → Developer mode → **Load unpacked**, selecting the folder containing `manifest.json`. Generate the code after installation if the initial code would expire. Do not claim a standard folder is installed without checking.
