@@ -31,6 +31,9 @@ import { contextMemoryCharacters, contextMemoryConfig, contextMemoryLimit, memor
 import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
 import { piCommand } from "../lib/pi-command.ts";
+import { registerBrowserRoutes } from "../pi-agent-browse/routes.ts";
+import { profileBrowserCredentials } from "../pi-agent-browse/credential-store.ts";
+import { browserPublicOrigin } from "./browser-extension-archive.ts";
 import { PulseStore } from "../pulse/store.ts";
 import { SkillSourceStore } from "../skill-sources/store.ts";
 
@@ -488,10 +491,25 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     const config = await loadConfig(options.agentDir);
     const api = new ApiServer(options, config);
     const server = Fastify({ bodyLimit: MAX_BODY_BYTES, logger: false });
-    await server.register(websocket);
-    const cliLaunch = (profile: string) => launchProfileWorkerViaCli(options.agentDir, profile, api.profiles.directory(profile));
+    await server.register(websocket, { options: { maxPayload: 8 * 1024 * 1024 } });
+    const guard = (request: FastifyRequest, reply: FastifyReply): boolean => {
+      if (authorized(request, config.apiToken)) return true;
+      apiError(reply, 401, "UNAUTHORIZED", "Bearer token is missing or invalid.");
+      return false;
+    };
+    let publicOrigin: URL | undefined;
+    try { if (config.publicBaseUrl) publicOrigin = browserPublicOrigin(config.publicBaseUrl); } catch { /* Download metadata explains invalid public-origin configuration. */ }
+    const browser = await registerBrowserRoutes(server, {
+      file: await profileBrowserCredentials(options.agentDir, () => api.profiles.list(), profile => api.profiles.directory(profile)),
+      port: publicOrigin ? Number(publicOrigin.port || "443") : 443,
+      endpoint: publicOrigin ? `wss://${publicOrigin.host}/api/browser/connect` : undefined,
+      available: publicOrigin?.protocol === "https:", guard,
+      validateProfile: profile => api.profiles.readSettings(profile),
+    });
+    const browserEnvironment = (profile: string) => ({ ...process.env, PI_BROWSER_ENDPOINT: `http://127.0.0.1:${config.port}`, PI_BROWSER_TOKEN: browser.workerToken(profile) });
+    const cliLaunch = (profile: string) => launchProfileWorkerViaCli(options.agentDir, profile, api.profiles.directory(profile), undefined, browserEnvironment(profile));
     api.workers = new ProfileWorkerRuntime({ agentDir: options.agentDir,
-      launch: config.workerLauncher === "cli" ? cliLaunch : (profile, signal) => launchProfileWorkerDirect(options.agentDir, profile, api.profiles.directory(profile), signal),
+      launch: config.workerLauncher === "cli" ? cliLaunch : (profile, signal) => launchProfileWorkerDirect(options.agentDir, profile, api.profiles.directory(profile), signal, undefined, browserEnvironment(profile)),
       version: (profile) => profileWorkerVersion(options.agentDir, api.profiles.directory(profile)), warn: (message) => console.warn(message) });
     const clientTools = new ClientToolsRuntime({
       settings: async (profile) => {
@@ -550,11 +568,6 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     chat("/profile/:profile/sessions/:sessionId/chat");
     chat("/profile/:profile/sessions/:sessionId/chat/stream", true);
 
-    const guard = (request: FastifyRequest, reply: FastifyReply): boolean => {
-      if (authorized(request, config.apiToken)) return true;
-      apiError(reply, 401, "UNAUTHORIZED", "Bearer token is missing or invalid.");
-      return false;
-    };
     registerBrowserDownload(server, guard, { publicBaseUrl: config.publicBaseUrl });
     const profileName = (request: FastifyRequest<{ Params: { profile: string } }>) => request.params.profile;
     const pulseTick = async (action: "start" | "stop" | "status") => new Promise<string>((resolveRun, reject) => {
@@ -603,7 +616,10 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.delete<{ Params: { profile: string } }>("/api/profiles/:profile", async (request, reply) => {
       if (!guard(request, reply)) return;
       if (objectBody(request.body).force !== true) throw Object.assign(new Error('Profile deletion requires { "force": true }.'), { status: 400 });
-      await api.deleteProfile(profileName(request));
+      const name = profileName(request);
+      await api.deleteProfile(name);
+      await browser.revoke(name);
+      browser.workerTokens.delete(name);
       return reply.code(204).send();
     });
 

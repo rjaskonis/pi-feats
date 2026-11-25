@@ -97,6 +97,7 @@
       "./extensions/cli-tui-mode.ts",
       "./extensions/api-server",
       "./extensions/browser-harness",
+      "./extensions/pi-agent-browse",
       "./extensions/cli-resources.ts",
       "./extensions/composio",
       "./extensions/context-memory",

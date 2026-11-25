@@ -2,13 +2,18 @@ import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
 
 const templateEndpoint = "wss://pi-agent-browse.invalid/api/browser/connect";
 
-export function cloudExtensionArchive(zip: Uint8Array, publicBaseUrl: string): Buffer {
+export function browserPublicOrigin(publicBaseUrl: string): URL {
   const url = new URL(publicBaseUrl);
   if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || url.pathname !== "/" ||
       !/^[a-z0-9.-]+$/i.test(url.hostname) || /^(localhost|.*\.localhost|127\..*|0\.0\.0\.0)$/i.test(url.hostname) ||
       url.hostname === "pi-agent-browse.invalid") {
     throw new Error("Pi Agent Browse requires a public HTTPS origin in PI_PUBLIC_BASE_URL or api.publicBaseUrl.");
   }
+  return url;
+}
+
+export function cloudExtensionArchive(zip: Uint8Array, publicBaseUrl: string): Buffer {
+  const url = browserPublicOrigin(publicBaseUrl);
   const origin = `wss://${url.host}`;
   const endpoint = `${origin}/api/browser/connect`;
   const files = unzipSync(zip);

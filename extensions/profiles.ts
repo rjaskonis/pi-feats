@@ -27,7 +27,7 @@ const rootAgentDir = () => resolveRootAgentDir();
 const profilesDir = () => join(rootAgentDir(), "profiles");
 const profileDir = (name: string) => join(profilesDir(), name);
 const reservedProfileNames = new Set([
-  "add", "create", "delete", "disable", "enable", "extensions", "guardrails", "list", "open", "packages", "profile", "pulse", "remove", "rename", "resume", "sessions", "skills", "ssh", "tools", "validate",
+  "add", "browser", "create", "delete", "disable", "enable", "extensions", "guardrails", "list", "open", "packages", "profile", "pulse", "remove", "rename", "resume", "sessions", "skills", "ssh", "tools", "validate",
   ...REMOTE_COMMAND_NAMES,
 ]);
 
@@ -297,6 +297,11 @@ export default async function (pi: ExtensionAPI) {
   const selectedProfile = requestedProfile?.name ?? process.env.PI_ACTIVE_PROFILE ?? "default";
   if (guardrailArgs[0] === "guardrails") {
     await handleGuardrailsCli(selectedProfile, guardrailArgs);
+    process.exit(0);
+  }
+  if (guardrailArgs[0] === "browser") {
+    const { handleBrowserCli } = await import("./pi-agent-browse/cli.ts");
+    await handleBrowserCli(guardrailArgs, selectedProfile, rootAgentDir());
     process.exit(0);
   }
   if (guardrailArgs[0] === "pulse") {

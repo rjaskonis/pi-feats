@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { BrowserPairingPanel } from "@/components/browser-pairing-panel";
 
 type Status = { available: true; url: string } | { available: false; reason: string };
 
@@ -22,7 +23,7 @@ export function BrowserDownloadPanel() {
     return () => controller.abort();
   }, []);
 
-  return <Card className="space-y-4">
+  return <div className="space-y-4"><Card className="space-y-4">
     <div>
       <CardTitle>Pi Agent Browse</CardTitle>
       <p className="mt-1 text-sm text-zinc-500">Anyone with the public link can download the Chrome extension. The link does not grant access to a browser or Pi profile.</p>
@@ -43,6 +44,5 @@ export function BrowserDownloadPanel() {
       <li>Open <code>chrome://extensions</code> and enable Developer mode.</li>
       <li>Choose <strong>Load unpacked</strong> and select the extracted folder containing <code>manifest.json</code>.</li>
     </ol>
-    <p className="text-sm text-zinc-500">Remote pairing is not available yet.</p>
-  </Card>;
+  </Card><BrowserPairingPanel/></div>;
 }

@@ -89,7 +89,7 @@ export async function linkSharedModels(root: string, destination: string): Promi
 }
 
 export const validProfileName = (name: string) => /^[a-zA-Z][a-zA-Z0-9_-]{0,63}$/.test(name);
-const contextKeys = ["PI_OPENAI_WORKER", "PI_OPENAI_CLIENT_TOOLS_WORKER", "PI_PROFILE_WORKER", "PI_APPLICATION_IDENTITY_KEY", "PI_APPLICATION_SLUG", "PI_APPLICATION_SESSION_ID", "PI_APPLICATION_DIRECT_CONTEXT_MEMORY", "PI_APPLICATION_HANDOFF"] as const;
+const contextKeys = ["PI_BROWSER_ENDPOINT", "PI_BROWSER_TOKEN", "PI_OPENAI_WORKER", "PI_OPENAI_CLIENT_TOOLS_WORKER", "PI_PROFILE_WORKER", "PI_APPLICATION_IDENTITY_KEY", "PI_APPLICATION_SLUG", "PI_APPLICATION_SESSION_ID", "PI_APPLICATION_DIRECT_CONTEXT_MEMORY", "PI_APPLICATION_HANDOFF"] as const;
 
 export function forwardedProfileExecutionEnvironment(environment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return Object.fromEntries(contextKeys.flatMap(key => environment[key] === undefined ? [] : [[key, environment[key]!] ]));

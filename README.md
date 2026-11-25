@@ -547,9 +547,11 @@ The harness opens dedicated agent tabs. To control an existing external tab expl
 
 ### Pi Agent Browse (private Chrome extension)
 
-Pi Agent Browse is an optional, privately distributed alternative for a local Chrome. Its extension opens agent tabs in the background and connects to a paired loopback relay. It does not replace the Browser Harness or change the Steel/CDP defaults. Pi recommends it first when asked to use the user's own Chrome without a preferred method. The bundled skill explains first-time setup or operates the paired local CLI.
+Pi Agent Browse opens agent-controlled Chrome tabs in the background after one-time extension pairing. It does not replace Browser Harness or change an explicit Steel/CDP selection. Pi recommends it first for a generic request to use the user's own Chrome, using the profile-bound `pi_browser` tool.
 
-See [the private build and installation guide](docs/pi-agent-browse.md). A private distribution can bundle both components: install and update copy them to `~/pi-feats/browse/{extension,relay}`. The public package includes the Chrome extension ZIP for the Console download, but not the native relay binaries.
+In **Administrative Settings → Pi Agent Browse**, download the public extension ZIP and follow the local or remote onboarding. Locally, `pi browser install` and `pi browser pair` start a loopback Node relay supplied by the package; no separate native binary is required. Named profiles use `pi profile <name> browser pair`. Remotely, select a profile in Console and generate a single-use code; the extension connects outbound over WSS with no relay installation on the Chrome computer. Remote transport requires a configured public HTTPS origin and a reverse proxy that forwards `/api/browser/connect` WebSocket upgrades to the API.
+
+See [the installation, pairing and security guide](docs/pi-agent-browse.md). The public package includes the extension ZIP and shared Node relay source. The optional legacy native relay/private distribution remains separate. Browser credentials are profile-scoped; Console pairing management stays authenticated even though the ZIP download is public.
 
 ## Installation
 

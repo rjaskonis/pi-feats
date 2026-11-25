@@ -1,53 +1,93 @@
 # Pi Agent Browse
 
-Pi Agent Browse is a privately distributed, MIT-licensed derivative of [browse](https://github.com/anomalyco/browse). The Chrome extension and native relay are built from one pinned upstream commit with the overlay in `scripts/pi-agent-browse/`. The original copyright and license are included in both archives. The extension has its own stable Chrome ID and the private relay accepts only that origin, in addition to requiring browser pairing. The ID is not an authentication credential.
+Pi Agent Browse lets Pi operate Chrome in background tabs through a paired extension. It preserves Browser Harness, CDP and Steel as separate, explicitly selectable methods. The extension is an MIT-licensed derivative of [anomalyco/browse](https://github.com/anomalyco/browse), pinned to `4da08c2582786fdbaf2e8c22bcfa59b58899d9db`; the overlay is in `scripts/pi-agent-browse/`. No Chrome Web Store account is required.
 
-## Build and share
+## Download and load Chrome
 
-On the target OS and architecture, use Node.js, Git, Bun, Rust/Cargo, ImageMagick (`convert` or set `IMAGEMAGICK=magick`), `tar` and `zip`. The initial dependency build can take several minutes.
+In **Administrative Settings → Pi Agent Browse**, choose **Download ZIP** or **Copy link**. Extract the ZIP to a stable directory. In Chrome, open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the folder containing `manifest.json`.
 
-```sh
-node scripts/pi-agent-browse/build.mjs /absolute/path/to/browse-checkout /absolute/path/to/new-release-directory
-```
+The public `GET /api/browser/pi-agent-browse-extension.zip` route does not require a login. Only this artifact is public: download metadata, Console, pairing, status and revocation require authentication. The archive contains no API token, pairing code or browser credentials. The extension's stable Chrome ID is `heidjicdbehhgidkhaofophkickmhijo`; its origin is checked, but the ID itself is not an authentication credential.
 
-The script uses the pinned Git object, not any uncommitted files in that checkout. Use a new versioned directory for each release. Share the extension ZIP, the matching relay ZIP for the user's OS and architecture, `SHA256SUMS` and `BUILD.txt` through an authenticated private release or download area. A secret URL alone is shareable by anyone who receives it. Do not include relay state, tokens or pairing codes in release artifacts. This build does not require the Chrome Web Store or the upstream installer.
+The ZIP is tracked at `assets/browser-downloads/pi-agent-browse-extension.zip` and ships in Git and npm installations. No public origin is necessary for local operation. A loopback download link only works on the computer serving it.
 
-## Bundle with a private pi-feats distribution
+## Local: Pi and Chrome on the same computer
 
-In a private `pi-feats` checkout, set `"private": true` in `package.json` to prevent accidental npm publication. Stage one or more verified platform builds before packaging:
+Install Pi and the package on the Chrome computer, using the normal installation flow:
 
 ```sh
-node scripts/pi-agent-browse/stage-private.mjs /absolute/path/to/browse-release-linux-x64
+pi install npm:pi-feats
+pi browser install
+pi browser pair
 ```
 
-This creates `assets/pi-agent-browse/`. Include that directory in the private package or commit it only in the private Git distribution. Increment the private package version or publish a new private Git revision for each update. Do not copy the staged files into the public distribution.
+`pair` also installs/starts the relay automatically. In extension Settings, choose **Local relay**, copy the exact address and the short-lived code printed by the CLI, then **Connect**.
 
-On supported platforms, the `pi-feats` lifecycle script installs or updates both components in stable locations and prints the extension path:
+```sh
+pi browser status
+pi browser unpair
+pi browser stop
+```
 
-- Chrome extension: `~/pi-feats/browse/extension`
-- Relay command: `~/pi-feats/browse/relay/pi-agent-browse`
+- `install`: start the package's local Node relay; no sudo, platform-specific native archive, or separate runtime installation is needed.
+- `pair`: start the relay if necessary, then generate an eight-character, five-minute, single-use pairing code. A new code replaces the previous one.
+- `status`: report paired browsers and live connections without exposing tokens.
+- `unpair`: invalidate pending codes, revoke all browser credentials for this profile, and disconnect those browsers.
+- `stop`: stop the local relay through an authenticated loopback request. Credentials remain available for reconnection.
 
-No separate download is needed. Identical files are left untouched. On a bundled relay update, the installer restarts a running relay through its authenticated local command; missing relays are started on first use. The installer does not enable Chrome Developer mode, load the extension, or pair the browser on the user's behalf. If already loaded, reload the extension after an update, using the same directory and pairing. The public variant bundles only the downloadable extension ZIP and skips installation of the native relay. A private build with no relay for the current platform reports that limitation.
+The Node relay uses the same Node >=22 runtime and package dependencies as Pi. Linux has been tested locally; macOS and Windows use the same implementation but still require platform smoke tests. Its source remains in the shared root package, never in a profile's `node_modules` or extension directory. Local state lives in `<profile workspace>/browser-local/`, with private files. The default relay listens on `127.0.0.1:20087`. Named profiles use deterministic distinct loopback ports; use the exact printed address. If a port is occupied, startup fails and points to the profile's `relay.log`; it does not connect an agent to another profile's relay.
 
-## Download from the pi-feats API
+Named profile commands follow existing Pi conventions:
 
-The tracked `assets/browser-downloads/pi-agent-browse-extension.zip` ships with Git and npm installations. To refresh it, run `scripts/pi-agent-browse/build.mjs` with `--extension-only` and replace the tracked ZIP with the generated archive. Do not add native relay binaries or pairing state to the public package.
+```sh
+pi profile create support
+pi profile support browser install
+pi profile support browser pair
+pi profile support browser status
+```
 
-In **Administrative Settings → Pi Agent Browse**, use **Copy link** to share the full URL or **Download ZIP**. Anyone with the URL can download the bundled extension at `GET /api/browser/pi-agent-browse-extension.zip` without authentication. Only the ZIP is public; the Console and `/api/browser/download-status` still require authentication. The published HTTPS origin must route the download path to either the Pi API or the Console WebUI.
+Stop an older native Pi Agent Browse relay before using the new default relay on port 20087. The legacy native state is not imported; pair once with the new relay. No native binary is downloaded by the public package.
 
-With `PI_PUBLIC_BASE_URL` (or `api.publicBaseUrl`) set to a public HTTPS origin, the download embeds `wss://<host>/api/browser/connect` and permits that destination in the Chrome extension policy. The Settings pairing form defaults to **Remote server**, shows the configured host and also offers **Local relay**. Without a configured public origin, the Console uses its own origin for the download link and serves the local-only ZIP. A loopback Console link works only on that computer. Rebuild old extension archives before staging them; the API returns `503` for incompatible archives or invalid public origins instead of serving a local ZIP as a remote one.
+After updating Pi Agent Browse, `install` or `pair` detects changed relay source and restarts an authenticated existing Node relay while preserving credentials. A relay already running remains on its previous code until that restart. Reload the extension from the same extracted directory after replacing its files.
 
-The ZIP contains no relay, API token or pairing credentials. **Remote relay transport and profile-bound pairing are not implemented yet.** The configured URL is the intended browser WebSocket endpoint, not an active relay route. Local pairing remains available.
+## Remote: Pi on another server
 
-## Install and pair
+The Chrome computer only needs the extension, not Pi or a native/local relay. The extension initiates an outbound WSS connection to the Pi API.
 
-1. With a bundled private `pi-feats` installation, use the stable paths above. For a standalone installation, verify the archive checksums against the authenticated download source, then extract the relay and add its directory to `PATH` or use the absolute executable path. Keep both relay files together. The agent needs access to those files, the isolated relay state directory and loopback if it runs in a sandbox. The supported starting point is a local Pi session; per-profile sandbox access is not configured by this package.
-2. Use the bundled stable path, or extract the standalone extension ZIP into a stable path. In the intended Chrome profile, open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, then select the directory containing `manifest.json`. Use a profile without personal sessions for initial evaluation.
-3. Run `pi-agent-browse pair`. In the extension's **Settings**, choose **Pair with a code** and enter the one-time code. Use `127.0.0.1:20087` if the form asks for the relay address. `pi-agent-browse status` verifies the connection. A first-time installation does not reuse the original OpenCode Browse pairing.
-4. Ask Pi to use **Pi Agent Browse** explicitly. The packaged skill uses the local CLI. MCP-capable clients can alternatively connect via stdio with `pi-agent-browse mcp`. No changes are required to the existing Pi Browser Harness, Steel or external CDP configuration.
+1. Configure `PI_PUBLIC_BASE_URL` (or `api.publicBaseUrl`) to a public HTTPS origin, without a path, query or credentials.
+2. Route `/api/browser/pi-agent-browse-extension.zip` to the Pi API or the Console's fixed artifact proxy. Route WebSocket upgrades for `/api/browser/connect` **to the Pi API**. The Console's generic HTTP API proxy does not proxy WebSockets. Use a trusted TLS reverse proxy; do not expose the loopback local relay.
+3. Download the extension ZIP from this server. The API embeds only the public WSS endpoint and updates the extension CSP. An old/local-only archive must be re-downloaded and reloaded to gain the configured remote address.
+4. In Console → **Pi Agent Browse → Connect Chrome → Pi on another server**, select the Pi Profile and generate a code.
+5. On the Chrome computer, choose **Remote server**, check the displayed server address, paste the code and **Connect**.
+6. Console shows connected/disconnected browsers. Use **Revoke browser access** to invalidate that profile's credentials and disconnect it immediately.
 
-The listener binds only to loopback. The relay launcher disables the upstream updater and keeps state under `${XDG_STATE_HOME:-$HOME/.local/state}/pi-agent-browse`. The extension still needs broad browser permissions to operate authorized tabs. Page data can reach the configured model provider through the agent; local transport does not guarantee local inference.
+Only a validated public HTTPS origin enables remote code generation; otherwise Console explains that remote pairing is unavailable while local pairing remains usable. A working HTTPS download alone does not prove the reverse proxy supports WebSocket upgrades.
 
-## Update or remove
+One browser identity can pair with one profile on the same remote endpoint. Revoke its previous profile pairing before moving it to another profile. The extension switches between endpoints; it does not maintain simultaneous local and remote connections.
 
-Replace the extension files at the same installation path and reload the extension at `chrome://extensions`. Stop the previous local relay before replacing its executable so that the next invocation starts the matching build. Keep pairing state unless you intend to re-pair. To remove access, revoke the browser with `pi-agent-browse pair --revoke <browser-id>` and remove the extension from Chrome.
+## Authentication, isolation and agent access
+
+The server reuses the upstream protocol-3 handshake: short-code PBKDF2 material, ephemeral P-256 ECDH, HMAC transcript proofs, a masked per-browser token, and fresh nonces on reconnection. The branded derivative additionally binds remote proofs and session keys to the complete configured WSS endpoint, rather than only its port; local handshake compatibility remains unchanged. Browser tokens are independent of administrative API credentials. Codes expire after five minutes and are consumed atomically after a matching proof. Pending codes are memory-only and disappear on restart. Failed handshakes are bounded by per-peer rate limits, message/queue limits, a connection limit and a handshake timeout. A shared reverse proxy shares its peer budget; untrusted forwarded headers are not used as identity.
+
+Remote browser credentials persist in each workspace's `browser/credentials.json`. A control-plane key in the default runtime's `browser/signing.key` signs profile association; a sandboxed profile cannot forge another profile's credential record by editing its own file. Linux credential I/O pins the workspace subdirectory and refuses symlinks. The broker owns live connections; named profiles receive only a random, in-memory worker capability and the loopback API endpoint. Worker environment forwarding preserves this dedicated capability through Nono without exposing the administrative API token, disabling the sandbox or granting write access to runtime code. Worker capabilities are regenerated on API startup. A worker capability cannot generate pairing codes, revoke pairings, or select another profile.
+
+The `pi_browser` tool supports status, tab listing, background navigation, accessibility snapshots, reference-based click/fill, keyboard input, scrolling, bounded DOM evaluation, screenshots and closing agent-created tabs. It only operates tabs created by its profile during the current browser connection; existing personal tabs are not automatically adopted, and tabs from an old connection are not reclaimed after reconnect. Use a fresh `snapshot` after a navigation or re-render. For DOM data, prefer bounded `evaluate` results; screenshots are for visual verification. The tool does not replace the existing `browser_*` CDP/Steel tools or silently switch their selected connection.
+
+The extension still requires broad browser permissions. Page data can reach the configured model provider through the agent; local transport does not imply local inference. Authentication prompts, CAPTCHAs and sensitive confirmations require user participation. Pair only browsers and profiles intended for the task.
+
+## Extension builds and legacy native distribution
+
+To rebuild the public ZIP, use Node, Git, Bun, ImageMagick (`convert` or `IMAGEMAGICK=magick`), `tar` and `zip`:
+
+```sh
+node scripts/pi-agent-browse/build.mjs /absolute/path/to/browse-checkout /absolute/path/to/new-output --extension-only
+```
+
+The build exports the pinned Git object, not checkout modifications. Verify the generated ZIP, then replace the tracked public archive. Keep the MIT notice. No tokens, profile state or pairing codes belong in the archive.
+
+The older native relay build is still available for standalone upstream-compatible CLI/MCP use: omit `--extension-only` and provide Rust/Cargo on the target platform. It is not required by `pi browser` or the remote flow. Private native bundles can still use `stage-private.mjs` with a package marked `"private": true`, installing managed files under `~/pi-feats/browse/{extension,relay}`. Do not stage native private assets into the public package. Legacy pairing and state remain separate from the Node relay.
+
+## Validation and current limits
+
+Automated local tests cover real WebSocket handshake exchanges with an extension-protocol client, profile-bound command routing, persistence, reconnect, revocation, code rejection, worker authorization, signed credential files, and an isolated local daemon/CLI lifecycle. They do not substitute for a Chrome end-to-end test across two machines and a deployed TLS reverse proxy. No remote server is modified or tested without explicit authorization.
+
+Remote API workers automatically receive their profile-bound browser capability. Standalone CLI/TUI sessions use their own local relay; they do not automatically borrow a remote server's administrative credentials. The relay is started on demand, not registered as an OS service or automatically started at login.

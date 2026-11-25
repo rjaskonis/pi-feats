@@ -26,14 +26,14 @@ test("direct API launch preserves the workspace boundary and migrates only named
   await writeFile(join(root, "settings.json"), JSON.stringify({ extensions: [ext], sandbox: true }));
   await writeFile(join(root, "models.json"), "{}");
   await writeFile(join(dir, "settings.json"), JSON.stringify({ sandbox: true, packages: ["npm:legacy"], extensions: ["legacy.ts"], profile: { enabledExtensions: ["legacy"] } }));
-  await writeFile(join(dir, ".env"), "FIXTURE_VALUE=isolated\nPI_APPLICATION_IDENTITY_KEY=injected\nPI_OPENAI_WORKER=unexpected\n");
+  await writeFile(join(dir, ".env"), "FIXTURE_VALUE=isolated\nPI_APPLICATION_IDENTITY_KEY=injected\nPI_OPENAI_WORKER=unexpected\nPI_BROWSER_TOKEN=profile-cannot-override\n");
   await mkdir(join(dir, ".runtime"));
   await writeFile(join(dir, ".runtime", "auth.json"), '{"fixture":{"type":"api_key"}}');
   for (const name of ["git", "npm", "extensions", "node_modules"]) await mkdir(join(dir, name));
   const policy = { ...nonoPolicy(dir, entry, { shared: true, profile: false }, [ext]), meta: { name: "test-custom", description: "Administrator-owned policy" } };
   const original = JSON.stringify(policy);
   await writeFile(join(dir, "nono.json"), original);
-  const base = { PATH: process.env.PATH, PI_APPLICATION_SLUG: "inherited", PI_API_WORKER: "1", SSH_AUTH_SOCK: "/tmp/fixture" };
+  const base = { PATH: process.env.PATH, PI_APPLICATION_SLUG: "inherited", PI_API_WORKER: "1", SSH_AUTH_SOCK: "/tmp/fixture", PI_BROWSER_ENDPOINT: "http://127.0.0.1:8767", PI_BROWSER_TOKEN: "profile-scoped-capability" };
   const signal = new AbortController().signal;
   const result = await launchProfileWorkerDirect(root, "support", root, signal, entry, base);
   assert.equal(result.command, "nono");
@@ -44,6 +44,8 @@ test("direct API launch preserves the workspace boundary and migrates only named
   assert.equal(result.env.PI_ACTIVE_PROFILE, "support");
   assert.equal(result.env.PI_CODING_AGENT_SESSION_DIR, join(dir, "sessions"));
   assert.equal(result.env.FIXTURE_VALUE, "isolated");
+  assert.equal(result.env.PI_BROWSER_TOKEN, "profile-scoped-capability");
+  assert.equal(result.env.PI_BROWSER_ENDPOINT, "http://127.0.0.1:8767");
   for (const name of ["PI_APPLICATION_SLUG", "PI_APPLICATION_IDENTITY_KEY", "PI_API_WORKER", "SSH_AUTH_SOCK"]) assert.equal(result.env[name], undefined);
   assert.equal(await readFile(join(dir, "nono.json"), "utf8"), original);
   assert.equal(await readlink(join(dir, "models.json")), join(root, "models.json"));
