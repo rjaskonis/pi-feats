@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { BrowserAction } from "./actions.ts";
+import { browserStatusGuidance } from "./guidance.ts";
 
 export async function browserConnection(agentDir: string, environment: NodeJS.ProcessEnv = process.env) {
   if (environment.PI_BROWSER_ENDPOINT || environment.PI_BROWSER_TOKEN) {
@@ -26,7 +27,17 @@ export async function browserRequest(connection: { endpoint: string; token: stri
   if (!response.ok) throw new Error(data.error ?? `Browser request failed (${response.status})`);
   return data;
 }
-export async function executeBrowserAction(agentDir: string, action: BrowserAction, signal?: AbortSignal) {
-  const connection = await browserConnection(agentDir);
-  return (await browserRequest(connection, "/api/browser/worker/command", action, signal)).result;
+export async function executeBrowserAction(agentDir: string, action: BrowserAction, signal?: AbortSignal, environment: NodeJS.ProcessEnv = process.env) {
+  const mode = environment.PI_BROWSER_ENDPOINT || environment.PI_BROWSER_TOKEN ? "console" : "local";
+  try {
+    const connection = await browserConnection(agentDir, environment);
+    const result = (await browserRequest(connection, "/api/browser/worker/command", action, signal)).result;
+    return action.action === "status" ? browserStatusGuidance(result, mode) : result;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code ?? (error as { cause?: NodeJS.ErrnoException }).cause?.code;
+    if (action.action === "status" && mode === "local" && ["ENOENT", "ECONNREFUSED"].includes(code ?? "")) {
+      return browserStatusGuidance({ browsers: [], pairingPending: false }, mode, false);
+    }
+    throw error;
+  }
 }

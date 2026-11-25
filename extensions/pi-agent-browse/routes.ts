@@ -52,7 +52,8 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
     if (!request.body || typeof request.body !== "object" || typeof request.body.action !== "string") return reply.code(400).send({ error: "A browser action is required" });
     try {
       await options.validateProfile(profile);
-      const result = await browserAction(broker, profile, request.body);
+      const actionResult = await browserAction(broker, profile, request.body);
+      const result = request.body.action === "status" ? { ...(actionResult as object), available: options.available } : actionResult;
       if (JSON.stringify(result)?.length > 8 * 1024 * 1024) return reply.code(413).send({ error: "Browser result too large; return a bounded slice" });
       return { result };
     } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Browser command failed" }); }

@@ -5,12 +5,33 @@ description: Use paired Pi Agent Browse for personal Chrome requests, or guide l
 
 For a generic “use my browser” or “open this in my Chrome” request, prefer **Pi Agent Browse** when available. It uses background tabs after one-time pairing. Honor explicit Browser Harness, CDP or Steel choices instead; follow the browser-harness skill for those methods. Never silently switch providers.
 
-## First-time setup
+## Guided connection: do the technical work, explain only the next user action
 
-Check `pi_browser` with `action: "status"`. If it is not paired, explain the next setup step plainly rather than presenting internal paths as an installed product.
+A request to connect authorizes checking status and generating a temporary local pairing code. It does not authorize installing packages, modifying remote configuration, revoking existing credentials or taking control of an existing personal tab. Reply in the user's language; keep the English labels they will see in Chrome. Do not expose browser IDs, JSON, internal paths or implementation terms such as broker/worker unless troubleshooting requires them.
 
-- **Pi and Chrome on this computer:** download the extension ZIP from Console → Administrative Settings → Pi Agent Browse, extract it to a stable folder, then load it at `chrome://extensions` → Developer mode → Load unpacked. With Pi and `pi-feats` installed on that computer, run `pi browser pair`. It starts the package's Node relay if needed and prints a five-minute single-use code and exact loopback address. In extension Settings choose **Local relay**, enter that address/code and Connect. `pi browser install`, `status`, `unpair` and `stop` are also available. Named profiles use `pi profile <name> browser pair`; never install packages into their workspaces. No upstream installer or separate native binary is required.
-- **Pi on another server:** use that server's Console. Select the intended Pi Profile and generate a code, then paste it into **Remote server** in the extension downloaded from that server. No Pi/local relay installation is required on the Chrome computer. The server must have a public HTTPS origin and `/api/browser/connect` WSS routing. An unavailable status is a real configuration blocker: do not invent a code or claim the download alone proves connectivity.
+1. Check `pi_browser` with `action: "status"`. Read `connectionState` and `setup.mode/nextStep`. A saved browser with `connected: false` is NOT a live connection, and does not prove the extension is installed or ready on this computer. Never say "connected" until a live status check confirms it.
+2. If connected, confirm briefly and perform the requested task. Do not generate a code, explain installation, or ask them to pair again.
+3. If the user asks to connect and no browser is connected, take the appropriate local/Console branch below immediately. Do not merely tell them to "check the extension and let me know", or wait for them to know they need a pairing code. If they only asked for status, report it without creating a code.
+
+### Local connection
+
+When `setup.mode` is `local`, run `pi browser pair` yourself using the available shell in this session's profile context. For an explicitly selected named profile use `pi profile <name> browser pair`; otherwise preserve the current profile environment. The command starts the package's Node relay and generates a five-minute single-use code without revoking existing browser credentials. Do not delegate the terminal command to the user when you can run it. Never guess an address, code or expiry; use the actual command result. If you cannot run it or startup fails, state that specific blocker instead of pretending a code exists.
+
+Show a short, complete checklist, using the returned address and code:
+
+1. Open Pi Agent Browse settings in Chrome. Offer the `setup.extensionSettingsUrl` to copy into the Chrome address bar, or `chrome://extensions` → **Pi Agent Browse** → **Details** → **Extension options**. Clicking the toolbar icon is NOT a reliable way to open settings: it may authorize the current personal tab.
+2. Click **Pair with a code** if shown; otherwise expand **advanced** ("relay address, pairing code, diagnostics"). Under **Connect to**, choose **Local relay**.
+3. Give separate clearly labeled **Local relay address** and **Pairing code** values, then say to click **Connect**. Explain in one sentence that the code expires in five minutes and only the latest generated code is valid. Do not describe a loopback address as a public website.
+
+Do not assume the user knows where settings or the pairing form are. If they say the extension is already installed, skip download and installation instructions. If it is not installed, give only the missing installation steps: download ZIP from Console → Administrative Settings → Pi Agent Browse, extract to a stable folder, then `chrome://extensions` → Developer mode → **Load unpacked**, selecting the folder containing `manifest.json`. Generate the code after installation if the initial code would expire. Do not claim a standard folder is installed without checking.
+
+After presenting the checklist, offer to verify the connection. Recheck status once after a short bounded wait if execution can continue; otherwise check immediately when the user responds. Never end with only "tell me when connected" without verification. Do not poll indefinitely, regenerate codes while waiting, repeat installation instructions, or open an unrelated task. If still disconnected, explain the one next check: exact address from this code generation, correct Local relay mode, or the error shown in the extension. Ask for that error or a screenshot rather than cycling through generic advice. Do not claim there is a **Reconnect** button unless it is actually shown.
+
+### Console / server connection
+
+When `setup.mode` is `console`, local shell commands run on the server, NOT the user's Chrome computer. Never run `pi browser pair` there to supply a supposed local code. Guide the user to **Console → Administrative Settings → Pi Agent Browse → Connect Chrome → Pi on another server**, select this session's Pi Profile, and generate a code. In extension settings, open the pairing form as above, choose **Remote server**, check the server address, paste the code and click **Connect**. If authorized Console access is actually available, perform the permitted steps yourself instead of making the user repeat them. Do not claim Console generation occurred unless its real response was observed; worker capabilities cannot administer pairing.
+
+If `setup.nextStep` is `administrator_setup_required`, explain plainly that the server's secure browser connection must be configured by its administrator. The ZIP alone is not sufficient. Do not switch modes, install a local relay, guess a public URL, or attempt remote configuration. The server requires a public HTTPS origin and WSS routing.
 
 Only the ZIP download is public. Pairing management is authenticated. Never put API credentials in the extension or ask the user to paste administrative API tokens. Do not perform remote installation, configuration, restarts or tests without explicit authorization. Do not present a server's loopback endpoint or filesystem paths as the user's local computer.
 
