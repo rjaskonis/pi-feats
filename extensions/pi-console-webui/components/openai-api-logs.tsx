@@ -1,14 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Filter, Loader2, RotateCw } from "lucide-react";
+import { Copy, Filter, Loader2, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
+import { useToast } from "@/components/toast";
 import { FlowArrow, JsonView, localDateTime } from "@/components/application-logs";
 import type { CallStageId, OpenAICallDetail, OpenAICallLogPage, OpenAICallSummary } from "../../lib/openai-call-log-types";
 
 const base = "/api/pi/openai-api-logs";
 const endpoints = { "/v1/chat/completions": "Chat Completions", "/v1/responses": "Responses" } as const;
+const examples = [
+  { endpoint: "/v1/chat/completions", body: { model: "default", messages: [{ role: "user", content: "Say hello." }] } },
+  { endpoint: "/v1/responses", body: { model: "default", input: "Say hello." } },
+] as const;
 const outcomes = { running: "Running", success: "Success", error: "Error", aborted: "Disconnected" } as const;
 const outcomeColors = { running: "text-sky-700", success: "text-emerald-700", error: "text-red-700", aborted: "text-amber-700" };
 const stages = {
@@ -30,6 +35,32 @@ const toggle = (values: string[], value: string) => values.includes(value) ? val
 const hour = 60 * 60 * 1000;
 const quietButton = "bg-zinc-100 text-zinc-700 hover:bg-zinc-200";
 const duration = (ms: number) => `${ms.toLocaleString()} ms`;
+
+function ApiQuickStart() {
+  const { toast } = useToast();
+  const copy = async ({ endpoint, body }: typeof examples[number]) => {
+    const command = [
+      `curl --request POST '${window.location.origin}/api/pi${endpoint}'`,
+      '  --header "Authorization: Bearer $PI_API_TOKEN"',
+      "  --header 'Content-Type: application/json'",
+      `  --data '${JSON.stringify(body)}'`,
+    ].join(" \\\n");
+    try { await navigator.clipboard.writeText(command); toast(`${endpoints[endpoint]} cURL copied.`); }
+    catch { toast("Unable to copy to the clipboard.", "error"); }
+  };
+  return <Card className="space-y-3">
+    <div>
+      <CardTitle>OpenAI-compatible endpoints</CardTitle>
+      <p className="mt-1 text-sm text-zinc-500">Use Chat Completions or Responses to call Pi directly, without an Application. Set <code>model</code> to the Pi profile name and set <code>PI_API_TOKEN</code> in your shell before running an example.</p>
+    </div>
+    <div className="grid gap-2 sm:grid-cols-2">
+      {examples.map((example) => <div key={example.endpoint} className="flex items-center justify-between gap-3 rounded-lg border border-zinc-200 px-3 py-2">
+        <div className="min-w-0 text-sm"><p className="font-medium">{endpoints[example.endpoint]}</p><code className="break-all text-xs text-zinc-500">POST /api/pi{example.endpoint}</code></div>
+        <Button type="button" className={`${quietButton} shrink-0`} title={`Copy ${endpoints[example.endpoint]} cURL example`} aria-label={`Copy ${endpoints[example.endpoint]} cURL example`} onClick={() => void copy(example)}><Copy size={17}/></Button>
+      </div>)}
+    </div>
+  </Card>;
+}
 
 // Coalesce bursts without aborting a request already in flight. Only a change
 // of filter, page or selection cancels a fetch.
@@ -138,6 +169,7 @@ export function OpenAIApiLogs({ profiles }: { profiles: Array<{ name: string }> 
       <div className="flex items-center gap-3"><span role="status" className={`text-xs font-medium ${connected ? "text-emerald-700" : "text-amber-700"}`}>{connected ? "Live" : "Connecting to live updates…"}</span>
         <Button className={quietButton} onClick={() => { refreshList.current(); refreshDetail.current(); }} title="Refresh logs"><RotateCw size={16}/></Button></div>
     </div>
+    <ApiQuickStart/>
     <Card className="space-y-4">
       <div className="flex items-center gap-2 text-sm font-semibold"><Filter size={16} className="text-emerald-600"/>Log filters</div>
       <div className="flex flex-wrap items-center gap-2">
