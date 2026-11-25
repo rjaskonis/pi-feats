@@ -1,6 +1,7 @@
 /** OpenAI-compatible HTTP endpoints; protocol framing is independent of Pi execution. */
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
-import type { OpenAICallLog } from "../lib/openai-call-log-types.ts";
+import { OpenAICallCapture } from "./openai-call-capture.ts";
+import type { CallStage, OpenAICallDetail, OpenAICallLog } from "../lib/openai-call-log-types.ts";
 import { randomUUID } from "node:crypto";
 import { handleClientToolResponse } from "./openai-client-routes.ts";
 import { LATENCY_ID_HEADER, LATENCY_TRACE_HEADER, latencyMs, type LatencyRecord, type LatencyTrace } from "./latency-trace.ts";
@@ -15,20 +16,17 @@ export type CompatibilityBackend = {
   validateProfile(profile: string): Promise<void>;
   execute(request: CompletionRequest, emit: (event: ExecutionEvent) => Promise<void>, signal: AbortSignal, trace?: LatencyTrace): Promise<CompletionResult>;
   logLatency?(record: LatencyRecord): void;
-  logCall?(record: OpenAICallLog): void;
+  logCall?(record: OpenAICallLog, stages: CallStage[]): void;
+  updateCall?(detail: OpenAICallDetail): void;
 };
-
-type CallMetadata = Pick<OpenAICallLog, "id" | "profile" | "stream" | "errorCode">;
 const responseId = (protocol: "chat" | "responses") => `${protocol === "chat" ? "chatcmpl" : "resp"}_${randomUUID().replaceAll("-", "")}`;
 
-function captureCall(reply: FastifyReply, endpoint: OpenAICallLog["endpoint"], call: CallMetadata, record: (entry: OpenAICallLog) => void) {
-  const receivedAt = new Date().toISOString(), started = performance.now();
+function captureCall(reply: FastifyReply, call: OpenAICallCapture, record: NonNullable<CompatibilityBackend["logCall"]>) {
   const recordOutcome = (completed: boolean) => {
     reply.raw.off("finish", finish);
     reply.raw.off("close", close);
     const httpStatus = reply.raw.headersSent ? reply.raw.statusCode : null;
-    const outcome = !completed ? "aborted" : call.errorCode || (httpStatus ?? 500) >= 400 ? "error" : "success";
-    try { record({ ...call, receivedAt, endpoint, httpStatus, outcome, durationMs: Math.round(performance.now() - started) }); }
+    try { record(call.finish(httpStatus, completed), call.detail()); }
     catch { /* Logging must not change the response. */ }
   };
   const finish = () => recordOutcome(true);
@@ -57,7 +55,7 @@ export async function writeSse(reply: FastifyReply, frame: string, signal: Abort
 /** Register an encapsulated /v1 API with its own OpenAI error envelope. */
 export function registerCompatibilityRoutes(server: FastifyInstance, backend: CompatibilityBackend): void {
   server.register(async (routes) => {
-    const calls = new WeakMap<FastifyRequest, CallMetadata>();
+    const calls = new WeakMap<FastifyRequest, OpenAICallCapture>();
     routes.addHook("onRequest", async (request, reply) => {
       if (!backend.authorized(request.headers.authorization)) return reply.code(401).send(errorBody(new CompatibilityError("Invalid API key.", null, 401, "invalid_api_key")));
     });
@@ -65,7 +63,7 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
       const details = error as { code?: string; statusCode?: number };
       const known = error instanceof CompatibilityError ? error : details.code === "FST_ERR_CTP_BODY_TOO_LARGE" ? new CompatibilityError("Request body is too large.", null, 413, "request_too_large") : details.statusCode === 400 || details.statusCode === 415 ? new CompatibilityError("Invalid JSON request body or content type.", null, details.statusCode) : error;
       const body = errorBody(known), call = calls.get(request);
-      if (call) call.errorCode = body.error.code;
+      call?.fail(body.error.code, body);
       reply.code(known instanceof CompatibilityError ? known.status : 500).send(body);
     });
     routes.get("/models", async () => ({ object: "list", data: (await backend.profiles()).map(({ name }) => ({ id: name, object: "model", created: 0, owned_by: "pi" })) }));
@@ -73,20 +71,24 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
       const route = protocol === "chat" ? "/chat/completions" : "/responses";
       routes.post(route, { bodyLimit: OPENAI_BODY_BYTES, onRequest: async (request, reply) => {
         if (!backend.logCall) return;
-        const call: CallMetadata = { id: responseId(protocol), profile: null, stream: null, errorCode: null };
+        const call = new OpenAICallCapture(responseId(protocol), `/v1${route}`, backend.updateCall);
         calls.set(request, call);
-        captureCall(reply, `/v1${route}`, call, backend.logCall);
+        captureCall(reply, call, backend.logCall);
       } }, async (request, reply) => {
-        const call = calls.get(request), id = call?.id ?? responseId(protocol);
+        const call = calls.get(request), id = call?.call.id ?? responseId(protocol);
         if (call && request.body && typeof request.body === "object") {
           const { model, stream } = request.body as { model?: unknown; stream?: unknown };
-          if (typeof model === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(model)) call.profile = model;
-          call.stream = stream === undefined ? false : typeof stream === "boolean" ? stream : null;
+          if (typeof model === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(model)) call.call.profile = model;
+          call.call.stream = stream === undefined ? false : typeof stream === "boolean" ? stream : null;
+        }
+        if (call) {
+          call.stage("request", request.body);
+          call.stage("validation", { profile: call.call.profile, streaming: call.call.stream });
         }
         let legacy: CompletionRequest | undefined;
         if (protocol === "responses" && backend.clientTools) {
           const selected = await backend.clientTools.select(request.body);
-          if (selected.client) return handleClientToolResponse(request, reply, selected.client, backend.clientTools, writeSse, id, (code) => { if (call) call.errorCode = code; });
+          if (selected.client) return handleClientToolResponse(request, reply, selected.client, backend.clientTools, writeSse, id, call);
           legacy = selected.legacy;
         }
         const input = legacy ?? normalizeRequest(request.body, protocol);
@@ -127,28 +129,39 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
             partial += value.delta;
             if (protocol === "chat") await data(chunk({ content: value.delta }));
             else await event("response.output_text.delta", { ...position, delta: value.delta, logprobs: [] });
+            call?.append(value.delta);
           }
         };
         try {
           controller.signal.throwIfAborted();
           await backend.validateProfile(input.profile);
+          call?.stage("execution");
           const result = await backend.execute(input, emit, controller.signal, trace);
+          const chatResponse = () => ({ id, object: "chat.completion", created, model: input.profile, choices: [{ index: 0, message: { role: "assistant", content: result.text, refusal: null }, logprobs: null, finish_reason: result.finishReason }] });
+          const resultItem = () => outputMessage(itemId, result.text, result.finishReason === "length" ? "incomplete" : "completed");
           if (!input.stream) {
             outcome = "success";
-            if (protocol === "chat") return { id, object: "chat.completion", created, model: input.profile, choices: [{ index: 0, message: { role: "assistant", content: result.text, refusal: null }, logprobs: null, finish_reason: result.finishReason }], usage: chatUsage(result.usage) };
-            return responseObject(input, id, created, [outputMessage(itemId, result.text, result.finishReason === "length" ? "incomplete" : "completed")], result);
+            const response = protocol === "chat" ? { ...chatResponse(), usage: chatUsage(result.usage) } : responseObject(input, id, created, [resultItem()], result);
+            call?.stage("response", response);
+            return response;
           }
           if (!streaming || result.text !== partial) throw new CompatibilityError("Pi stream did not match the completed output.", null, 502, "invalid_stream");
+          call?.stage("response");
           if (protocol === "chat") {
             await data(chunk({}, result.finishReason));
             if (input.includeUsage) await data({ id, object: "chat.completion.chunk", created, model: input.profile, choices: [], usage: chatUsage(result.usage) });
             await data("[DONE]");
+            call?.stage("response", { response: { ...chatResponse(), ...(input.includeUsage ? { usage: chatUsage(result.usage) } : {}) }, terminalEvent: "[DONE]" });
           } else {
-            const item = outputMessage(itemId, result.text, result.finishReason === "length" ? "incomplete" : "completed");
+            const item = resultItem();
             await event("response.output_text.done", { ...position, text: result.text, logprobs: [] });
             await event("response.content_part.done", { ...position, part: item.content[0] });
             await event("response.output_item.done", { output_index: 0, item });
-            await event(result.finishReason === "length" ? "response.incomplete" : "response.completed", { response: responseObject(input, id, created, [item], result) });
+            const type = result.finishReason === "length" ? "response.incomplete" : "response.completed";
+            const response = responseObject(input, id, created, [item], result);
+            const terminalEvent = { type, sequence_number: sequence };
+            await event(type, { response });
+            call?.stage("response", { response, terminalEvent });
           }
           reply.raw.end();
           outcome = "success";
@@ -156,7 +169,7 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
           if (controller.signal.aborted || reply.raw.destroyed) return;
           if (!streaming) throw error;
           const failure = errorBody(error).error;
-          if (call) call.errorCode = failure.code;
+          call?.fail(failure.code, failure, protocol === "chat" ? "[DONE]" : { type: "response.failed", sequence_number: sequence });
           try {
             if (protocol === "chat") { await data({ error: failure }); await data("[DONE]"); }
             else await event("response.failed", { response: { ...responseObject(input, id, created, [outputMessage(itemId, partial, "incomplete")]), status: "failed", error: failure } });

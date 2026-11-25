@@ -19,6 +19,7 @@ import { ApplicationStore, type ApplicationRecord } from "./application-store.ts
 import { buildStatelessPrompt } from "./stateless-prompt.ts";
 import { registerCompatibilityRoutes } from "./openai-routes.ts";
 import { OpenAICallLogs } from "./openai-call-logs.ts";
+import { registerOpenAICallLogRoutes } from "./openai-call-log-routes.ts";
 import { registerBrowserDownload } from "./browser-download.ts";
 import { LATENCY_ID_HEADER, LATENCY_TRACE_HEADER } from "./latency-trace.ts";
 import { CompatibilityError } from "./openai-contract.ts";
@@ -528,18 +529,11 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     server.addHook("preClose", async () => { await clientTools.close(); await api.workers.close(); });
     const openAICallLogs = new OpenAICallLogs(join(options.agentDir, "openai-api-logs", "calls.sqlite"));
     server.addHook("onClose", async () => { openAICallLogs.close(); });
-    server.get<{ Querystring: { endpoint?: string; profile?: string; outcome?: string; before?: string } }>("/api/openai-api-logs", async (request, reply) => {
-      if (!guard(request, reply)) return;
-      const { endpoint, profile, outcome, before } = request.query;
-      if ([endpoint, profile, outcome, before].some((value) => value !== undefined && typeof value !== "string")) {
-        return apiError(reply, 400, "INVALID_FILTER", "Log filters must be single values.");
-      }
-      reply.header("cache-control", "no-store");
-      return openAICallLogs.list({ endpoint, profile, outcome, before });
-    });
+    registerOpenAICallLogRoutes(server, openAICallLogs, guard);
     registerCompatibilityRoutes(server, {
       clientTools,
-      logCall: (entry) => openAICallLogs.record(entry),
+      logCall: (entry, stages) => openAICallLogs.record(entry, stages),
+      updateCall: (detail) => openAICallLogs.update(detail),
       authorized: (authorization) => authorized({ headers: { authorization } } as FastifyRequest, config.apiToken),
       profiles: () => api.profiles.list(),
       validateProfile: async (profile) => {

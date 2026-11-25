@@ -4,9 +4,10 @@ import type { FastifyReply, FastifyRequest } from "fastify";
 import { errorBody, outputMessage, responseObject, type ExecutionEvent } from "./openai-contract.ts";
 import { clientError, type ClientRequest, type ClientLeg } from "./openai-client-contract.ts";
 import type { ClientToolsRuntime } from "./openai-client-runtime.ts";
+import type { OpenAICallCapture } from "./openai-call-capture.ts";
 
 type SseWriter = (reply: FastifyReply, frame: string, signal: AbortSignal) => Promise<void>;
-export async function handleClientToolResponse(request: FastifyRequest, reply: FastifyReply, input: ClientRequest, runtime: ClientToolsRuntime, write: SseWriter, id: string, markError: (code: string) => void): Promise<FastifyReply> {
+export async function handleClientToolResponse(request: FastifyRequest, reply: FastifyReply, input: ClientRequest, runtime: ClientToolsRuntime, write: SseWriter, id: string, capture?: OpenAICallCapture): Promise<FastifyReply> {
   const controller = new AbortController();
   let finished = false;
   const disconnected = () => { if (!finished) { controller.abort(); runtime.cancel(input); } cleanup(); };
@@ -38,15 +39,22 @@ export async function handleClientToolResponse(request: FastifyRequest, reply: F
         await event("response.content_part.added", { ...position, part: { type: "output_text", text: "", annotations: [], logprobs: [] } });
       }
       await event("response.output_text.delta", { ...position, delta: value.delta, logprobs: [] });
+      capture?.append(value.delta);
     }
   };
   try {
+    capture?.stage("execution");
     const leg = await runtime.execute(input, emit, controller.signal);
     if (!ready || partial !== leg.text) throw clientError("invalid_stream", "Pi output does not match the completed stream.", 502);
     const output: unknown[] = [];
     if (leg.text) output.push(outputMessage(messageId, leg.text, leg.finishReason === "length" ? "incomplete" : "completed"));
     output.push(...leg.calls);
-    if (!input.request.stream) { reply.send(response(output, leg)); return reply; }
+    if (!input.request.stream) {
+      const body = response(output, leg);
+      capture?.stage("response", body);
+      reply.send(body); return reply;
+    }
+    capture?.stage("response");
     if (textStarted) {
       const item = output[0] as ReturnType<typeof outputMessage>;
       await event("response.output_text.done", { ...position, text: leg.text, logprobs: [] });
@@ -60,7 +68,10 @@ export async function handleClientToolResponse(request: FastifyRequest, reply: F
       await event("response.function_call_arguments.done", { ...at, arguments: call.arguments });
       await event("response.output_item.done", { output_index, item: call });
     }
-    await event(leg.finishReason === "length" ? "response.incomplete" : "response.completed", { response: response(output, leg) });
+    const type = leg.finishReason === "length" ? "response.incomplete" : "response.completed";
+    const body = response(output, leg), terminalEvent = { type, sequence_number: sequence };
+    await event(type, { response: body });
+    capture?.stage("response", { response: body, terminalEvent });
     reply.raw.end(); return reply;
   } catch (error) {
     if (controller.signal.aborted || reply.raw.destroyed) return reply;
@@ -69,7 +80,7 @@ export async function handleClientToolResponse(request: FastifyRequest, reply: F
     if (streaming) {
       runtime.cancel(input);
       const failure = errorBody(error).error;
-      markError(failure.code);
+      capture?.fail(failure.code, failure, { type: "response.failed", sequence_number: sequence });
       try { await event("response.failed", { response: { ...response(partial ? [outputMessage(messageId, partial, "incomplete")] : []), status: "failed", error: failure } }); reply.raw.end(); }
       catch { controller.abort(); reply.raw.destroy(); }
       return reply;
