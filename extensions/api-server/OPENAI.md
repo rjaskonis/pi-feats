@@ -262,6 +262,12 @@ A model output limit maps to Chat `finish_reason: "length"` and Responses `statu
 
 Errors use `{ "error": { "message", "type", "param", "code" } }`. Statuses include 400 (validation), 401 (API bearer authentication), 403 (client policy), 404 (profile), 409 (invalid/stale client continuation), 413 (bounds), 415 (content type), 424 (provider authentication), 429 (provider usage limits or worker/client-exchange capacity), 500 (server) and 502 (execution). SSE headers are delayed until worker initialization succeeds. After headers, Chat emits an error frame followed by `[DONE]`; Responses emits `response.failed`. Neither emits normal terminal success afterward. With the validated SDK versions, JavaScript `finalResponse()` returns the failed object; Python exposes `response.failed` while `get_final_response()` raises because no completed event arrived. Inspect failure events rather than treating partial text as success. Client errors never include subprocess stderr, provider diagnostics, credentials or prompts. Server diagnostics use safe operation/profile/error codes only.
 
+### Direct Compatible API
+
+In the Console, open **Administrative Settings → Direct Compatible API** to inspect authenticated Chat Completions and Responses calls that reach the Pi API. Filter by endpoint, profile, or outcome, and select a call to see its request ID, HTTP status, duration, delivery mode, and error code. A failed or disconnected stream can have HTTP status `200` if its headers were already sent.
+
+The latest 5,000 finished or disconnected calls are kept across restarts, separately from Application logs. Logs do not store prompts, responses, attachments, headers, or credentials. Requests rejected before reaching the API, failed API-key checks, and `/v1/models` discovery requests are not recorded. The same metadata is available through bearer-authenticated `GET /api/openai-api-logs`.
+
 ### Request-scoped latency diagnostics
 
 For an authenticated `POST /v1/chat/completions` or `POST /v1/responses` using ordinary model execution, add `X-Pi-Trace-Latency: 1`. This works with either JSON or SSE output. The response includes `X-Pi-Trace-Id`, which matches the completion/response ID and the `id` in a single `[pi-api-latency]` JSON line in `~/.pi/agent/api-server.log` when running the managed API. No latency record is emitted without the header. Client-tool exchanges are not covered.

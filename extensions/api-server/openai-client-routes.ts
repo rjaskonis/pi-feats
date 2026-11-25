@@ -6,7 +6,7 @@ import { clientError, type ClientRequest, type ClientLeg } from "./openai-client
 import type { ClientToolsRuntime } from "./openai-client-runtime.ts";
 
 type SseWriter = (reply: FastifyReply, frame: string, signal: AbortSignal) => Promise<void>;
-export async function handleClientToolResponse(request: FastifyRequest, reply: FastifyReply, input: ClientRequest, runtime: ClientToolsRuntime, write: SseWriter): Promise<FastifyReply> {
+export async function handleClientToolResponse(request: FastifyRequest, reply: FastifyReply, input: ClientRequest, runtime: ClientToolsRuntime, write: SseWriter, id: string, markError: (code: string) => void): Promise<FastifyReply> {
   const controller = new AbortController();
   let finished = false;
   const disconnected = () => { if (!finished) { controller.abort(); runtime.cancel(input); } cleanup(); };
@@ -14,7 +14,7 @@ export async function handleClientToolResponse(request: FastifyRequest, reply: F
   const cleanup = () => { reply.raw.off("close", disconnected); reply.raw.off("finish", completed); request.raw.off("aborted", disconnected); };
   reply.raw.once("close", disconnected); reply.raw.once("finish", completed); request.raw.once("aborted", disconnected);
   if (request.raw.aborted || reply.raw.destroyed) disconnected();
-  const id = `resp_${randomUUID().replaceAll("-", "")}`, messageId = `msg_${randomUUID().replaceAll("-", "")}`, created = Math.floor(Date.now() / 1000);
+  const messageId = `msg_${randomUUID().replaceAll("-", "")}`, created = Math.floor(Date.now() / 1000);
   let sequence = 0, streaming = false, textStarted = false, ready = false, partial = "";
   const position = { item_id: messageId, output_index: 0, content_index: 0 };
   const response = (output: unknown[], leg?: ClientLeg) => ({ ...responseObject(input.request, id, created, output, leg ? { text: leg.text, usage: leg.usage, finishReason: leg.finishReason } : undefined), tools: leg?.tools ?? input.tools, parallel_tool_calls: !!leg && leg.calls.length > 1 });
@@ -68,7 +68,9 @@ export async function handleClientToolResponse(request: FastifyRequest, reply: F
     // corrected result. Transport failures must instead cancel its worker.
     if (streaming) {
       runtime.cancel(input);
-      try { await event("response.failed", { response: { ...response(partial ? [outputMessage(messageId, partial, "incomplete")] : []), status: "failed", error: errorBody(error).error } }); reply.raw.end(); }
+      const failure = errorBody(error).error;
+      markError(failure.code);
+      try { await event("response.failed", { response: { ...response(partial ? [outputMessage(messageId, partial, "incomplete")] : []), status: "failed", error: failure } }); reply.raw.end(); }
       catch { controller.abort(); reply.raw.destroy(); }
       return reply;
     }

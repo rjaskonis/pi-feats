@@ -1,5 +1,6 @@
 /** OpenAI-compatible HTTP endpoints; protocol framing is independent of Pi execution. */
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import type { OpenAICallLog } from "../lib/openai-call-log-types.ts";
 import { randomUUID } from "node:crypto";
 import { handleClientToolResponse } from "./openai-client-routes.ts";
 import { LATENCY_ID_HEADER, LATENCY_TRACE_HEADER, latencyMs, type LatencyRecord, type LatencyTrace } from "./latency-trace.ts";
@@ -14,6 +15,26 @@ export type CompatibilityBackend = {
   validateProfile(profile: string): Promise<void>;
   execute(request: CompletionRequest, emit: (event: ExecutionEvent) => Promise<void>, signal: AbortSignal, trace?: LatencyTrace): Promise<CompletionResult>;
   logLatency?(record: LatencyRecord): void;
+  logCall?(record: OpenAICallLog): void;
+};
+
+type CallMetadata = Pick<OpenAICallLog, "id" | "profile" | "stream" | "errorCode">;
+const responseId = (protocol: "chat" | "responses") => `${protocol === "chat" ? "chatcmpl" : "resp"}_${randomUUID().replaceAll("-", "")}`;
+
+function captureCall(reply: FastifyReply, endpoint: OpenAICallLog["endpoint"], call: CallMetadata, record: (entry: OpenAICallLog) => void) {
+  const receivedAt = new Date().toISOString(), started = performance.now();
+  const recordOutcome = (completed: boolean) => {
+    reply.raw.off("finish", finish);
+    reply.raw.off("close", close);
+    const httpStatus = reply.raw.headersSent ? reply.raw.statusCode : null;
+    const outcome = !completed ? "aborted" : call.errorCode || (httpStatus ?? 500) >= 400 ? "error" : "success";
+    try { record({ ...call, receivedAt, endpoint, httpStatus, outcome, durationMs: Math.round(performance.now() - started) }); }
+    catch { /* Logging must not change the response. */ }
+  };
+  const finish = () => recordOutcome(true);
+  const close = () => recordOutcome(reply.raw.writableFinished);
+  reply.raw.once("finish", finish);
+  reply.raw.once("close", close);
 };
 
 /** Wait for writable backpressure without leaving close/error listeners behind. */
@@ -36,21 +57,36 @@ export async function writeSse(reply: FastifyReply, frame: string, signal: Abort
 /** Register an encapsulated /v1 API with its own OpenAI error envelope. */
 export function registerCompatibilityRoutes(server: FastifyInstance, backend: CompatibilityBackend): void {
   server.register(async (routes) => {
+    const calls = new WeakMap<FastifyRequest, CallMetadata>();
     routes.addHook("onRequest", async (request, reply) => {
       if (!backend.authorized(request.headers.authorization)) return reply.code(401).send(errorBody(new CompatibilityError("Invalid API key.", null, 401, "invalid_api_key")));
     });
-    routes.setErrorHandler((error, _request, reply) => {
+    routes.setErrorHandler((error, request, reply) => {
       const details = error as { code?: string; statusCode?: number };
       const known = error instanceof CompatibilityError ? error : details.code === "FST_ERR_CTP_BODY_TOO_LARGE" ? new CompatibilityError("Request body is too large.", null, 413, "request_too_large") : details.statusCode === 400 || details.statusCode === 415 ? new CompatibilityError("Invalid JSON request body or content type.", null, details.statusCode) : error;
-      reply.code(known instanceof CompatibilityError ? known.status : 500).send(errorBody(known));
+      const body = errorBody(known), call = calls.get(request);
+      if (call) call.errorCode = body.error.code;
+      reply.code(known instanceof CompatibilityError ? known.status : 500).send(body);
     });
     routes.get("/models", async () => ({ object: "list", data: (await backend.profiles()).map(({ name }) => ({ id: name, object: "model", created: 0, owned_by: "pi" })) }));
     for (const protocol of ["chat", "responses"] as const) {
-      routes.post(protocol === "chat" ? "/chat/completions" : "/responses", { bodyLimit: OPENAI_BODY_BYTES }, async (request, reply) => {
+      const route = protocol === "chat" ? "/chat/completions" : "/responses";
+      routes.post(route, { bodyLimit: OPENAI_BODY_BYTES, onRequest: async (request, reply) => {
+        if (!backend.logCall) return;
+        const call: CallMetadata = { id: responseId(protocol), profile: null, stream: null, errorCode: null };
+        calls.set(request, call);
+        captureCall(reply, `/v1${route}`, call, backend.logCall);
+      } }, async (request, reply) => {
+        const call = calls.get(request), id = call?.id ?? responseId(protocol);
+        if (call && request.body && typeof request.body === "object") {
+          const { model, stream } = request.body as { model?: unknown; stream?: unknown };
+          if (typeof model === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(model)) call.profile = model;
+          call.stream = stream === undefined ? false : typeof stream === "boolean" ? stream : null;
+        }
         let legacy: CompletionRequest | undefined;
         if (protocol === "responses" && backend.clientTools) {
           const selected = await backend.clientTools.select(request.body);
-          if (selected.client) return handleClientToolResponse(request, reply, selected.client, backend.clientTools, writeSse);
+          if (selected.client) return handleClientToolResponse(request, reply, selected.client, backend.clientTools, writeSse, id, (code) => { if (call) call.errorCode = code; });
           legacy = selected.legacy;
         }
         const input = legacy ?? normalizeRequest(request.body, protocol);
@@ -60,7 +96,6 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
         reply.raw.on("close", disconnected);
         request.raw.on("aborted", disconnected);
         if (request.raw.aborted || reply.raw.destroyed) controller.abort();
-        const id = `${protocol === "chat" ? "chatcmpl" : "resp"}_${randomUUID().replaceAll("-", "")}`;
         const itemId = `msg_${randomUUID().replaceAll("-", "")}`;
         const created = Math.floor(Date.now() / 1000);
         if (trace) reply.header(LATENCY_ID_HEADER, id);
@@ -121,6 +156,7 @@ export function registerCompatibilityRoutes(server: FastifyInstance, backend: Co
           if (controller.signal.aborted || reply.raw.destroyed) return;
           if (!streaming) throw error;
           const failure = errorBody(error).error;
+          if (call) call.errorCode = failure.code;
           try {
             if (protocol === "chat") { await data({ error: failure }); await data("[DONE]"); }
             else await event("response.failed", { response: { ...responseObject(input, id, created, [outputMessage(itemId, partial, "incomplete")]), status: "failed", error: failure } });

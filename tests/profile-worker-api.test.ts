@@ -129,6 +129,19 @@ export default function(pi) {
   const response = await post("/v1/responses", { model: "support", input: "RESPONSES_MARKER", stream: true }, "POST", 200, true);
   const warmId = traceId!; assert.ok(response.includes(warmId));
   assert.ok(response.includes("response.completed")); assert.equal(pid(), firstPid); assert.ok(!wire().includes("CHAT_MARKER"));
+  const logsUrl = `http://127.0.0.1:${address.port}/api/openai-api-logs?profile=support`;
+  assert.equal((await fetch(logsUrl)).status, 401);
+  const listCallLogs = () => fetch(logsUrl, { headers: { authorization: "Bearer fixture-token" } }).then(async (res) => {
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get("cache-control"), "no-store");
+    return (await res.json()).calls;
+  });
+  const apiCalls = await listCallLogs();
+  assert.equal(apiCalls.length, 3);
+  assert.deepEqual(apiCalls.map((call: any) => call.endpoint), ["/v1/responses", "/v1/chat/completions", "/v1/chat/completions"]);
+  assert.equal(apiCalls[0].id, warmId);
+  assert.equal(apiCalls[0].outcome, "success");
+  assert.equal(apiCalls[2].id, coldId);
   if (process.env.PI_OPENAI_TEST_NONO === "1") {
     await post("/v1/responses", { model: "support", input: "READ_OWN_PROBE" });
     assert.ok(wire().includes("OWN_WORKSPACE_DATA")); assert.equal(pid(), firstPid);
@@ -137,7 +150,9 @@ export default function(pi) {
   }
   await post("/api/applications", { name: "Fixture", slug: "fixture", responseMode: "result" }, "POST", 201);
   await post("/api/applications/fixture/identity-mappings/alice", { profile: "support", sessionPrefix: "alice" }, "PUT");
+  const beforeApplication = await listCallLogs();
   const first = await post("/api/message/app/fixture", { identityKey: "alice", message: "STATEFUL_API_MARKER", contextMemory: "APP_DIRECT_SECRET_MARKER" });
+  assert.deepEqual(await listCallLogs(), beforeApplication);
   assert.equal(first.response, "Fixture answer"); assert.equal(pid(), firstPid); assert.ok(wire().includes("IDENTITY=alice;TURNS=1")); assert.ok(wire().includes("APP_DIRECT_SECRET_MARKER"));
   await post("/api/message/app/fixture", { identityKey: "alice", message: "LATER_DIRECT_API_MARKER", contextMemory: "SECOND_APP_MEMORY_SECRET" });
   assert.ok(wire().includes("SECOND_APP_MEMORY_SECRET")); assert.ok(!wire().includes("APP_DIRECT_SECRET_MARKER"));

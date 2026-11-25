@@ -17,6 +17,7 @@ const sectionLabels: Record<string, string> = {
   "sequential-workflows": "Sequential Workflows",
   extensions: "Extensions",
   applications: "Applications",
+  "compatible-api-calls": "Direct Compatible API",
   models: "Models",
   browser: "Pi Agent Browse",
   "api-server": "API Server",
@@ -24,7 +25,7 @@ const sectionLabels: Record<string, string> = {
   "skill-sources": "Skill Sources",
 };
 
-const administrativeSections = new Set(["applications", "models", "browser", "api-server", "pi-console-webui", "skill-sources"]);
+const administrativeSections = new Set(["applications", "compatible-api-calls", "models", "browser", "api-server", "pi-console-webui", "skill-sources"]);
 
 export function sectionMetadata(section: string, profile?: string): Metadata {
   const label = sectionLabels[section] ?? "Pi Console";

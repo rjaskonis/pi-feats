@@ -6,17 +6,19 @@ import { ClientToolsRuntime } from "../extensions/api-server/openai-client-runti
 import { acceptedClientTools, clientToolPolicy, ensureInitialClientRequest, fingerprint, normalizeClientRequest } from "../extensions/api-server/openai-client-contract.ts";
 import { registerCompatibilityRoutes } from "../extensions/api-server/openai-routes.ts";
 import { pngDataUrl } from "./fixtures/openai-attachments.ts";
+import type { OpenAICallLog } from "../extensions/lib/openai-call-log-types.ts";
 
 const settings = () => ({ defaultProvider: "fixture", defaultModel: "fixture", profile: { clientTools: { enabled: true, allowedTools: ["view_file"], timeoutMs: 5000 } } });
 const tool = { type: "function", name: "view_file", description: "Read client file", parameters: { type: "object", properties: { file_id: { type: "string" } }, required: ["file_id"] } };
 const initial = (profile = "support", stream = false) => ({ model: profile, tools: [tool, { type: "function", name: "bash", parameters: { type: "object" } }], input: "Read file", stream });
 async function harness(t: any, mode?: string) {
   let config: any = settings(), launches = 0;
+  const logs: OpenAICallLog[] = [];
   const runtime = new ClientToolsRuntime({ settings: async () => config, maxWorkers: 2, perProfile: 1, launch: () => { launches++; return { command: process.execPath, args: [resolve("tests/fixtures/openai-client-worker.mjs")], cwd: process.cwd(), env: { CLIENT_FIXTURE_MODE: mode } }; } });
   const app = Fastify(); t.after(async () => { await runtime.close(); await app.close(); });
-  registerCompatibilityRoutes(app, { clientTools: runtime, authorized: (header) => header === "Bearer test", profiles: async () => [{ name: "support" }], validateProfile: async () => {}, execute: async (request, emit) => { await emit({ type: "ready" }); await emit({ type: "text", delta: "Legacy unchanged" }); return { text: "Legacy unchanged", finishReason: "stop", usage: { input: 1, output: 1, cached: 0, reasoning: 0 } }; } });
+  registerCompatibilityRoutes(app, { clientTools: runtime, logCall: (entry) => logs.push(entry), authorized: (header) => header === "Bearer test", profiles: async () => [{ name: "support" }], validateProfile: async () => {}, execute: async (request, emit) => { await emit({ type: "ready" }); await emit({ type: "text", delta: "Legacy unchanged" }); return { text: "Legacy unchanged", finishReason: "stop", usage: { input: 1, output: 1, cached: 0, reasoning: 0 } }; } });
   const send = (payload: unknown, authorization = "Bearer test") => app.inject({ method: "POST", url: "/v1/responses", headers: { authorization }, payload: payload as any });
-  return { runtime, app, send, config: (value: any) => { config = value; }, launches: () => launches };
+  return { runtime, app, send, logs, config: (value: any) => { config = value; }, launches: () => launches };
 }
 function continuation(call: any, text = "DOCUMENT_TOKEN", extra: Record<string, unknown> = {}) { return { model: "support", tools: [tool], input: [{ role: "user", content: "Read file" }, call, { type: "function_call_output", call_id: call.call_id, output: [{ type: "input_text", text }], status: "completed", files: [], embeds: [] }], ...extra }; }
 function terminal(payload: string) { return payload.split("\n\n").filter((frame) => frame.includes("data: ")).map((frame) => JSON.parse(frame.split("data: ")[1])).find((event) => event.type === "response.completed")?.response; }
@@ -74,6 +76,9 @@ for (const stream of [false, true]) test(`Responses JSON/SSE delegated calls set
   const final = await h.send(continuation(call, "DOCUMENT_TOKEN", { stream })); assert.equal(final.statusCode, 200, final.payload);
   const answer = stream ? terminal(final.payload) : final.json();
   assert.equal(answer.output[0].content[0].text, "Client document: DOCUMENT_TOKEN");
+  assert.deepEqual(h.logs.map(({ outcome }) => outcome), ["success", "error", "error", "success"]);
+  assert.deepEqual(h.logs.filter(({ outcome }) => outcome === "success").map(({ id, stream: mode }) => [id, mode]), [[result.id, stream], [answer.id, stream]]);
+  assert.doesNotMatch(JSON.stringify(h.logs), /DOCUMENT_TOKEN/);
   assert.equal(result.usage.input_tokens + answer.usage.input_tokens, 30);
   assert.equal(result.usage.output_tokens + answer.usage.output_tokens, 5);
   assert.equal(h.launches(), 1); assert.equal(h.runtime.size, 0);
