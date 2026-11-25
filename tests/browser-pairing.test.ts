@@ -88,9 +88,10 @@ test("profile-bound pairing, command routing, persistence, reconnection and revo
     const denied = await f.server.inject({ method: "POST", url: "/api/browser/worker/command", headers: { authorization: `Bearer ${other}` }, payload: { action: "navigate", url: "https://example.com", profile: "support" } });
     assert.equal(denied.statusCode, 400);
     const command = f.server.inject({ method: "POST", url: "/api/browser/worker/command", headers: { authorization: `Bearer ${support}` }, payload: { action: "navigate", url: "https://example.com" } });
-    for (const [method, result] of [["tabs.create", { tabId: 12 }], ["debugger.attach", {}], ["debugger.sendCommand", {}], ["debugger.sendCommand", {}]] as const) {
+    for (const [method, result] of [["tabs.create", { tabId: 12 }], ["debugger.attach", {}], ["tabs.group", { groupId: 7 }], ["debugger.sendCommand", {}], ["debugger.sendCommand", {}], ["debugger.sendCommand", {}]] as const) {
       const message = await browser.next(); assert.equal(message.method, method);
       if (method === "tabs.create") assert.equal(message.params.active, false);
+      if (method === "tabs.group") assert.deepEqual(message.params, { tabId: 12, sessionId: "Pi: support" });
       browser.socket.send(JSON.stringify({ id: message.id, result }));
     }
     assert.equal((await command).json().result.tabId, 12);

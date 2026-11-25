@@ -24,6 +24,10 @@ export async function browserAction(broker: BrowserBroker, profile: string, inpu
     tabId = tab.tabId;
     connection.tabs.add(tabId);
     await broker.rpc(connection, "debugger.attach", { tabId });
+    // Creation does not group tabs; let the extension apply its grouping/collapse settings.
+    await broker.rpc(connection, "tabs.group", { tabId, sessionId: `Pi: ${profile}` });
+    // Make the page behave as focused without activating its tab or raising the OS window.
+    await cdp(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
     await cdp(tabId, "Page.enable");
     const result = await cdp(tabId, "Page.navigate", { url });
     if (result.errorText) throw new Error(result.errorText);
