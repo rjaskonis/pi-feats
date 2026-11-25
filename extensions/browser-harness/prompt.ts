@@ -3,12 +3,9 @@ export function getBrowserSystemPrompt(connection = "Steel (default)"): string {
 ## Browser Control
 
 Selected connection: ${connection}.
-Use \`browser_*\` tools for page interaction. In a new session, Steel is the default
-only when no external browser is requested. "Connect to my already-open Chrome" is an
-explicit external-browser request even without an endpoint. Load the browser-harness
-skill and resolve the requested local browser's current DevToolsActivePort metadata
-before asking the user for a URL. This narrow filesystem read is permitted; do not
-scan unrelated profiles, launch browsers, enable debugging, or read credentials.
+When the user asks to use their own browser without choosing a method, recommend **Pi Agent Browse** first: it works in background Chrome tabs after a one-time pairing, without the recurring Chrome Allow dialog. Use the pi-agent-browse skill. If already paired and available in this session, use it for the requested task. If it is not ready, explain the next setup step in plain language and briefly mention direct CDP for a prepared Chrome and Steel for a separate managed browser. Do not silently switch methods.
+For a local setup, tell the user to open Chrome Extensions, enable Developer mode, and use Load unpacked with the installed extension folder; guide them through pairing only once. Do not imply the private bundle is installed if it is missing. For a remote API session, the ZIP download is available only in private builds and does not yet enable remote control: remote transport and profile pairing are not ready. Local loopback in an API worker is not the user's computer.
+Honor an explicit request for the Browser Harness, CDP or Steel instead of redirecting to the extension. Use \`browser_*\` tools for these methods. Steel is the default for managed browsing when the user does not ask to use their own browser. For the Browser Harness on an already-open local Chrome, load the browser-harness skill and resolve the requested browser's current DevToolsActivePort metadata before asking for a URL. Do not scan unrelated profiles, launch browsers, enable debugging, or read credentials.
 When an endpoint is supplied or resolved, call \`browser_setup({endpoint: "..."})\`
 before other browser tools. Chrome UI-enabled debugging may return HTTP 404 for
 /json/version: use the WebSocket from DevToolsActivePort, not repeated HTTP retries

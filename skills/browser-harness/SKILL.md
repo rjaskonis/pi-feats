@@ -14,11 +14,7 @@ A person can interact with that same browser; do not assume exclusive control.
 
 ### Interpret intent before choosing a provider
 
-A request such as "connect to my already-open Chrome", "use my local browser", or
-"use Chrome on port 9222" explicitly selects an external browser, even without a URL.
-Do not start Steel, require the user to know CDP terminology, or ask for an endpoint
-before attempting the bounded local resolution below. A port alone is not proof of
-an HTTP discovery endpoint. The user enables debugging; the agent resolves the address.
+If the user asks to use their own Chrome without naming a method, recommend Pi Agent Browse first and follow its skill. If they ask for the Browser Harness or CDP on their Chrome, or provide a debugging endpoint or port such as 9222, select external CDP. Do not start Steel, require the user to know CDP terminology, or ask for an endpoint before attempting the bounded local resolution below. A port alone is not proof of an HTTP discovery endpoint. The user enables debugging; the agent resolves the address.
 
 If an endpoint was supplied, call `browser_setup({endpoint: "..."})` before other
 browser tools. HTTP(S) base URLs resolve through `/json/version`; browser WebSocket

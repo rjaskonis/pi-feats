@@ -18,6 +18,7 @@ import { ApplicationRuntime, type Settings as ApplicationSettings } from "./appl
 import { ApplicationStore, type ApplicationRecord } from "./application-store.ts";
 import { buildStatelessPrompt } from "./stateless-prompt.ts";
 import { registerCompatibilityRoutes } from "./openai-routes.ts";
+import { registerBrowserDownload } from "./browser-download.ts";
 import { LATENCY_ID_HEADER, LATENCY_TRACE_HEADER } from "./latency-trace.ts";
 import { CompatibilityError } from "./openai-contract.ts";
 import { ClientToolsRuntime } from "./openai-client-runtime.ts";
@@ -554,6 +555,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       apiError(reply, 401, "UNAUTHORIZED", "Bearer token is missing or invalid.");
       return false;
     };
+    registerBrowserDownload(server, guard, { publicBaseUrl: config.publicBaseUrl });
     const profileName = (request: FastifyRequest<{ Params: { profile: string } }>) => request.params.profile;
     const pulseTick = async (action: "start" | "stop" | "status") => new Promise<string>((resolveRun, reject) => {
       const pi = piCommand();
