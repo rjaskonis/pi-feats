@@ -7,7 +7,7 @@ export function browserStatusGuidance(status: Status, mode: "local" | "console",
   const connected = status.browsers.some(browser => browser.connected);
   const serverUnavailable = mode === "console" && !relayRunning;
   const state = serverUnavailable ? "server_unavailable" : connected ? "connected" : !relayRunning ? "relay_not_running" : status.browsers.length ? "paired_disconnected" : "not_paired";
-  const nextStep = serverUnavailable ? "check_server_browser_service" : connected ? "ready" : state === "paired_disconnected" ? "check_chrome_connection" : mode === "local" ? "generate_local_pairing_code" : status.available === false ? "administrator_setup_required" : "open_console_pairing";
+  const nextStep = serverUnavailable ? "check_server_browser_service" : connected ? "ready" : state === "paired_disconnected" ? "check_chrome_connection" : mode === "local" ? "generate_local_pairing_code" : status.available === false ? "administrator_setup_required" : "generate_profile_pairing_code";
   return {
     ...status,
     connectionState: state,
@@ -25,7 +25,7 @@ export function browserStatusGuidance(status: Status, mode: "local" | "console",
             ? "Pair Chrome once with the shared relay using pi browser pair from the default local terminal. All local Pi Profiles can use it once connected."
           : status.available === false
             ? "Remote pairing is unavailable. Explain that the server administrator must configure HTTPS/WSS; do not generate a local code in an API worker."
-            : "Guide the user to Console > Administrative Settings > Pi Agent Browse > Connect Chrome > Pi on another server. Generate a code and paste it into the extension's Remote server form. The pairing makes Chrome available to all profiles on that server. Do not generate a loopback pairing code in an API worker.",
+            : "If the user asks to connect Chrome, call pi_browser with action pair. Use the returned ZIP download link, server address, code and expiry. The browser is available only to this Pi Profile. Use Remote server in the extension; do not generate a loopback code.",
     },
   };
 }

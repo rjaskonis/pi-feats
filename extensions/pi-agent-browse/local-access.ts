@@ -1,6 +1,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { link, lstat, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { lstatSync } from "node:fs";
 
 export const localBrowserPort = 20087;
 export const localBrowserDirectory = (root: string) => join(root, "browser-local", "shared");
@@ -33,6 +34,15 @@ export async function localProfileIdentity(root: string, profile: string): Promi
   const path = join(root, "profiles", profile);
   const [directory, settings] = await Promise.all([lstat(path, { bigint: true }), lstat(join(path, "settings.json"))]);
   if (!directory.isDirectory() || !settings.isFile()) throw new Error("Invalid profile workspace");
+  return `${directory.dev}:${directory.ino}:${directory.birthtimeNs || directory.ctimeNs}`;
+}
+
+export function localProfileIdentitySync(root: string, profile: string): string {
+  if (!browserProfileName(profile)) throw new Error("Invalid profile name");
+  if (profile === "default") return "default";
+  const path = join(root, "profiles", profile);
+  const directory = lstatSync(path, { bigint: true });
+  if (!directory.isDirectory() || !lstatSync(join(path, "settings.json")).isFile()) throw new Error("Invalid profile workspace");
   return `${directory.dev}:${directory.ino}:${directory.birthtimeNs || directory.ctimeNs}`;
 }
 

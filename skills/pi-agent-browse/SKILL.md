@@ -7,10 +7,10 @@ For a generic “use my browser” or “open this in my Chrome” request, pref
 
 ## Guided connection: do the technical work, explain only the next user action
 
-A request to connect authorizes checking status and generating a temporary local pairing code from the default local terminal. It does not authorize installing packages, modifying remote configuration, revoking existing credentials or taking control of an existing personal tab. Reply in the user's language; keep the English labels they will see in Chrome. Do not expose browser IDs, JSON, internal paths or implementation terms such as broker/worker unless troubleshooting requires them.
+A request to connect authorizes checking status and generating a temporary pairing code for the current server profile (or from the default terminal for a local relay). It does not authorize installing packages, modifying remote configuration, revoking existing credentials or taking control of an existing personal tab. Reply in the user's language; keep the English labels they will see in Chrome. Do not expose browser IDs, JSON, internal paths or implementation terms such as broker/worker unless troubleshooting requires them.
 
 1. Check `pi_browser` with `action: "status"`. Read `connectionState` and `setup.mode/nextStep`. A saved browser with `connected: false` is NOT a live connection, and does not prove the extension is installed or ready on this computer. Never say "connected" until a live status check confirms it.
-2. If connected, confirm briefly and perform the requested task. Do not generate a code, explain installation, or ask them to pair again.
+2. If the intended browser is connected, confirm briefly and perform the requested task. Do not generate a code unless the user explicitly wants to add a different browser.
 3. If the user asks to connect and no browser is connected, take the appropriate local/Console branch below immediately. Do not merely tell them to "check the extension and let me know", or wait for them to know they need a pairing code. If they only asked for status, report it without creating a code.
 
 ### Local connection
@@ -31,7 +31,16 @@ After Chrome connects, verify the connection and continue the user's task. Do no
 
 ### Console / server connection
 
-When `setup.mode` is `console`, local shell commands run on the server, NOT the user's Chrome computer. Never run `pi browser pair` there to supply a supposed local code. Guide the user to **Console → Administrative Settings → Pi Agent Browse → Connect Chrome → Pi on another server** and generate a code. This shares the Chrome connection with Pi Profiles on that server; there is no profile picker. In extension settings, open the pairing form as above, choose **Remote server**, check the server address, paste the code and click **Connect**. If authorized Console access is actually available, perform the permitted steps yourself instead of making the user repeat them. Do not claim Console generation occurred unless its real response was observed; worker capabilities cannot administer pairing.
+When `setup.mode` is `console`, local shell commands run on the server, NOT the user's Chrome computer. Never run `pi browser pair` there to supply a supposed local code. If the intended browser is unpaired or the user wants to add another computer, call `pi_browser` with `action: "pair"`. The code belongs only to this session's profile; never pass a profile or ask for an admin credential. If a paired browser is offline, check Chrome and the extension connection first; do not regenerate automatically.
+
+Use the returned values, without guessing:
+
+1. Provide `downloadUrl` as a clickable ZIP download link. Unless already installed, tell the user to extract to a stable folder and open `chrome://extensions` → **Developer mode** → **Load unpacked**, selecting the folder containing `manifest.json`.
+2. Open the returned extension settings URL in that Chrome, or use **Details** → **Extension options**. Under **Connect Chrome**, choose **Remote server**.
+3. Give the returned server `address`, one-time `code`, and expiry. Tell the user to paste the code and click **Connect**. If installation takes longer than the expiry, generate a replacement only when needed.
+4. Recheck `status` after the user connects (at most one short bounded check before they reply). Confirm only when connected and then continue the original task.
+
+The administrative Console profile picker is an alternative, not a requirement. If `setup.nextStep` is `check_server_browser_service`, report the service outage; do not generate a local code.
 
 If `setup.nextStep` is `administrator_setup_required`, explain plainly that the server's secure browser connection must be configured by its administrator. The ZIP alone is not sufficient. Do not switch modes, install a local relay, guess a public URL, or attempt remote configuration. The server requires a public HTTPS origin and WSS routing.
 
@@ -40,7 +49,7 @@ Only the ZIP download is public. Pairing management is authenticated. Never put 
 ## Operate
 
 1. Use `pi_browser` with `action: "status"`. If multiple browsers are connected, choose the intended browser ID. This tool receives an already profile-bound capability; never supply another profile, token or endpoint.
-2. Use `action: "navigate", url: "https://…"` without `tabId` to create an inactive tab. Retain its returned browser and numeric tab ID. Include `tabId` for later actions. Only tabs created in this profile's current connection are available. Existing personal tabs and tabs from an old connection are not automatically adopted. Do not claim the tool can take over a personal tab.
+2. Use `action: "navigate", url: "https://…"` without `tabId` (or with `tabId: 0`) to create an inactive tab. Retain its returned browser and numeric tab ID. Include `tabId` for later actions. Only tabs created in this profile's current connection are available. Existing personal tabs and tabs from an old connection are not automatically adopted. Do not claim the tool can take over a personal tab.
 3. Take `action: "snapshot"` before interacting. Use its `b…` refs with `click` or `fill` (`text` is the desired value). Refresh the snapshot after navigation or re-render, or a stale-ref failure. `press` supports Enter, Tab, Escape, Backspace, Delete and arrow keys. Use `scroll` with `deltaY`.
 4. For targeted DOM data use `evaluate` with a bounded `expression`. For lists and chronological answers, verify coverage and actual records rather than treating a truncated snapshot or unrendered data as absent. Use `screenshot` only for visual validation, not routine exploration.
 5. Keep the browser in the background. The relay uses page-level focus emulation, not foreground window activation. Do not call `window.focus()`, activate a tab, raise a window, or switch to CDP/another tool merely to make a page load or respond. Report a background-operation failure rather than stealing focus.

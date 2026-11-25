@@ -23,11 +23,11 @@ test("connected browsers are ready and do not request new pairing", () => {
   }
 });
 
-test("server context always directs to Console instead of a server-local pairing code", () => {
+test("server context directs the agent to pair within its profile", () => {
   const result = browserStatusGuidance({ browsers: [] }, "console");
   assert.equal(result.connectionState, "not_paired");
-  assert.equal(result.setup.nextStep, "open_console_pairing");
-  assert.match(result.setup.instruction, /Do not generate a loopback pairing code/);
+  assert.equal(result.setup.nextStep, "generate_profile_pairing_code");
+  assert.match(result.setup.instruction, /do not generate a loopback code/);
   const unavailable = browserStatusGuidance({ browsers: [], available: false }, "console");
   assert.equal(unavailable.setup.nextStep, "administrator_setup_required");
 });

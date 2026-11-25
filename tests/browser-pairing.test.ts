@@ -15,12 +15,12 @@ import { registerBrowserRoutes, extensionOrigin } from "../extensions/pi-agent-b
 import { ecdhKeyPair, normalizePairingCode, pairingCodeMaterial, pairingProof, pairingSessionKey, randomNonce, sameSecret, sessionProof, unwrapToken } from "../extensions/pi-agent-browse/pairing.ts";
 
 const remoteEndpoint = "wss://pi.example/api/browser/connect";
-async function fixture(available = true, sharedRemote = false) {
+async function fixture(available = true, profileBinding?: (profile: string) => string) {
   const directory = await mkdtemp(join(tmpdir(), "pi-browser-test-"));
   const server = Fastify();
   await server.register(websocket, { options: { maxPayload: 8 * 1024 * 1024 } });
   const broker = await registerBrowserRoutes(server, {
-    file: join(directory, "credentials.json"), port: 443, endpoint: remoteEndpoint, available, sharedRemote,
+    file: join(directory, "credentials.json"), port: 443, endpoint: remoteEndpoint, available, profileBinding, pairingDownloadUrl: "https://pi.example/api/browser/pi-agent-browse-extension.zip",
     guard: (request, reply) => { if (request.headers.authorization === "Bearer admin") return true; reply.code(401).send({ error: "Unauthorized" }); return false; },
     validateProfile: async profile => { if (!["default", "support"].includes(profile)) throw new Error("Unknown profile"); },
   });
@@ -141,29 +141,59 @@ test("shared local daemon pairs once and isolates simultaneous profile tabs with
   }
 });
 
-test("remote Console pairs without a profile and shares Chrome without sharing tabs", { timeout: 15_000 }, async () => {
-  const f = await fixture(true, true);
+test("agent pairing returns setup details and binds Chrome to the caller's profile", { timeout: 15_000 }, async () => {
+  const f = await fixture();
   try {
     const admin = { authorization: "Bearer admin" };
     const support = { authorization: `Bearer ${f.broker.workerToken("support")}` };
     const other = { authorization: `Bearer ${f.broker.workerToken("default")}` };
     const act = (headers: typeof admin, payload: object) => f.server.inject({ method: "POST", url: "/api/browser/worker/command", headers, payload });
-    assert.equal((await f.server.inject({ method: "POST", url: "/api/browser/shared/pair", headers: support })).statusCode, 401);
-    assert.equal((await f.server.inject({ method: "POST", url: "/api/browser/profiles/default/pair", headers: admin })).statusCode, 404);
-    const pair = await f.server.inject({ method: "POST", url: "/api/browser/shared/pair", headers: admin });
+    assert.equal((await f.server.inject({ method: "POST", url: "/api/browser/shared/pair", headers: admin })).statusCode, 404);
+    assert.equal((await act(admin, { action: "pair" })).statusCode, 401);
+    const pair = await act(support, { action: "pair", profile: "default", url: "https://untrusted.example" });
     assert.equal(pair.statusCode, 200);
-    const browser = await connect(f.endpoint, "shared-remote-chrome", { code: pair.json().code });
-    for (const headers of [support, other]) assert.equal((await act(headers, { action: "status" })).json().result.browsers[0].connected, true);
-    const open = act(support, { action: "navigate", url: "https://example.com" });
+    assert.match(pair.headers["cache-control"]!, /no-store/);
+    const { code, mode, address, downloadUrl, extensionSettingsUrl, expiresAt } = pair.json().result;
+    assert.equal(mode, "remote");
+    assert.equal(address, "pi.example");
+    assert.equal(downloadUrl, "https://pi.example/api/browser/pi-agent-browse-extension.zip");
+    assert.equal(extensionSettingsUrl, `${extensionOrigin}/settings.html`);
+    assert.ok(expiresAt > Date.now());
+    const browser = await connect(f.endpoint, "profile-remote-chrome", { code });
+    assert.equal((await act(support, { action: "status" })).json().result.browsers[0].connected, true);
+    assert.deepEqual((await act(other, { action: "status" })).json().result.browsers, []);
+    const open = act(support, { action: "navigate", tabId: 0, url: "https://example.com" });
     for (let i = 0; i < 6; i++) {
       const message = await browser.next();
       browser.socket.send(JSON.stringify({ id: message.id, result: message.method === "tabs.create" ? { tabId: 41 } : {} }));
     }
     assert.equal((await open).json().result.tabId, 41);
-    assert.deepEqual((await act(other, { action: "tabs" })).json().result.tabs, []);
-    assert.match((await act(other, { action: "close", tabId: 41 })).json().error, /not owned/);
-    assert.equal((await f.server.inject({ method: "POST", url: "/api/browser/shared/unpair", headers: admin })).statusCode, 200);
+    assert.match((await act(other, { action: "navigate", browser: "profile-remote-chrome", url: "https://example.com" })).json().error, /No browser connected/);
+    assert.equal((await act(support, { action: "unpair" })).statusCode, 400);
+    assert.equal((await f.server.inject({ method: "POST", url: "/api/browser/profiles/support/unpair", headers: admin })).statusCode, 200);
     assert.deepEqual((await act(support, { action: "status" })).json().result.browsers, []);
+  } finally { await f.close(); }
+});
+
+test("recreating a profile does not inherit its pairing or worker capability", { timeout: 15_000 }, async () => {
+  let generation = 1;
+  const f = await fixture(true, name => `${name}:${generation}`);
+  try {
+    const act = (token: string, action: string) => f.server.inject({ method: "POST", url: "/api/browser/worker/command", headers: { authorization: `Bearer ${token}` }, payload: { action } });
+    const oldToken = f.broker.workerToken("support:1");
+    const oldPair = await act(oldToken, "pair");
+    const oldBrowser = await connect(f.endpoint, "recreated-profile-chrome", { code: oldPair.json().result.code });
+    assert.equal((await act(oldToken, "status")).json().result.browsers.length, 1);
+    generation++;
+    const freshToken = f.broker.workerToken("support:2");
+    assert.equal((await act(oldToken, "pair")).statusCode, 401);
+    assert.deepEqual((await act(freshToken, "status")).json().result.browsers, []);
+    const closed = once(oldBrowser.socket, "close");
+    const newPair = await act(freshToken, "pair");
+    assert.equal(newPair.statusCode, 200);
+    await closed;
+    await connect(f.endpoint, "recreated-profile-chrome", { code: newPair.json().result.code });
+    assert.equal((await act(freshToken, "status")).json().result.browsers[0].connected, true);
   } finally { await f.close(); }
 });
 

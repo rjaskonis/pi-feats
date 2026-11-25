@@ -8,12 +8,13 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
   guard(request: FastifyRequest, reply: FastifyReply): boolean;
   validateProfile(profile: string): Promise<unknown>;
   local?: boolean;
-  sharedRemote?: boolean;
+  pairingDownloadUrl?: string;
+  profileBinding?(profile: string): string;
   sharedLocal?: {
     workerProfile(token: string): Promise<string | undefined>;
   };
 }) {
-  const broker = new BrowserBroker(options.file, options.port, options.endpoint, !!(options.sharedLocal || options.sharedRemote));
+  const broker = new BrowserBroker(options.file, options.port, options.endpoint, !!options.sharedLocal);
   await broker.load();
   server.addHook("preClose", async () => broker.close());
   const attempts = new Map<string, { count: number; until: number }>();
@@ -35,16 +36,21 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
   }, socket => broker.accept(socket));
   for (const action of ["pair", "status", "unpair"] as const) {
     server.route<{ Params: { profile: string } }>({
-      method: action === "status" ? "GET" : "POST", url: options.sharedRemote ? `/api/browser/shared/${action}` : `/api/browser/profiles/:profile/${action}`,
+      method: action === "status" ? "GET" : "POST", url: `/api/browser/profiles/:profile/${action}`,
       handler: async (request, reply) => {
         reply.header("cache-control", "private, no-store");
         if (!options.guard(request, reply)) return;
-        const profile = options.sharedRemote ? "default" : request.params.profile;
-        if (!options.sharedRemote) await options.validateProfile(profile);
-        if (action === "status") return { available: options.available, ...broker.status(profile) };
-        if (action === "unpair") return broker.revoke(profile);
+        const profile = request.params.profile;
+        await options.validateProfile(profile);
+        const binding = options.profileBinding ? options.profileBinding(profile) : profile;
+        if (action === "status") return { available: options.available, ...broker.status(binding) };
+        if (action === "unpair") return broker.revoke(binding);
         if (!options.available) return reply.code(503).send({ error: "Remote pairing requires a public HTTPS origin" });
-        return broker.pair(profile);
+        if (options.profileBinding) {
+          await broker.revokePreviousProfileBindings(profile, binding);
+          if (options.profileBinding(profile) !== binding) return reply.code(409).send({ error: "Profile changed; request a new code" });
+        }
+        return broker.pair(binding);
       },
     });
   }
@@ -52,18 +58,31 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
     reply.header("cache-control", "private, no-store");
     const authorization = request.headers.authorization;
     const token = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
-    const profile = options.sharedLocal ? await options.sharedLocal.workerProfile(token) : broker.workerProfile(token);
-    if (!profile) return reply.code(401).send({ error: "Invalid browser worker capability" });
+    const binding = options.sharedLocal ? await options.sharedLocal.workerProfile(token) : broker.workerProfile(token);
+    if (!binding) return reply.code(401).send({ error: "Invalid browser worker capability" });
     if (!request.body || typeof request.body !== "object" || typeof request.body.action !== "string") return reply.code(400).send({ error: "A browser action is required" });
     try {
+      const profile = options.profileBinding ? binding.split(":", 1)[0] : binding;
       await options.validateProfile(profile);
-      if (options.sharedRemote && broker.workerTokens.get(profile) !== token) return reply.code(401).send({ error: "Invalid browser worker capability" });
-      const shared = options.sharedLocal || options.sharedRemote;
+      if (options.profileBinding && options.profileBinding(profile) !== binding) return reply.code(401).send({ error: "Invalid browser worker capability" });
+      if (!options.sharedLocal && broker.workerTokens.get(binding) !== token) return reply.code(401).send({ error: "Invalid browser worker capability" });
+      if (request.body.action === "pair") {
+        if (options.local || options.sharedLocal || !options.available || !options.endpoint || !options.pairingDownloadUrl) return reply.code(503).send({ error: "Profile pairing requires an available HTTPS server. For local pairing, follow the local setup instructions." });
+        const address = new URL(options.endpoint).host;
+        if (options.profileBinding) await broker.revokePreviousProfileBindings(profile, binding);
+        if (broker.workerTokens.get(binding) !== token || (options.profileBinding && options.profileBinding(profile) !== binding)) return reply.code(401).send({ error: "Invalid browser worker capability" });
+        return { result: { ...await broker.pair(binding), mode: "remote", address, downloadUrl: options.pairingDownloadUrl, extensionSettingsUrl: `${extensionOrigin}/settings.html` } };
+      }
+      const shared = options.sharedLocal;
       const actionResult = await browserAction(shared ? {
         status: () => broker.sharedStatus(token),
         connection: (name, browser) => broker.sharedConnection(name, token, browser),
         rpc: broker.rpc.bind(broker),
-      } : broker, profile, request.body);
+      } : {
+        status: () => broker.status(binding),
+        connection: (_name, browser) => broker.connection(binding, browser),
+        rpc: broker.rpc.bind(broker),
+      }, profile, request.body);
       const result = request.body.action === "status" ? { ...(actionResult as object), available: options.available } : actionResult;
       if (JSON.stringify(result)?.length > 8 * 1024 * 1024) return reply.code(413).send({ error: "Browser result too large; return a bounded slice" });
       return { result };

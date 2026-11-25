@@ -34,13 +34,13 @@ function CopyPairingCode({ code }: { code: string }) {
     <span role="status" className="ml-2 text-sm">{notice}</span>
   </>;
 }
-function RemoteBrowserPairing() {
+function ProfileBrowserPairing({ profile }: { profile: string }) {
   const [status, setStatus] = useState<BrowserStatus>();
   const [code, setCode] = useState<{ code: string; expiresAt: number }>();
   const [now, setNow] = useState(Date.now());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const path = "shared";
+  const path = `profiles/${encodeURIComponent(profile)}`;
   useEffect(() => {
     const controller = new AbortController();
     let fetching = false;
@@ -67,7 +67,7 @@ function RemoteBrowserPairing() {
     {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
     {!status ? <p role="status" className="text-sm text-zinc-500">Checking remote pairing…</p> : !status.available ?
       <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">Remote pairing is unavailable. Configure the Pi API public HTTPS origin and proxy WebSocket upgrades for /api/browser/connect. Local pairing works without a public address.</p> : <>
-        <p className="text-sm text-zinc-500">Generate a code here, then open the extension on the Chrome computer, choose <strong>Remote server</strong>, paste the code and Connect. No local relay is required on that computer. Download the ZIP from this server to embed its address.</p>
+        <p className="text-sm text-zinc-500">Generate a code for <strong>{profile}</strong>, then open the extension on the Chrome computer, choose <strong>Remote server</strong>, paste the code and Connect. No local relay is required on that computer. Download the ZIP from this server to embed its address.</p>
         <div className="flex flex-wrap gap-2">
           <Button disabled={busy} onClick={() => void act("pair")}>Generate pairing code</Button>
         </div>
@@ -75,9 +75,36 @@ function RemoteBrowserPairing() {
           {now >= code.expiresAt ? <p>Pairing code expired. Generate a new code.</p> : !status.pairingPending ? <p>Pairing code used or invalidated. Check the browser connection below.</p> : <><p className="font-mono text-2xl">{code.code}</p><p>One use. Expires at {new Date(code.expiresAt).toLocaleTimeString()}. Generating another code replaces this one.</p><CopyPairingCode key={code.code} code={code.code}/></>}
         </div>}
       </>}
-    {status && (status.browsers.length > 0 || status.pairingPending) && <Button disabled={busy} onClick={() => { if (window.confirm("Revoke all remote browser connections and pending codes for this server?")) void act("unpair"); }}>Revoke browser access</Button>}
+    {status && (status.browsers.length > 0 || status.pairingPending) && <Button disabled={busy} onClick={() => { if (window.confirm("Revoke all remote browsers and pending codes for the selected profile?")) void act("unpair"); }}>Revoke browser access</Button>}
     <ul className="space-y-1 text-sm">{status?.browsers.map(browser => <li key={browser.id}><code>{browser.id}</code> — {browser.connected ? "Connected" : "Disconnected"}</li>)}</ul>
-    <p className="text-sm text-zinc-500">Each Pi Profile can control only the tabs it opens. Profiles using the same Chrome profile share its website logins.</p>
+    <p className="text-sm text-zinc-500">Only the selected Pi Profile can use these browsers. Anyone who can use that profile can operate its browser tabs.</p>
+  </div>;
+}
+function RemoteBrowserPairing() {
+  const [profiles, setProfiles] = useState<{ name: string }[]>([]);
+  const [profile, setProfile] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch("/api/pi/profiles", { cache: "no-store", signal: controller.signal });
+        if (!response.ok) throw new Error("Could not load Pi Profiles.");
+        const data = await response.json();
+        setProfiles(data.profiles);
+      } catch (error) { if (!controller.signal.aborted) setError((error as Error).message); }
+    })();
+    return () => controller.abort();
+  }, []);
+  return <div className="space-y-3">
+    {error && <p role="alert">{error}</p>}
+    <label className="flex items-center gap-2 text-sm">Pi Profile
+      <select className="rounded border p-2" value={profile} onChange={event => setProfile(event.target.value)}>
+        <option value="">Select a profile</option>
+        {profiles.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}
+      </select>
+    </label>
+    {profile && <ProfileBrowserPairing key={profile} profile={profile}/>}
   </div>;
 }
 export function BrowserPairingPanel() {
@@ -95,7 +122,7 @@ export function BrowserPairingPanel() {
     </section>
     <section className="space-y-2 border-t pt-4">
       <h3 className="font-medium">Pi on another server</h3>
-      <p className="text-sm">Pair Chrome once to make it available to all Pi Profiles on this server. Only pair browsers you intend to share with those profiles.</p>
+      <p className="text-sm">Pair Chrome with one Pi Profile. Ask the agent in that profile for a code, or generate one here.</p>
       <RemoteBrowserPairing/>
     </section>
   </Card>;

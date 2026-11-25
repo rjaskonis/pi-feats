@@ -32,6 +32,7 @@ import { isSandboxEnabled } from "../lib/profile-sandbox.ts";
 import { handlerEnvironment, HOST_SSH_CREDENTIAL_KEYS, parseProfileEnv, profileEnvironment } from "../lib/profile-env.ts";
 import { piCommand } from "../lib/pi-command.ts";
 import { registerBrowserRoutes } from "../pi-agent-browse/routes.ts";
+import { localProfileIdentitySync } from "../pi-agent-browse/local-access.ts";
 import { serverBrowserMarker, startServerBrowserAccess } from "../pi-agent-browse/server-access.ts";
 import { browserPublicOrigin } from "./browser-extension-archive.ts";
 import { PulseStore } from "../pulse/store.ts";
@@ -499,16 +500,18 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     };
     let publicOrigin: URL | undefined;
     try { if (config.publicBaseUrl) publicOrigin = browserPublicOrigin(config.publicBaseUrl); } catch { /* Download metadata explains invalid public-origin configuration. */ }
+    const profileBinding = (profile: string) => `${profile}:${localProfileIdentitySync(options.agentDir, profile)}`;
     const browser = await registerBrowserRoutes(server, {
-      // Do not promote existing profile-scoped pairings into shared access.
-      file: join(options.agentDir, "browser", "shared-credentials.json"),
-      sharedRemote: true,
+      profileBinding,
+      // Never import shared or historical credentials without explicit profile assignment.
+      file: join(options.agentDir, "browser", "profile-pairings.json"),
+      pairingDownloadUrl: publicOrigin ? new URL("/api/browser/pi-agent-browse-extension.zip", publicOrigin).href : undefined,
       port: publicOrigin ? Number(publicOrigin.port || "443") : 443,
       endpoint: publicOrigin ? `wss://${publicOrigin.host}/api/browser/connect` : undefined,
       available: publicOrigin?.protocol === "https:", guard,
       validateProfile: profile => api.profiles.readSettings(profile),
     });
-    const browserEnvironment = (profile: string) => ({ ...process.env, PI_BROWSER_ENDPOINT: `http://127.0.0.1:${config.port}`, PI_BROWSER_TOKEN: browser.workerToken(profile) });
+    const browserEnvironment = (profile: string) => ({ ...process.env, PI_BROWSER_ENDPOINT: `http://127.0.0.1:${config.port}`, PI_BROWSER_TOKEN: browser.workerToken(profileBinding(profile)) });
     const cliLaunch = (profile: string) => launchProfileWorkerViaCli(options.agentDir, profile, api.profiles.directory(profile), undefined, browserEnvironment(profile));
     api.workers = new ProfileWorkerRuntime({ agentDir: options.agentDir,
       launch: config.workerLauncher === "cli" ? cliLaunch : (profile, signal) => launchProfileWorkerDirect(options.agentDir, profile, api.profiles.directory(profile), signal, undefined, browserEnvironment(profile)),
@@ -622,8 +625,10 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       if (!guard(request, reply)) return;
       if (objectBody(request.body).force !== true) throw Object.assign(new Error('Profile deletion requires { "force": true }.'), { status: 400 });
       const name = profileName(request);
+      const binding = profileBinding(name);
       await api.deleteProfile(name);
-      browser.workerTokens.delete(name);
+      browser.workerTokens.delete(binding);
+      await browser.revoke(binding);
       return reply.code(204).send();
     });
 
@@ -1098,7 +1103,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       const address = server.server.address();
       closeBrowserLauncher = await startServerBrowserAccess(options.agentDir, typeof address === "object" && address ? address.port : config.port, async profile => {
         await api.profiles.readSettings(profile);
-        return browser.workerToken(profile);
+        return browser.workerToken(profileBinding(profile));
       });
     } catch (error) {
       await server.close();

@@ -81,11 +81,22 @@ export class BrowserBroker {
     this.prune();
     return { pairingPending: this.codes.has(profile), browsers: this.credentials.filter(item => item.profile === profile).map(item => ({ id: item.browser, connected: this.connections.has(item.browser), tabs: this.connections.get(item.browser)?.tabs.size ?? 0 })) };
   }
+  async revokePreviousProfileBindings(name: string, current: string) {
+    const bindings = new Set([...this.credentials.map(item => item.profile), ...this.codes.keys(), ...this.workerTokens.keys()]);
+    for (const binding of bindings) if (binding !== current && binding.startsWith(`${name}:`)) {
+      this.workerTokens.delete(binding);
+      await this.revoke(binding);
+    }
+  }
   async revoke(profile: string) {
     this.epoch++;
     this.codes.delete(profile);
     this.credentials = this.credentials.filter(item => item.profile !== profile);
-    for (const connection of this.connections.values()) if (connection.profile === profile) connection.socket.close(4006, "Pairing revoked");
+    for (const connection of this.connections.values()) if (connection.profile === profile) {
+      this.connections.delete(connection.browser);
+      this.scopes.delete(connection.browser);
+      connection.socket.close(4006, "Pairing revoked");
+    }
     await this.persist();
     return { revoked: true };
   }
@@ -183,7 +194,7 @@ export class BrowserBroker {
         this.connections.set(browser, connection);
         if (this.shared) this.scopes.set(browser, new Map());
         stage = "connected";
-        void this.rpc(connection, "relay.settings", { browser: { id: browser, name: credential.profile } }).catch(() => {});
+        void this.rpc(connection, "relay.settings", { browser: { id: browser, name: credential.profile.split(":", 1)[0] } }).catch(() => {});
       } else if (connection) {
         if (typeof message.id === "number") {
           const pending = connection.pending.get(message.id);
@@ -223,7 +234,7 @@ export class BrowserBroker {
   }
   rpc(connection: Connection, method: string, params: object): Promise<unknown> {
     if (connection.socket.readyState !== connection.socket.OPEN) return Promise.reject(new Error("Browser disconnected"));
-    if (this.shared && this.connections.get(connection.browser) !== connection && this.scopes.get(connection.browser)?.get(connection.scopeKey ?? "") !== connection) return Promise.reject(new Error("Browser access is no longer authorized"));
+    if (this.connections.get(connection.browser) !== connection && (!this.shared || this.scopes.get(connection.browser)?.get(connection.scopeKey ?? "") !== connection)) return Promise.reject(new Error("Browser access is no longer authorized"));
     if (connection.pending.size >= 32) return Promise.reject(new Error("Too many browser commands"));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
