@@ -75,15 +75,19 @@ export class OpenAICallLogs {
   list(query: OpenAICallQuery): OpenAICallLogPage {
     const before = Number(query.before);
     const cursor = Number.isSafeInteger(before) && before > 0 ? before : Number.MAX_SAFE_INTEGER;
+    const endpoints = query.endpoint?.split(",").filter(Boolean), outcomes = query.outcome?.split(",").filter(Boolean);
+    const endpointFilter = endpoints?.length ? JSON.stringify(endpoints) : null;
+    const outcomeFilter = outcomes?.length ? JSON.stringify(outcomes) : null;
     const active = query.before ? [] : [...this.active.values()].map(({ call }) => call).filter((call) =>
-      (!query.endpoint || call.endpoint === query.endpoint) && (!query.profile || call.profile === query.profile) &&
-      (!query.outcome || call.outcome === query.outcome) && (!query.start || call.receivedAt >= query.start) && (!query.end || call.receivedAt <= query.end))
+      (!endpoints?.length || endpoints.includes(call.endpoint)) && (!query.profile || call.profile === query.profile) &&
+      (!outcomes?.length || outcomes.includes(call.outcome)) && (!query.start || call.receivedAt >= query.start) && (!query.end || call.receivedAt <= query.end))
       .sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
     const rows = this.db.prepare(`SELECT * FROM calls WHERE seq < ?
-      AND (? IS NULL OR endpoint = ?) AND (? IS NULL OR profile = ?) AND (? IS NULL OR outcome = ?)
+      AND (? IS NULL OR endpoint IN (SELECT value FROM json_each(?))) AND (? IS NULL OR profile = ?)
+      AND (? IS NULL OR outcome IN (SELECT value FROM json_each(?)))
       AND (? IS NULL OR receivedAt >= ?) AND (? IS NULL OR receivedAt <= ?)
-      ORDER BY seq DESC LIMIT ?`).all(cursor, query.endpoint ?? null, query.endpoint ?? null,
-      query.profile ?? null, query.profile ?? null, query.outcome ?? null, query.outcome ?? null,
+      ORDER BY seq DESC LIMIT ?`).all(cursor, endpointFilter, endpointFilter,
+      query.profile ?? null, query.profile ?? null, outcomeFilter, outcomeFilter,
       query.start ?? null, query.start ?? null, query.end ?? null, query.end ?? null, pageSize + 1) as unknown as StoredCall[];
     return { calls: [...active, ...rows.slice(0, pageSize).map(toCall)], next: rows.length > pageSize ? String(rows[pageSize - 1].seq) : null };
   }

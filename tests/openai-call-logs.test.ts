@@ -95,6 +95,9 @@ test("call storage keeps a bounded persistent history and filters before paginat
     assert.equal(first.calls[0].id, "5001");
     const second = store.list({ endpoint: responses, before: first.next! });
     assert.equal(second.calls[0].id, "4801");
+    const mixed = store.list({ endpoint: `${chat},${responses}`, outcome: "success,error" });
+    assert.deepEqual(mixed.calls.slice(0, 2).map(({ endpoint }) => endpoint), [chat, responses]);
+    assert.equal(mixed.calls.length, 100);
     const time = new Date(Date.UTC(2026, 0, 1, 0, 0, 4550)).toISOString();
     assert.deepEqual(store.list({ start: time, end: time }).calls.map(({ id }) => id), ["4550"]);
     assert.equal(store.detail("4502")?.stages, null);
@@ -141,6 +144,8 @@ test("Console proxy streams log invalidations and the API serves only authentica
     assert.equal((await fetch(`${logsUrl}/calls/example`)).status, 401);
     assert.equal((await fetch(`${logsUrl}/stream`)).status, 401);
     assert.equal((await fetch(`${logsUrl}?start=invalid`, { headers })).status, 400);
+    const completed = await server.inject({ method: "POST", url: chat, headers, payload: { model: "fixture", messages: [{ role: "user", content: "Example prompt" }] } });
+    assert.equal(completed.statusCode, 200);
     const stream = await proxyPiRequest(new Request("http://console/api/pi/openai-api-logs/stream", { signal: controller.signal }), ["openai-api-logs", "stream"], { apiUrl, apiToken: "fixture-credential" });
     assert.equal(stream.status, 200);
     assert.match(stream.headers.get("content-type")!, /text\/event-stream/);
@@ -155,6 +160,9 @@ test("Console proxy streams log invalidations and the API serves only authentica
     const active = await fetch(`${logsUrl}?outcome=running`, { headers }).then((result) => result.json());
     assert.equal(active.calls[0].id, id);
     assert.equal(active.calls[0].outcome, "running");
+    const filters = new URLSearchParams({ profile: "fixture", endpoint: `${chat},${responses}`, outcome: "running,success" });
+    const mixed = await fetch(`${logsUrl}?${filters}`, { headers }).then((result) => result.json());
+    assert.deepEqual(mixed.calls.map(({ id }: { id: string }) => id), [id, completed.json().id]);
     release();
     assert.match(await request.text(), /response.completed/);
     const detail = await fetch(`${logsUrl}/calls/${id}`, { headers }).then((result) => result.json());

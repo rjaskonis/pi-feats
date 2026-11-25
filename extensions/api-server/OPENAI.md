@@ -264,11 +264,11 @@ Errors use `{ "error": { "message", "type", "param", "code" } }`. Statuses inclu
 
 ### Direct Compatible API
 
-In the Console, open **Administrative Settings → Direct Compatible API** to inspect authenticated Chat Completions and Responses calls. Filter by date and time, endpoint, profile, or outcome. The Calls list updates automatically, and the Workflow panel shows the request, validation, Pi execution, and response stages that actually ran. The Details panel shows captured JSON for the selected stage. Streaming logs consolidate output instead of saving every frame, and show available partial text after a disconnect. A stream can fail or disconnect after sending HTTP status `200`.
+In the Console, open **Administrative Settings → Direct Compatible API** to inspect authenticated Chat Completions and Responses calls. The default date range is three hours before opening the tab through one hour after, in the browser's local time. Select one or more endpoint and outcome chips, or choose a profile from the dropdown (default: all profiles). The Calls list updates automatically, and the Workflow panel shows the request, validation, Pi execution, and response stages that actually ran. The Details panel shows captured JSON for the selected stage. Streaming logs consolidate output instead of saving every frame, and show available partial text after a disconnect. A stream can fail or disconnect after sending HTTP status `200`.
 
 The latest 5,000 finished or disconnected calls retain metadata across restarts, separately from Application logs. Workflow details are retained for up to 500 recent calls; older records remain available without payloads. These details can include prompts, conversation history, and model output. Capture is bounded and marks omitted or truncated values. Request headers, common credential fields, and attachment bytes and URLs are excluded, but sensitive text in prompts or model output may still be recorded. Requests rejected before reaching the API, failed API-key checks, and `/v1/models` requests are not recorded.
 
-The bearer-authenticated API exposes `GET /api/openai-api-logs` for summaries, `GET /api/openai-api-logs/calls/:id` for details, and `GET /api/openai-api-logs/stream` for live change notifications. The notification stream contains call IDs only.
+The bearer-authenticated API exposes `GET /api/openai-api-logs` for summaries (the `endpoint` and `outcome` filters accept comma-separated values), `GET /api/openai-api-logs/calls/:id` for details, and `GET /api/openai-api-logs/stream` for live change notifications. The notification stream contains call IDs only.
 
 ### Request-scoped latency diagnostics
 

@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import { Filter, Loader2, RotateCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
 import { FlowArrow, JsonView, localDateTime } from "@/components/application-logs";
 import type { CallStageId, OpenAICallDetail, OpenAICallLogPage, OpenAICallSummary } from "../../lib/openai-call-log-types";
 
@@ -19,6 +18,16 @@ const stages = {
   response: { title: "Response", detail: "Response body", color: "border-teal-400 bg-teal-50 text-teal-800" },
 };
 const filterClass = "h-10 rounded-md border border-zinc-200 bg-white px-3 text-sm font-normal";
+const chipColors: Record<string, string> = {
+  "/v1/chat/completions": "border-sky-400 bg-sky-50 text-sky-700",
+  "/v1/responses": "border-violet-400 bg-violet-50 text-violet-700",
+  success: "border-emerald-400 bg-emerald-50 text-emerald-700",
+  error: "border-red-400 bg-red-50 text-red-700",
+  running: "border-cyan-400 bg-cyan-50 text-cyan-700",
+  aborted: "border-amber-400 bg-amber-50 text-amber-800",
+};
+const toggle = (values: string[], value: string) => values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+const hour = 60 * 60 * 1000;
 const quietButton = "bg-zinc-100 text-zinc-700 hover:bg-zinc-200";
 const duration = (ms: number) => `${ms.toLocaleString()} ms`;
 
@@ -59,17 +68,25 @@ function useLogResource<T>(path?: string) {
   return { ...(state.path === path ? state : {}), refresh };
 }
 
-export function OpenAIApiLogs() {
-  const [start, setStart] = useState(() => localDateTime(new Date(Date.now() - 3 * 60 * 60 * 1000)));
-  const [end, setEnd] = useState("");
-  const [filters, setFilters] = useState<{ endpoint: string; profile: string; outcome: string }>({ endpoint: "", profile: "", outcome: "" });
+export function OpenAIApiLogs({ profiles }: { profiles: Array<{ name: string }> }) {
+  const [dateRange, setDateRange] = useState<{ start: string; end: string }>();
+  const { start = "", end = "" } = dateRange ?? {};
+  useEffect(() => {
+    const now = Date.now();
+    setDateRange({ start: localDateTime(new Date(now - 3 * hour)), end: localDateTime(new Date(now + hour)) });
+  }, []);
+  const [endpointFilter, setEndpointFilter] = useState<string[]>([]);
+  const [outcomeFilter, setOutcomeFilter] = useState<string[]>([]);
+  const [profileFilter, setProfileFilter] = useState("");
   const [cursors, setCursors] = useState([""]);
   const [selectedId, setSelectedId] = useState<string>();
   const [stageId, setStageId] = useState<CallStageId>();
   const [connected, setConnected] = useState(false);
   const cursor = cursors.at(-1) ?? "";
   const params = new URLSearchParams();
-  for (const [key, value] of Object.entries(filters)) if (value.trim()) params.set(key, value.trim());
+  if (endpointFilter.length) params.set("endpoint", endpointFilter.join(","));
+  if (outcomeFilter.length) params.set("outcome", outcomeFilter.join(","));
+  if (profileFilter) params.set("profile", profileFilter);
   const startMs = start ? Date.parse(start) : undefined, endMs = end ? Date.parse(end) : undefined;
   const invalidRange = (startMs !== undefined && !Number.isFinite(startMs)) || (endMs !== undefined && !Number.isFinite(endMs)) || (startMs !== undefined && endMs !== undefined && startMs > endMs);
   if (!invalidRange) {
@@ -77,7 +94,7 @@ export function OpenAIApiLogs() {
     if (endMs !== undefined) params.set("end", new Date(endMs).toISOString());
   }
   if (cursor) params.set("before", cursor);
-  const list = useLogResource<OpenAICallLogPage>(invalidRange ? undefined : `${base}?${params}`);
+  const list = useLogResource<OpenAICallLogPage>(!dateRange || invalidRange ? undefined : `${base}?${params}`);
   const firstId = list.data?.calls[0]?.id;
   useEffect(() => { if (!selectedId && firstId) setSelectedId(firstId); }, [selectedId, firstId]);
   const id = selectedId ?? firstId;
@@ -101,7 +118,9 @@ export function OpenAIApiLogs() {
   const call = detail.data?.call;
   const flow = detail.data?.stages;
   const current = flow?.find(({ id }) => id === stageId) ?? flow?.at(-1);
-  const setFilter = (key: keyof typeof filters, value: string) => { setFilters((previous) => ({ ...previous, [key]: value })); resetFilters(); };
+  const setDate = (key: "start" | "end", value: string) => { setDateRange({ start, end, [key]: value }); resetFilters(); };
+  const chip = (value: string, label: string, selected: boolean, onClick: () => void) => <button key={value} type="button" aria-pressed={selected} onClick={onClick}
+    className={`rounded-full border px-3 py-1 text-xs font-medium transition ${chipColors[value]} ${selected ? "ring-2 ring-offset-1 ring-zinc-400" : "opacity-70 hover:opacity-100"}`}>{label}</button>;
   const calls = list.data?.calls ?? [];
   const visibleCalls = call && !calls.some(({ id }) => id === call.id) ? [call, ...calls] : calls;
 
@@ -121,14 +140,14 @@ export function OpenAIApiLogs() {
     </div>
     <Card className="space-y-4">
       <div className="flex items-center gap-2 text-sm font-semibold"><Filter size={16} className="text-emerald-600"/>Log filters</div>
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="grid gap-1 text-sm font-medium">Endpoint<select className={filterClass} value={filters.endpoint} onChange={(event) => setFilter("endpoint", event.target.value)}><option value="">All endpoints</option>{Object.entries(endpoints).map(([path, label]) => <option key={path} value={path}>{label}</option>)}</select></label>
-        <label className="grid gap-1 text-sm font-medium">Profile<Input className="h-10 font-normal" placeholder="All profiles" maxLength={64} value={filters.profile} onChange={(event) => setFilter("profile", event.target.value)}/></label>
-        <label className="grid gap-1 text-sm font-medium">Outcome<select className={filterClass} value={filters.outcome} onChange={(event) => setFilter("outcome", event.target.value)}><option value="">All outcomes</option>{Object.entries(outcomes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+      <div className="flex flex-wrap items-center gap-2">
+        <div role="group" aria-label="Endpoint" className="flex flex-wrap gap-2">{Object.entries(endpoints).map(([value, label]) => chip(value, label, endpointFilter.includes(value), () => { setEndpointFilter((previous) => toggle(previous, value)); resetFilters(); }))}</div>
+        <div role="group" aria-label="Outcome" className="flex flex-wrap gap-2">{(["success", "error", "running", "aborted"] as const).map((value) => chip(value, value === "error" ? "Errors" : outcomes[value], outcomeFilter.includes(value), () => { setOutcomeFilter((previous) => toggle(previous, value)); resetFilters(); }))}</div>
       </div>
-      <div className="grid max-w-xl gap-4 sm:grid-cols-2">
-        <label className="grid gap-1 text-sm font-medium">Start (browser time)<input type="datetime-local" value={start} className={filterClass} onChange={(event) => { setStart(event.target.value); resetFilters(); }}/></label>
-        <label className="grid gap-1 text-sm font-medium">End (browser time)<input type="datetime-local" value={end} className={filterClass} onChange={(event) => { setEnd(event.target.value); resetFilters(); }}/></label>
+      <div className="grid max-w-4xl gap-4 sm:grid-cols-3">
+        <label className="grid gap-1 text-sm font-medium">Start (browser time)<input type="datetime-local" value={start} className={filterClass} onChange={(event) => setDate("start", event.target.value)}/></label>
+        <label className="grid gap-1 text-sm font-medium">End (browser time)<input type="datetime-local" value={end} className={filterClass} onChange={(event) => setDate("end", event.target.value)}/></label>
+        <label className="grid gap-1 text-sm font-medium">Profile<select className={filterClass} value={profileFilter} onChange={(event) => { setProfileFilter(event.target.value); resetFilters(); }}><option value="">All profiles</option>{profiles.map(({ name }) => <option key={name} value={name}>{name}</option>)}</select></label>
       </div>
       {invalidRange && <p role="alert" className="text-sm text-red-700">Enter a valid date range with the start before the end.</p>}
     </Card>
