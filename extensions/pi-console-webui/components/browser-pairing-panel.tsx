@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, CircleCheck, CircleMinus, Copy, KeyRound, LoaderCircle, Monitor, ShieldOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
 
@@ -38,7 +38,7 @@ function ProfileBrowserPairing({ profile }: { profile: string }) {
   const [status, setStatus] = useState<BrowserStatus>();
   const [code, setCode] = useState<{ code: string; expiresAt: number }>();
   const [now, setNow] = useState(Date.now());
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusy] = useState<"pair" | "unpair">();
   const [error, setError] = useState("");
   const path = `profiles/${encodeURIComponent(profile)}`;
   useEffect(() => {
@@ -55,29 +55,45 @@ function ProfileBrowserPairing({ profile }: { profile: string }) {
     return () => { controller.abort(); clearInterval(poll); };
   }, [path]);
   const act = async (action: "pair" | "unpair") => {
-    setBusy(true); setError(""); setCode(undefined);
+    setBusy(action); setError(""); setCode(undefined);
     try {
       const data = await request(`${path}/${action}`, "POST");
       if (action === "pair") { setCode(data); setNow(Date.now()); }
       setStatus(await request(`${path}/status`));
     } catch (error) { setError((error as Error).message); }
-    finally { setBusy(false); }
+    finally { setBusy(undefined); }
   };
-  return <div className="space-y-3">
-    {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+  const canRevoke = !!status && (status.browsers.length > 0 || status.pairingPending);
+  return <div className="space-y-4 rounded-lg border border-zinc-200 p-4">
+    {error && <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-800">{error}</p>}
     {!status ? <p role="status" className="text-sm text-zinc-500">Checking remote pairing…</p> : !status.available ?
       <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">Remote pairing is unavailable. Configure the Pi API public HTTPS origin and proxy WebSocket upgrades for /api/browser/connect. Local pairing works without a public address.</p> : <>
-        <p className="text-sm text-zinc-500">Generate a code for <strong>{profile}</strong>, then open the extension on the Chrome computer, choose <strong>Remote server</strong>, paste the code and Connect. No local relay is required on that computer. Download the ZIP from this server to embed its address.</p>
-        <div className="flex flex-wrap gap-2">
-          <Button disabled={busy} onClick={() => void act("pair")}>Generate pairing code</Button>
-        </div>
-        {code && <div role="status" className="rounded-md border p-3 text-sm">
+        <p className="text-sm text-zinc-600">In the Chrome extension, choose <strong>Remote server</strong>, paste the code, then click <strong>Connect</strong>.</p>
+        <Button type="button" disabled={!!busy} className="inline-flex items-center gap-2" onClick={() => void act("pair")}>
+          {busy === "pair" ? <LoaderCircle size={16} className="animate-spin" aria-hidden="true"/> : <KeyRound size={16} aria-hidden="true"/>}
+          {busy === "pair" ? "Generating code…" : "Generate pairing code"}
+        </Button>
+        {code && <div role="status" className="space-y-2 rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-950">
           {now >= code.expiresAt ? <p>Pairing code expired. Generate a new code.</p> : !status.pairingPending ? <p>Pairing code used or invalidated. Check the browser connection below.</p> : <><p className="font-mono text-2xl">{code.code}</p><p>One use. Expires at {new Date(code.expiresAt).toLocaleTimeString()}. Generating another code replaces this one.</p><CopyPairingCode key={code.code} code={code.code}/></>}
         </div>}
       </>}
-    {status && (status.browsers.length > 0 || status.pairingPending) && <Button disabled={busy} onClick={() => { if (window.confirm("Revoke all remote browsers and pending codes for the selected profile?")) void act("unpair"); }}>Revoke browser access</Button>}
-    <ul className="space-y-1 text-sm">{status?.browsers.map(browser => <li key={browser.id}><code>{browser.id}</code> — {browser.connected ? "Connected" : "Disconnected"}</li>)}</ul>
-    <p className="text-sm text-zinc-500">Only the selected Pi Profile can use these browsers. Anyone who can use that profile can operate its browser tabs.</p>
+    {status && <section className="space-y-2" aria-label="Paired browsers">
+      <h4 className="text-sm font-semibold text-zinc-900">Paired browsers</h4>
+      {status.browsers.length === 0 ? <p className="rounded-md border border-dashed border-zinc-200 p-3 text-sm text-zinc-600">No browsers paired with this profile.</p> :
+        <ul className="space-y-2">{status.browsers.map(browser => <li key={browser.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-zinc-200 p-3 text-sm">
+          <span className="flex min-w-0 items-center gap-2 text-zinc-700"><Monitor size={16} className="shrink-0" aria-hidden="true"/><code className="break-all">{browser.id}</code></span>
+          {browser.connected
+            ? <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-800"><CircleCheck size={14} aria-hidden="true"/>Connected</span>
+            : <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-700"><CircleMinus size={14} aria-hidden="true"/>Disconnected</span>}
+        </li>)}</ul>}
+      <p className="text-sm text-zinc-600">Only people using this Pi Profile can operate its browser tabs.</p>
+    </section>}
+    {canRevoke && <div className="border-t border-zinc-200 pt-3">
+      <button type="button" disabled={!!busy} className="inline-flex items-center gap-2 rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-600 disabled:opacity-50" onClick={() => { if (window.confirm(`Revoke all remote browsers and pending codes for ${profile}?`)) void act("unpair"); }}>
+        {busy === "unpair" ? <LoaderCircle size={16} className="animate-spin" aria-hidden="true"/> : <ShieldOff size={16} aria-hidden="true"/>}
+        {busy === "unpair" ? "Revoking access…" : "Revoke all browser access"}
+      </button>
+    </div>}
   </div>;
 }
 function RemoteBrowserPairing() {
