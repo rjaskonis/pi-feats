@@ -61,3 +61,5 @@ Use a temporary `PI_CODING_AGENT_DIR` for isolation. Confirm the profile setting
 ## Deployment source
 
 `pi-feats` is the only source for shared extensions. Do not copy or mirror extension code into `ai-agents-assets` or `~/.pi/agent/extensions`; distribute changes through the package and `pi update`.
+
+The custom Pi Agent Docker deployment is maintained here under `pi/`, not in `ai-agents-assets`. Keep the base image Dockerfile and publishing workflow in `pi/base/`, and the final image, Compose configuration, and startup scripts in `pi/`. Install shared extensions into the image as the `pi-feats` package rather than copying an extension tree. Use `pi/README.md` as the deployment guide. Never commit `pi/.env`, `pi/base/.env`, or `pi/data/`.

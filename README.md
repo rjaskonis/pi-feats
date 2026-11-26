@@ -14,6 +14,7 @@
 - [Command cookbook](#command-cookbook)
 - [Included extensions](#included-extensions)
 - [Installation](#installation)
+- [Custom Docker deployment](#custom-docker-deployment)
 - [Development](#development)
 - [Security](#security)
 - [Package layout](#package-layout)
@@ -593,6 +594,12 @@ pi install git:github.com/rjaskonis/pi-feats@<tag-or-commit>
 
 Pi does not advance a pinned version or Git ref during a generic package update.
 
+## Custom Docker deployment
+
+This repository owns the custom Pi Agent container setup in [`pi/`](pi/README.md). The base image (`pi-agent-core`) is built and published from `pi/base/`. The final image, Compose configuration, and startup scripts live directly in `pi/` and install `pi-feats` from the same repository at the configured Git ref. This setup is separate from the normal `pi install npm:pi-feats` workflow.
+
+See the [Docker deployment guide](pi/README.md) for publishing the base image, building and deploying the final image with Compose or Dokploy, and preserving runtime state across updates.
+
 ## Development
 
 Requirements:
@@ -639,6 +646,8 @@ pi-feats/
 │   ├── cli-resources.ts
 │   ├── profiles.ts
 │   └── sequential-workflow.ts
+├── pi/                          # Custom Pi Agent Docker deployment
+│   └── base/                    # pi-agent-core Dockerfile and publish script
 ├── themes/
 │   └── legacy-dark.json          # Pre-bf8e4b95 Pi dark palette
 └── README.md

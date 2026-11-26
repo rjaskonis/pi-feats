@@ -1,0 +1,109 @@
+name: ${PI_COMPOSE_PROJECT_NAME:-pi-agent}
+
+services:
+  pi:
+    build:
+      context: .
+      # Resolve the current Pi CLI version on every build unless caching is explicitly enabled.
+      no_cache: ${PI_BUILD_NO_CACHE:-true}
+      args:
+        PI_CLI_VERSION: ${PI_CLI_VERSION:-latest}
+        PI_FEATS_REPOSITORY: ${PI_FEATS_REPOSITORY:-https://github.com/rjaskonis/pi-feats.git}
+        PI_FEATS_REF: ${PI_FEATS_REF:-main}
+    image: ${PI_IMAGE:-pi-agent:compose}
+    # Always build locally; do not attempt to pull a non-existent local image first.
+    pull_policy: build
+    container_name: ${PI_CONTAINER_NAME:-pi-agent}
+    restart: unless-stopped
+    expose:
+      - "3030"
+      - "8767"
+    environment:
+      # Initial credentials/tokens are persisted in ./data on first startup.
+      PI_CONSOLE_USERNAME: "${PI_CONSOLE_USERNAME:-admin}"
+      PI_CONSOLE_PASSWORD: "${PI_CONSOLE_PASSWORD:-}"
+      # Local compose is plain HTTP by default. Set PI_CONSOLE_HTTPS=1 behind HTTPS/Traefik.
+      PI_CONSOLE_HTTPS: "${PI_CONSOLE_HTTPS:-0}"
+      PI_API_TOKEN: "${PI_API_TOKEN:-}"
+      PI_API_CORS_ORIGIN: "${PI_API_CORS_ORIGIN:-https://${PI_TRAEFIK_HOST:-pi.localhost}}"
+      # Public origin used when the API creates WebSocket URLs for adapter logs.
+      PI_PUBLIC_BASE_URL: "${PI_PUBLIC_BASE_URL:-https://${PI_TRAEFIK_HOST:-pi.localhost}}"
+      # Internal server-side target used by the Console's /api/pi proxy.
+      PI_API_PROXY_TARGET: "${PI_API_PROXY_TARGET:-http://127.0.0.1:8767}"
+      # Must match the source/ref embedded in the image build.
+      PI_FEATS_SOURCE: "${PI_FEATS_SOURCE:-git:github.com/rjaskonis/pi-feats}"
+      PI_FEATS_REF: "${PI_FEATS_REF:-main}"
+    volumes:
+      - ${PI_DATA_PATH:-./data}:/root/.pi
+    networks:
+      pi: {}
+      traefik: {}
+    labels:
+      - traefik.enable=${PI_TRAEFIK_ENABLE:-true}
+      - traefik.docker.network=${PI_TRAEFIK_NETWORK:-dokploy-network}
+      # API has a higher priority: it receives adapter webhooks and WSS log streams directly.
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api.rule=Host(`${PI_TRAEFIK_HOST:-pi.localhost}`) && PathPrefix(`/api/adapter/`)
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api.entrypoints=web
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api.middlewares=redirect-to-https@file
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api.service=${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api.priority=200
+      - traefik.http.services.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api.loadbalancer.server.port=8767
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure.rule=Host(`${PI_TRAEFIK_HOST:-pi.localhost}`) && PathPrefix(`/api/adapter/`)
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure.entrypoints=websecure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure.service=${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure.tls.certresolver=${PI_TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure.priority=200
+      - traefik.http.services.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure.loadbalancer.server.port=8767
+      # Application log WebSockets use /api/applications/... and must bypass the Console/Next router.
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications.rule=Host(`${PI_TRAEFIK_HOST:-pi.localhost}`) && PathPrefix(`/api/applications/`)
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications.entrypoints=web
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications.middlewares=redirect-to-https@file
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications.service=${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications.priority=200
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications-secure.rule=Host(`${PI_TRAEFIK_HOST:-pi.localhost}`) && PathPrefix(`/api/applications/`)
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications-secure.entrypoints=websecure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications-secure.service=${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications-secure.tls.certresolver=${PI_TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-applications-secure.priority=200
+      # Terminal WebSocket must reach the API Server, not the Console/Next router.
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal.rule=Host(`${PI_TRAEFIK_HOST:-pi.localhost}`) && PathPrefix(`/api/terminal/`)
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal.entrypoints=web
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal.middlewares=redirect-to-https@file
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal.service=${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal.priority=200
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal-secure.rule=Host(`${PI_TRAEFIK_HOST:-pi.localhost}`) && PathPrefix(`/api/terminal/`)
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal-secure.entrypoints=websecure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal-secure.service=${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal-secure.tls.certresolver=${PI_TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-terminal-secure.priority=200
+      # Chrome connects directly to the API over WebSocket, not through the Console.
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-browser-secure.rule=Host(`${PI_TRAEFIK_HOST:-pi.localhost}`) && Path(`/api/browser/connect`)
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-browser-secure.entrypoints=websecure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-browser-secure.service=${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-api-secure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-browser-secure.tls.certresolver=${PI_TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-browser-secure.priority=200
+      # Console serves the UI and its authenticated /api/pi proxy.
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}.rule=Host(`${PI_TRAEFIK_HOST:-pi.localhost}`)
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}.entrypoints=web
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}.middlewares=redirect-to-https@file
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}.service=${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-console
+      - traefik.http.services.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-console.loadbalancer.server.port=3030
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-secure.rule=Host(`${PI_TRAEFIK_HOST:-pi.localhost}`)
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-secure.entrypoints=websecure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-secure.service=${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-console-secure
+      - traefik.http.routers.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-secure.tls.certresolver=${PI_TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.services.${PI_TRAEFIK_ROUTER_PREFIX:-pi-agent}-console-secure.loadbalancer.server.port=3030
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3030').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+networks:
+  pi:
+    name: ${PI_NETWORK_NAME:-pi-agent-network}
+  traefik:
+    name: ${PI_TRAEFIK_NETWORK:-dokploy-network}
+    # false makes `docker compose up` work on a local machine. Set true in Dokploy/production.
+    external: ${PI_TRAEFIK_NETWORK_EXTERNAL:-false}
