@@ -10,7 +10,13 @@ The public `GET /api/browser/pi-agent-browse-extension.zip` route does not requi
 
 The ZIP is tracked at `assets/browser-downloads/pi-agent-browse-extension.zip` and ships in Git and npm installations. No public origin is necessary for local operation. A loopback download link only works on the computer serving it.
 
-## Local: Pi and Chrome on the same computer
+## Local Console: the Pi API and Chrome on the same computer
+
+Open Console on `localhost` or `127.0.0.1`. In **Administrative Settings → Pi Agent Browse**, download and load this Console's extension ZIP. Under **Pair with this Console**, select the Pi Profile and generate a code. In the extension's settings, choose **Local Console**, paste the code, and click **Connect**. If the extension is already loaded, replace its files with the new ZIP contents and reload it in `chrome://extensions`.
+
+The extension connects directly to `127.0.0.1` on the Pi API port, not the Console port. No public URL, TLS, or WebSocket proxy is needed. The listener refuses browser connections from outside loopback when in this mode. `pi browser pair` from the default terminal also generates a code for the default profile when it is connected to the loopback Console broker.
+
+## Standalone Pi: Pi and Chrome on the same computer
 
 Install Pi and the package on the Chrome computer, using the normal installation flow:
 
@@ -49,7 +55,7 @@ Existing shared and historical remote pairings are not imported. Pair again once
 
 ## Authentication, isolation and agent access
 
-The server reuses the upstream protocol-3 handshake: short-code PBKDF2 material, ephemeral P-256 ECDH, HMAC transcript proofs, a masked per-browser token, and fresh nonces on reconnection. The branded derivative additionally binds remote proofs and session keys to the complete configured WSS endpoint, rather than only its port; local handshake compatibility remains unchanged. Browser tokens are independent of administrative API credentials. Codes expire after five minutes and are consumed atomically after a matching proof. Pending codes are memory-only and disappear on restart. Failed handshakes are bounded by per-peer rate limits, message/queue limits, a connection limit and a handshake timeout. A shared reverse proxy shares its peer budget; untrusted forwarded headers are not used as identity.
+The server reuses the upstream protocol-3 handshake: short-code PBKDF2 material, ephemeral P-256 ECDH, HMAC transcript proofs, a masked per-browser token, and fresh nonces on reconnection. The branded derivative additionally binds remote proofs and session keys to the complete configured Console endpoint, rather than only its port; local handshake compatibility remains unchanged. Browser tokens are independent of administrative API credentials. Codes expire after five minutes and are consumed atomically after a matching proof. Pending codes are memory-only and disappear on restart. Failed handshakes are bounded by per-peer rate limits, message/queue limits, a connection limit and a handshake timeout. A shared reverse proxy shares its peer budget; untrusted forwarded headers are not used as identity.
 
 Profile-bound remote browser credentials persist in the runtime's private `browser/profile-pairings.json`, outside named profile workspaces. The broker owns live connections; named profiles receive only a random, in-memory worker capability and the loopback API endpoint. Worker environment forwarding preserves this dedicated capability through Nono without exposing the administrative API token, disabling the sandbox or granting write access to runtime code. Worker capabilities are regenerated on API startup. A worker capability can generate a pairing code only for its own profile. It cannot revoke pairings or select another profile.
 
@@ -73,4 +79,4 @@ The older native relay build is still available for standalone upstream-compatib
 
 Automated local tests cover real WebSocket handshake exchanges with an extension-protocol client, profile-bound command routing, persistence, reconnect, revocation, code rejection, worker authorization, signed credential files, and an isolated local daemon/CLI lifecycle. They do not substitute for a Chrome end-to-end test across two machines and a deployed TLS reverse proxy. No remote server is modified or tested without explicit authorization.
 
-On the Pi server, Console Chat, API workers, and new Pi CLI/TUI sessions (including in Console Terminal) use the existing remote pairing. The launcher obtains the selected profile's worker capability through a private local socket before applying Nono. It does not receive the administrative API token. If the server browser service stops, report it as unavailable and open a new Pi session after it returns; do not use the local relay as a fallback. Standalone Pi sessions outside the server use the local relay. The relay is started on demand, not registered as an OS service or automatically started at login.
+On the Pi server, Console Chat, API workers, and new Pi CLI/TUI sessions (including in Console Terminal) use the existing profile-bound Console pairing, either local or remote. The launcher obtains the selected profile's worker capability through a private local socket before applying Nono. It does not receive the administrative API token. If the server browser service stops, report it as unavailable and open a new Pi session after it returns; do not use the local relay as a fallback. Standalone Pi sessions outside the server use the local relay. The relay is started on demand, not registered as an OS service or automatically started at login.

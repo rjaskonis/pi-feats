@@ -1,6 +1,6 @@
 import type { BrowserBroker } from "./broker.ts";
 
-export type BrowserAction = { action: string; browser?: string; tabId?: number; url?: string; ref?: string; text?: string; expression?: string; key?: string; deltaY?: number };
+export type BrowserAction = { action: string; browser?: string; tabId?: number; url?: string; ref?: string; text?: string; expression?: string; key?: string; deltaY?: number; loopbackOnly?: boolean };
 const allowed = new Set(["status", "tabs", "navigate", "snapshot", "click", "fill", "press", "scroll", "evaluate", "screenshot", "close"]);
 
 export async function browserAction(broker: Pick<BrowserBroker, "status" | "connection" | "rpc">, profile: string, input: BrowserAction) {

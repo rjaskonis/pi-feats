@@ -36,7 +36,7 @@ import { piCommand } from "../lib/pi-command.ts";
 import { registerBrowserRoutes } from "../pi-agent-browse/routes.ts";
 import { localProfileIdentitySync } from "../pi-agent-browse/local-access.ts";
 import { serverBrowserMarker, startServerBrowserAccess } from "../pi-agent-browse/server-access.ts";
-import { browserPublicOrigin } from "./browser-extension-archive.ts";
+import { browserApiOrigin, browserWebSocketOrigin } from "./browser-extension-archive.ts";
 import { PulseStore } from "../pulse/store.ts";
 import { SkillSourceStore } from "../skill-sources/store.ts";
 
@@ -500,17 +500,18 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
       apiError(reply, 401, "UNAUTHORIZED", "Bearer token is missing or invalid.");
       return false;
     };
-    let publicOrigin: URL | undefined;
-    try { if (config.publicBaseUrl) publicOrigin = browserPublicOrigin(config.publicBaseUrl); } catch { /* Download metadata explains invalid public-origin configuration. */ }
+    const browserOrigin = browserApiOrigin(config.publicBaseUrl, config.port);
+    const browserLoopback = browserOrigin?.protocol === "http:";
     const profileBinding = (profile: string) => `${profile}:${localProfileIdentitySync(options.agentDir, profile)}`;
     const browser = await registerBrowserRoutes(server, {
       profileBinding,
       // Never import shared or historical credentials without explicit profile assignment.
       file: join(options.agentDir, "browser", "profile-pairings.json"),
-      pairingDownloadUrl: publicOrigin ? new URL("/api/browser/pi-agent-browse-extension.zip", publicOrigin).href : undefined,
-      port: publicOrigin ? Number(publicOrigin.port || "443") : 443,
-      endpoint: publicOrigin ? `wss://${publicOrigin.host}/api/browser/connect` : undefined,
-      available: publicOrigin?.protocol === "https:", guard,
+      pairingDownloadUrl: browserOrigin ? new URL("/api/browser/pi-agent-browse-extension.zip", browserOrigin).href : undefined,
+      port: Number(browserOrigin?.port || (browserLoopback ? "80" : "443")),
+      endpoint: browserOrigin ? `${browserWebSocketOrigin(browserOrigin)}/api/browser/connect` : undefined,
+      loopback: browserLoopback,
+      available: !!browserOrigin, guard,
       validateProfile: profile => api.profiles.readSettings(profile),
     });
     const browserEnvironment = (profile: string) => ({ ...process.env, PI_BROWSER_ENDPOINT: `http://127.0.0.1:${config.port}`, PI_BROWSER_TOKEN: browser.workerToken(profileBinding(profile)) });
@@ -583,7 +584,7 @@ export async function startApiServer(options: ServerOptions): Promise<FastifyIns
     chat("/profile/:profile/sessions/:sessionId/chat");
     chat("/profile/:profile/sessions/:sessionId/chat/stream", true);
 
-    registerBrowserDownload(server, guard, { publicBaseUrl: config.publicBaseUrl });
+    registerBrowserDownload(server, guard, { publicBaseUrl: config.publicBaseUrl, relayOrigin: browserOrigin });
     const profileName = (request: FastifyRequest<{ Params: { profile: string } }>) => request.params.profile;
     const pulseTick = async (action: "start" | "stop" | "status") => new Promise<string>((resolveRun, reject) => {
       const pi = piCommand();

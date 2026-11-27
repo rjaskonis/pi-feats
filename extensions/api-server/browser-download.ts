@@ -19,7 +19,7 @@ class DownloadUnavailable extends Error {
 export function registerBrowserDownload(
   server: FastifyInstance,
   guard: (request: FastifyRequest, reply: FastifyReply) => boolean,
-  { source = archive, publicBaseUrl }: { source?: URL; publicBaseUrl?: string } = {},
+  { source = archive, publicBaseUrl, relayOrigin }: { source?: URL; publicBaseUrl?: string; relayOrigin?: URL } = {},
 ): void {
   let prepared: Promise<{ zip: Buffer; url: string }> | undefined;
   const prepare = () => prepared ??= (async () => {
@@ -29,9 +29,11 @@ export function registerBrowserDownload(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       throw new DownloadUnavailable(404, "BROWSER_EXTENSION_NOT_AVAILABLE", "This installation does not bundle the Pi Agent Browse extension archive.");
     }
-    if (!publicBaseUrl) return { zip: template, url: downloadPath };
+    const origin = relayOrigin ?? publicBaseUrl;
+    if (!origin) return { zip: template, url: downloadPath };
     try {
-      return { zip: cloudExtensionArchive(template, publicBaseUrl), url: new URL(downloadPath, publicBaseUrl).href };
+      const url = relayOrigin?.protocol === "http:" ? downloadPath : new URL(downloadPath, origin).href;
+      return { zip: cloudExtensionArchive(template, origin), url };
     } catch (error) {
       server.log.error({ err: error }, "Pi Agent Browse archive configuration failed");
       throw new DownloadUnavailable(503, "BROWSER_EXTENSION_CONFIGURATION_ERROR", "Check the public HTTPS address and rebuild the bundled extension archive if needed.");

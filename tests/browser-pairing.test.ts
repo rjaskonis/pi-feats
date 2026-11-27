@@ -8,6 +8,8 @@ import { browserRequest } from "../extensions/pi-agent-browse/client.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
+import { createServer } from "node:net";
+import { startServerBrowserAccess } from "../extensions/pi-agent-browse/server-access.ts";
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";
 import WebSocket from "ws";
@@ -63,6 +65,50 @@ async function connect(endpoint: string, browser: string, secret: { code: string
   socket.send(JSON.stringify({ id: settings.id, result: {} }));
   return { socket, token, next, send };
 }
+
+test("loopback Console and default CLI pair directly with the profile broker over WS", { timeout: 15_000 }, async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "pi-loopback-browser-"));
+  const server = Fastify();
+  let closeLauncher: (() => Promise<void>) | undefined;
+  t.after(async () => { await closeLauncher?.(); await server.close(); await rm(directory, { recursive: true, force: true }); });
+  const reserve = createServer().listen(0, "127.0.0.1");
+  await once(reserve, "listening");
+  const { port } = reserve.address() as { port: number };
+  const origin = `http://127.0.0.1:${port}`;
+  const endpoint = `ws://127.0.0.1:${port}/api/browser/connect`;
+  const downloadUrl = `${origin}/api/browser/pi-agent-browse-extension.zip`;
+  await server.register(websocket);
+  const broker = await registerBrowserRoutes(server, {
+    file: join(directory, "browser.json"), port, endpoint, loopback: true, available: true, pairingDownloadUrl: downloadUrl,
+    guard: (request, reply) => { if (request.headers.authorization === "Bearer admin") return true; reply.code(401).send({}); return false; },
+    validateProfile: async () => {},
+  });
+  await new Promise<void>((resolve, reject) => reserve.close(error => error ? reject(error) : resolve()));
+  await server.listen({ port, host: "127.0.0.1" });
+  closeLauncher = await startServerBrowserAccess(directory, port, async profile => broker.workerToken(profile));
+  const pairPath = "/api/browser/profiles/default/pair";
+  assert.equal((await server.inject({ method: "POST", url: pairPath })).statusCode, 401);
+  const viaConsole = await server.inject({ method: "POST", url: pairPath, headers: { authorization: "Bearer admin" } });
+  assert.equal(viaConsole.statusCode, 200);
+  const consoleBrowser = await connect(endpoint, "console-browser", { code: viaConsole.json().code }, endpoint, port);
+  consoleBrowser.socket.close();
+  await once(consoleBrowser.socket, "close");
+
+  const script = `import { handleBrowserCli } from './extensions/pi-agent-browse/cli.ts'; await handleBrowserCli(['browser', 'pair'], 'default', process.argv[1]);`;
+  const { stdout } = await promisify(execFile)(process.execPath, ["--experimental-strip-types", "--input-type=module", "-e", script, directory], {
+    env: { ...process.env, PI_PROFILE_REEXEC: "", PI_BROWSER_SERVER_MODE: "1", PI_BROWSER_ENDPOINT: "", PI_BROWSER_TOKEN: "" }, timeout: 5000,
+  });
+  assert.ok(stdout.includes(downloadUrl));
+  assert.match(stdout, /choose Local Console/);
+  const code = stdout.match(/Pairing code: ([A-Z0-9]{4}-[A-Z0-9]{4})/)![1];
+  const cliBrowser = await connect(endpoint, "cli-browser", { code }, endpoint, port);
+  assert.equal(broker.status("default").browsers.some(browser => browser.connected), true);
+  cliBrowser.socket.close();
+  await once(cliBrowser.socket, "close");
+  for (const options of [{ origin: "https://pi.example.test" }, { origin: extensionOrigin, headers: { Host: `pi.example.test:${port}` } }, { origin: extensionOrigin, localAddress: "127.0.0.2" }]) {
+    await assert.rejects(once(new WebSocket(endpoint, options), "open"), /403/);
+  }
+});
 
 test("shared local daemon pairs once and isolates simultaneous profile tabs without extra setup", { timeout: 40_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-shared-browser-"));

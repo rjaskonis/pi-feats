@@ -20,7 +20,7 @@ export function brand(root) {
   };
   const manifest = JSON.parse(read('public/manifest.json'));
   manifest.name = name;
-  manifest.version_name = `${manifest.version}-pi.4`;
+  manifest.version_name = `${manifest.version}-pi.5`;
   manifest.description = 'Lets your Pi agent work in background Chrome tabs and hand control back when needed.';
   manifest.action.default_title = `${name} · Click to let agents use this tab`;
   manifest.key = key;
@@ -44,26 +44,27 @@ export function brand(root) {
   const end = statusText.indexOf('  if (remote) return', start);
   if (start < 0 || end < 0) throw new Error('Unexpected upstream connection status code');
   write(status, statusText.slice(0, start) + `  if (state.status === "incompatible") return "Install matching Pi Agent Browse extension and relay builds from your private download source."\n  if (state.status === "unpaired" || state.status === "untrusted")\n    return "Run pi browser pair for a local relay, or generate a profile pairing code in Console for a remote server."\n` + statusText.slice(end));
-  write('src/shared/pi-relay.ts', `// Replaced in the authenticated server download; inert in local builds.\nconst endpoint = "wss://pi-agent-browse.invalid/api/browser/connect"\nexport const cloudRelay = new URL(endpoint)\nexport const cloudAvailable = cloudRelay.hostname !== "pi-agent-browse.invalid"\nexport const cloudAddress = cloudAvailable ? cloudRelay.hostname + ":" + (cloudRelay.port || "443") : ""\nexport const localAddress = "127.0.0.1:${port}"\n`);
+  write('src/shared/pi-relay.ts', `// Replaced in the authenticated server download; inert in local builds.\nconst endpoint = "wss://pi-agent-browse.invalid/api/browser/connect"\nexport const cloudRelay = new URL(endpoint)\nexport const cloudAvailable = cloudRelay.hostname !== "pi-agent-browse.invalid"\nexport const cloudAddress = cloudAvailable ? cloudRelay.hostname + ":" + (cloudRelay.port || (cloudRelay.protocol === "wss:" ? "443" : "80")) : ""\nexport const localAddress = "127.0.0.1:${port}"\n`);
   const discovery = 'src/background/agent-relay/discovery.ts';
   replace(discovery, 'import { defaultRelayPort,', 'import { cloudAddress } from "../../shared/pi-relay"\nimport { defaultRelayPort,');
   replace(discovery, 'relayAddress(stored[RELAY_ADDRESS_KEY])', 'relayAddress(stored[RELAY_ADDRESS_KEY] ?? cloudAddress)');
   const worker = 'src/background/agent-relay.ts';
   replace(worker, 'import { createRelayDiscovery, relayTarget }', 'import { cloudAddress, cloudRelay } from "../shared/pi-relay"\nimport { createRelayDiscovery, relayTarget }');
+  replace(worker, 'relay: { address: `${host === "127.0.0.1" ? "localhost" : host}:${shownPort}`, remote: host !== "127.0.0.1" },', 'relay: { address: `${host}:${shownPort}`, remote: host !== "127.0.0.1" },');
   replace(worker, 'const url = `ws://${host}:${port}/extension`', 'const address = `${host}:${port}`\n    if (address !== cloudAddress && !/^127\\.0\\.0\\.1:[0-9]{4,5}$/.test(address)) { setStatus("offline"); return }\n    const url = address === cloudAddress ? cloudRelay.href : `ws://${address}/extension`');
   // Keep the dialed port dynamic: remote addresses use HTTPS, not the local relay port.
   const handshake = 'src/background/agent-relay/handshake.ts';
   replace(handshake, 'import { defaultRelayPort,', 'import { cloudAddress } from "../../shared/pi-relay"\nimport { defaultRelayPort,');
   replace(handshake, 'port: Number(new URL(current.url).port),', 'port: Number(new URL(current.url).port || (new URL(current.url).protocol === "wss:" ? "443" : "80")),');
-  // Bind remote proofs to the full configured WSS endpoint, not just a shared port number.
+  // Bind Console proofs to the full configured endpoint, for both public WSS and loopback WS.
   const pairing = 'src/background/pairing.ts';
   replace(pairing, 'port: number, ownNonce: string, peerNonce: string)', 'port: number, ownNonce: string, peerNonce: string, endpoint = pairingEndpoint(port))');
   replace(pairing, '${pairingEndpoint(port)}|${peerNonce}', '${endpoint}|${peerNonce}');
   replace(pairing, 'export type HandshakeTranscript = { port: number;', 'export type HandshakeTranscript = { endpoint?: string; port: number;');
   replace(pairing, '${pairingEndpoint(transcript.port)}', '${transcript.endpoint ?? pairingEndpoint(transcript.port)}');
-  replace(handshake, 'pending.port, relayNonce, pending.nonce)', 'pending.port, relayNonce, pending.nonce, new URL(current.url).protocol === "wss:" ? current.url : undefined)');
-  replace(handshake, 'pending.port, pending.nonce, relayNonce)', 'pending.port, pending.nonce, relayNonce, new URL(current.url).protocol === "wss:" ? current.url : undefined)');
-  replace(handshake, 'port: pending.port,', 'port: pending.port,\n          endpoint: new URL(current.url).protocol === "wss:" ? current.url : undefined,');
+  replace(handshake, 'pending.port, relayNonce, pending.nonce)', 'pending.port, relayNonce, pending.nonce, new URL(current.url).pathname === "/api/browser/connect" ? current.url : undefined)');
+  replace(handshake, 'pending.port, pending.nonce, relayNonce)', 'pending.port, pending.nonce, relayNonce, new URL(current.url).pathname === "/api/browser/connect" ? current.url : undefined)');
+  replace(handshake, 'port: pending.port,', 'port: pending.port,\n          endpoint: new URL(current.url).pathname === "/api/browser/connect" ? current.url : undefined,');
   replace(handshake, 'const address = relayAddress(addressInput)', `const address = relayAddress(addressInput)\n    if (addressInput !== cloudAddress && !/^127\\.0\\.0\\.1:[0-9]{4,5}$/.test(addressInput)) return { status: "invalid-address" }`);
   replace(handshake, 'const stored = await chrome.storage.local.get([PAIRING_KEY, TOKENS_KEY, SPENT_KEY, CODE_PORT_KEY])', 'const stored = await chrome.storage.local.get([PAIRING_KEY, TOKENS_KEY, SPENT_KEY, CODE_PORT_KEY, "piPairingAddress"])');
   replace(handshake, 'usable(entered, !automatic || port === codePort(stored[CODE_PORT_KEY]))', 'usable(entered, (stored.piPairingAddress === address || (stored.piPairingAddress === undefined && local)) && (!automatic || port === codePort(stored[CODE_PORT_KEY])))');
@@ -102,7 +103,7 @@ export function brand(root) {
   const fieldStart = formText.indexOf('          <Field.Label>Relay address');
   const fieldEnd = formText.indexOf('        </Field>', fieldStart);
   if (fieldStart < 0 || fieldEnd < 0) throw new Error('Unexpected upstream pairing form');
-  write(form, formText.slice(0, fieldStart) + `          <label for="relay-mode">Connect to</label>\n          <select id="relay-mode" value={cloudAvailable && address() === cloudAddress ? "remote" : "local"} disabled={pending()} onChange={(event) => {\n            setEdited(true)\n            setAddress(event.currentTarget.value === "remote" ? cloudAddress : localAddress)\n            setCode("")\n            setResult(undefined)\n          }}>\n            <Show when={cloudAvailable}><option value="remote">Remote server</option></Show>\n            <option value="local">Local relay</option>\n          </select>\n          <Show when={!cloudAvailable || address() !== cloudAddress}><label for="local-address">Local relay address</label><input id="local-address" value={address()} disabled={pending()} onInput={(event) => { setAddress(event.currentTarget.value); setEdited(true) }} placeholder={localAddress} /></Show>\n          <p class="hint">{address() === cloudAddress && cloudAvailable ? cloudRelay.host + " — Generate a pairing code in Console → Pi Agent Browse. No local relay required." : "Run pi browser pair on this computer. Use the address and code shown by the CLI."}</p>\n` + formText.slice(fieldEnd));
+  write(form, formText.slice(0, fieldStart) + `          <label for="relay-mode">Connect to</label>\n          <select id="relay-mode" value={cloudAvailable && address() === cloudAddress ? "remote" : "local"} disabled={pending()} onChange={(event) => {\n            setEdited(true)\n            setAddress(event.currentTarget.value === "remote" ? cloudAddress : localAddress)\n            setCode("")\n            setResult(undefined)\n          }}>\n            <Show when={cloudAvailable}><option value="remote">{cloudRelay.protocol === "ws:" ? "Local Console" : "Remote server"}</option></Show>\n            <option value="local">Local relay</option>\n          </select>\n          <Show when={!cloudAvailable || address() !== cloudAddress}><label for="local-address">Local relay address</label><input id="local-address" value={address()} disabled={pending()} onInput={(event) => { setAddress(event.currentTarget.value); setEdited(true) }} placeholder={localAddress} /></Show>\n          <p class="hint">{address() === cloudAddress && cloudAvailable ? cloudRelay.host + " — Generate a pairing code in Console → Pi Agent Browse. No local relay required." : "Run pi browser pair on this computer. Use the address and code shown by the CLI."}</p>\n` + formText.slice(fieldEnd));
   replace('src/agent-relay/protocol.ts', 'defaultRelayPort = 19988', `defaultRelayPort = ${port}`);
   replace('src/agent-relay/protocol.ts', '[19990, 19991, 19992, 19993, 19994, 19995, 19996, 19997] as const', '[] as const');
   const origins = 'rust/crates/browse-relay/src/origins.rs';

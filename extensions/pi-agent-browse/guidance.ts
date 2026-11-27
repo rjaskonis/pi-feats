@@ -1,6 +1,6 @@
 const extensionId = "heidjicdbehhgidkhaofophkickmhijo";
 
-type Status = { available?: boolean; pairingPending?: boolean; browsers: { connected: boolean }[] };
+type Status = { available?: boolean; pairingPending?: boolean; transport?: "loopback" | "remote"; browsers: { connected: boolean }[] };
 
 // Machine-readable setup hints prevent a saved credential from being mistaken for a live connection.
 export function browserStatusGuidance(status: Status, mode: "local" | "console", relayRunning = true) {
@@ -25,7 +25,9 @@ export function browserStatusGuidance(status: Status, mode: "local" | "console",
             ? "Pair Chrome once with the shared relay using pi browser pair from the default local terminal. All local Pi Profiles can use it once connected."
           : status.available === false
             ? "Remote pairing is unavailable. Explain that the server administrator must configure HTTPS/WSS; do not generate a local code in an API worker."
-            : "If the user asks to connect Chrome, call pi_browser with action pair. Use the returned ZIP download link, server address, code and expiry. The browser is available only to this Pi Profile. Use Remote server in the extension; do not generate a loopback code.",
+            : status.transport === "loopback"
+              ? "Chrome must be on the same computer as the Pi API. Call pi_browser with action pair and provide the ZIP link, code, and expiry. In the extension choose Local Console. No HTTPS or standalone relay is needed."
+              : "If the user asks to connect Chrome, call pi_browser with action pair. Use the returned ZIP download link, server address, code and expiry. The browser is available only to this Pi Profile. Use Remote server in the extension; do not generate a loopback code.",
     },
   };
 }

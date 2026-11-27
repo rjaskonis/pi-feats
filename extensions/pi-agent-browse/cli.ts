@@ -55,7 +55,12 @@ export async function handleBrowserCli(args: string[], profile: string, root: st
   if (profileSession && profile !== process.env.PI_ACTIVE_PROFILE) throw new Error("Cannot inspect another browser profile from this session.");
   const environment = { ...process.env, ...await serverBrowserEnvironment(root, profile, process.env) };
   const remote = !!(environment.PI_BROWSER_ENDPOINT || environment.PI_BROWSER_TOKEN || expectsServerBrowser(environment));
-  if (remote && action !== "status") throw new Error("Use the Console to manage server browser pairing. This server does not use the local relay.");
+  if (remote && action === "pair" && profile === "default" && !profileSession && environment.PI_BROWSER_ENDPOINT && environment.PI_BROWSER_TOKEN) {
+    const result = await executeBrowserAction(root, { action: "pair", loopbackOnly: true }, undefined, environment);
+    console.log(`Pairing code: ${result.code}\nExpires: ${new Date(result.expiresAt).toISOString()}\nExtension ZIP: ${result.downloadUrl}\nOpen Pi Agent Browse Settings, choose Local Console (${result.address}), paste the code and click Connect.`);
+    return;
+  }
+  if (remote && action !== "status") throw new Error("Use the Console to manage server browser pairing. This server does not use the standalone local relay.");
   if (profile !== "default" || profileSession || remote) {
     if (action !== "status") throw new Error("The browser relay is shared. Run pi browser pair once from a terminal outside the named profile.");
     const directory = profile === "default" ? root : join(root, "profiles", profile);

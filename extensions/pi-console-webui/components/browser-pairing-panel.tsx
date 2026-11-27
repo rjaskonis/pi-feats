@@ -5,7 +5,7 @@ import { Check, CircleCheck, CircleMinus, Copy, KeyRound, LoaderCircle, Monitor,
 import { Button } from "@/components/ui/button";
 import { Card, CardTitle } from "@/components/ui/card";
 
-type BrowserStatus = { available: boolean; pairingPending: boolean; browsers: { id: string; connected: boolean; tabs: number }[] };
+type BrowserStatus = { available: boolean; transport?: "loopback" | "remote"; pairingPending: boolean; browsers: { id: string; connected: boolean; tabs: number }[] };
 async function request(path: string, method = "GET", signal?: AbortSignal) {
   const response = await fetch(`/api/pi/browser/${path}`, { method, cache: "no-store", signal });
   const data = await response.json();
@@ -34,7 +34,7 @@ function CopyPairingCode({ code }: { code: string }) {
     <span role="status" className="ml-2 text-sm">{notice}</span>
   </>;
 }
-function ProfileBrowserPairing({ profile }: { profile: string }) {
+function ProfileBrowserPairing({ profile, localConsole }: { profile: string; localConsole: boolean }) {
   const [status, setStatus] = useState<BrowserStatus>();
   const [code, setCode] = useState<{ code: string; expiresAt: number }>();
   const [now, setNow] = useState(Date.now());
@@ -64,11 +64,12 @@ function ProfileBrowserPairing({ profile }: { profile: string }) {
     finally { setBusy(undefined); }
   };
   const canRevoke = !!status && (status.browsers.length > 0 || status.pairingPending);
+  const loopback = status?.transport === "loopback";
   return <div className="space-y-4 rounded-lg border border-zinc-200 p-4">
     {error && <p role="alert" className="rounded-md bg-red-50 p-3 text-sm text-red-800">{error}</p>}
-    {!status ? <p role="status" className="text-sm text-zinc-500">Checking remote pairing…</p> : !status.available ?
-      <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">Remote pairing is unavailable. Configure the Pi API public HTTPS origin and proxy WebSocket upgrades for /api/browser/connect. Local pairing works without a public address.</p> : <>
-        <p className="text-sm text-zinc-600">In the Chrome extension, choose <strong>Remote server</strong>, paste the code, then click <strong>Connect</strong>.</p>
+    {!status ? <p role="status" className="text-sm text-zinc-500">Checking browser pairing…</p> : !status.available || (loopback && !localConsole) ?
+      <p className="rounded-md bg-amber-50 p-3 text-sm text-amber-900">{localConsole ? "Browser pairing is unavailable. Check the Pi API configuration." : "For pairing from another computer, configure the Pi API public HTTPS origin and proxy WebSocket upgrades for /api/browser/connect."}</p> : <>
+        <p className="text-sm text-zinc-600">In the Chrome extension downloaded from this Console, choose <strong>{loopback ? "Local Console" : "Remote server"}</strong>, paste the code, then click <strong>Connect</strong>.</p>
         <Button type="button" disabled={!!busy} className="inline-flex items-center gap-2" onClick={() => void act("pair")}>
           {busy === "pair" ? <LoaderCircle size={16} className="animate-spin" aria-hidden="true"/> : <KeyRound size={16} aria-hidden="true"/>}
           {busy === "pair" ? "Generating code…" : "Generate pairing code"}
@@ -89,14 +90,14 @@ function ProfileBrowserPairing({ profile }: { profile: string }) {
       <p className="text-sm text-zinc-600">Only people using this Pi Profile can operate its browser tabs.</p>
     </section>}
     {canRevoke && <div className="border-t border-zinc-200 pt-3">
-      <button type="button" disabled={!!busy} className="inline-flex items-center gap-2 rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-600 disabled:opacity-50" onClick={() => { if (window.confirm(`Revoke all remote browsers and pending codes for ${profile}?`)) void act("unpair"); }}>
+      <button type="button" disabled={!!busy} className="inline-flex items-center gap-2 rounded-md border border-red-200 px-3 py-2 text-sm font-medium text-red-700 hover:bg-red-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-red-600 disabled:opacity-50" onClick={() => { if (window.confirm(`Revoke all paired browsers and pending codes for ${profile}?`)) void act("unpair"); }}>
         {busy === "unpair" ? <LoaderCircle size={16} className="animate-spin" aria-hidden="true"/> : <ShieldOff size={16} aria-hidden="true"/>}
         {busy === "unpair" ? "Revoking access…" : "Revoke all browser access"}
       </button>
     </div>}
   </div>;
 }
-function RemoteBrowserPairing() {
+function ConsoleBrowserPairing({ localConsole }: { localConsole: boolean }) {
   const [profiles, setProfiles] = useState<{ name: string }[]>([]);
   const [profile, setProfile] = useState("");
   const [error, setError] = useState("");
@@ -120,14 +121,16 @@ function RemoteBrowserPairing() {
         {profiles.map(item => <option key={item.name} value={item.name}>{item.name}</option>)}
       </select>
     </label>
-    {profile && <ProfileBrowserPairing key={profile} profile={profile}/>}
+    {profile && <ProfileBrowserPairing key={profile} profile={profile} localConsole={localConsole}/>}
   </div>;
 }
 export function BrowserPairingPanel() {
+  const [localConsole, setLocalConsole] = useState(false);
+  useEffect(() => setLocalConsole(["127.0.0.1", "localhost", "[::1]"].includes(window.location.hostname)), []);
   return <Card className="space-y-5">
     <CardTitle>Connect Chrome</CardTitle>
     <section className="space-y-2">
-      <h3 className="font-medium">Pi and Chrome on this computer</h3>
+      <h3 className="font-medium">Standalone Pi (no Console)</h3>
       <p className="text-sm text-zinc-500">Install Pi on the Chrome computer with <code>npm install -g @earendil-works/pi-coding-agent</code>, then <code>pi install npm:pi-feats</code>. The relay uses Pi&apos;s existing Node runtime; no separate native binary, sudo, or incoming public port is required. Linux is validated; macOS/Windows platform smoke tests are pending.</p>
       <ol className="list-decimal space-y-1 pl-5 text-sm">
         <li>Install the extension using the ZIP above.</li>
@@ -137,9 +140,9 @@ export function BrowserPairingPanel() {
       <p className="text-sm">Once connected, Chrome is ready to use from any local Pi Profile. No profile selection or extra setup is needed. Each profile can operate only the tabs it opens.</p>
     </section>
     <section className="space-y-2 border-t pt-4">
-      <h3 className="font-medium">Pi on another server</h3>
+      <h3 className="font-medium">{localConsole ? "Pair with this Console" : "Pi on another server"}</h3>
       <p className="text-sm">Pair Chrome with one Pi Profile. Ask the agent in that profile for a code, or generate one here.</p>
-      <RemoteBrowserPairing/>
+      <ConsoleBrowserPairing localConsole={localConsole}/>
     </section>
   </Card>;
 }

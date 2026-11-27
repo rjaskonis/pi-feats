@@ -12,9 +12,28 @@ export function browserPublicOrigin(publicBaseUrl: string): URL {
   return url;
 }
 
-export function cloudExtensionArchive(zip: Uint8Array, publicBaseUrl: string): Buffer {
-  const url = browserPublicOrigin(publicBaseUrl);
-  const origin = `wss://${url.host}`;
+export function browserApiOrigin(publicBaseUrl: string | undefined, apiPort: number): URL | undefined {
+  if (publicBaseUrl) {
+    try { return browserPublicOrigin(publicBaseUrl); } catch { /* Accept an explicitly local Console address below. */ }
+    const url = URL.parse(publicBaseUrl);
+    if (!url || !["http:", "https:"].includes(url.protocol) || !["localhost", "127.0.0.1"].includes(url.hostname) ||
+        url.username || url.password || url.search || url.hash || url.pathname !== "/") return undefined;
+  }
+  if (!Number.isInteger(apiPort) || apiPort < 1 || apiPort > 65535) return undefined;
+  // The Console proxies HTTP downloads, but Chrome connects directly to the Pi API.
+  return new URL(`http://127.0.0.1:${apiPort}`);
+}
+
+export function browserWebSocketOrigin(url: URL): string {
+  return `${url.protocol === "https:" ? "wss:" : "ws:"}//${url.host}`;
+}
+
+export function cloudExtensionArchive(zip: Uint8Array, publicBaseUrl: string | URL): Buffer {
+  const url = publicBaseUrl instanceof URL && publicBaseUrl.protocol === "http:" && publicBaseUrl.hostname === "127.0.0.1"
+    ? browserApiOrigin(publicBaseUrl.href, Number(publicBaseUrl.port || "80"))!
+    : browserPublicOrigin(String(publicBaseUrl));
+  if (!url) throw new Error("Invalid loopback browser origin.");
+  const origin = browserWebSocketOrigin(url);
   const endpoint = `${origin}/api/browser/connect`;
   const files = unzipSync(zip);
   let patched = 0;

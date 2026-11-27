@@ -9,6 +9,7 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
   validateProfile(profile: string): Promise<unknown>;
   local?: boolean;
   pairingDownloadUrl?: string;
+  loopback?: boolean;
   profileBinding?(profile: string): string;
   sharedLocal?: {
     workerProfile(token: string): Promise<string | undefined>;
@@ -18,10 +19,15 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
   await broker.load();
   server.addHook("preClose", async () => broker.close());
   const attempts = new Map<string, { count: number; until: number }>();
+  const transport = options.available && !options.local ? (options.loopback ? "loopback" : "remote") : undefined;
+  const loopbackAuthority = options.loopback && options.endpoint ? new URL(options.endpoint).host : undefined;
   server.get(options.local ? "/extension" : "/api/browser/connect", {
     websocket: true,
     preValidation: async (request, reply) => {
       if (!options.available) return reply.code(503).send({ error: "Configure a public HTTPS origin before enabling remote browser pairing" });
+      if (options.loopback && (request.headers.host !== loopbackAuthority || !["127.0.0.1", "::ffff:127.0.0.1"].includes(request.raw.socket.remoteAddress ?? ""))) {
+        return reply.code(403).send({ error: "Local Console browser connections must use the loopback API address" });
+      }
       if (request.headers.origin !== extensionOrigin) return reply.code(403).send({ error: "Extension origin refused" });
       const now = Date.now();
       for (const [key, value] of attempts) if (value.until <= now) attempts.delete(key);
@@ -43,7 +49,7 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
         const profile = request.params.profile;
         await options.validateProfile(profile);
         const binding = options.profileBinding ? options.profileBinding(profile) : profile;
-        if (action === "status") return { available: options.available, ...broker.status(binding) };
+        if (action === "status") return { available: options.available, transport, ...broker.status(binding) };
         if (action === "unpair") return broker.revoke(binding);
         if (!options.available) return reply.code(503).send({ error: "Remote pairing requires a public HTTPS origin" });
         if (options.profileBinding) {
@@ -67,11 +73,12 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
       if (options.profileBinding && options.profileBinding(profile) !== binding) return reply.code(401).send({ error: "Invalid browser worker capability" });
       if (!options.sharedLocal && broker.workerTokens.get(binding) !== token) return reply.code(401).send({ error: "Invalid browser worker capability" });
       if (request.body.action === "pair") {
-        if (options.local || options.sharedLocal || !options.available || !options.endpoint || !options.pairingDownloadUrl) return reply.code(503).send({ error: "Profile pairing requires an available HTTPS server. For local pairing, follow the local setup instructions." });
+        if (request.body.loopbackOnly && !options.loopback) return reply.code(403).send({ error: "Use the Console to manage remote browser pairing." });
+        if (!transport || !options.endpoint || !options.pairingDownloadUrl) return reply.code(503).send({ error: "Profile pairing requires an available Console browser connection." });
         const address = new URL(options.endpoint).host;
         if (options.profileBinding) await broker.revokePreviousProfileBindings(profile, binding);
         if (broker.workerTokens.get(binding) !== token || (options.profileBinding && options.profileBinding(profile) !== binding)) return reply.code(401).send({ error: "Invalid browser worker capability" });
-        return { result: { ...await broker.pair(binding), mode: "remote", address, downloadUrl: options.pairingDownloadUrl, extensionSettingsUrl: `${extensionOrigin}/settings.html` } };
+        return { result: { ...await broker.pair(binding), mode: transport, address, downloadUrl: options.pairingDownloadUrl, extensionSettingsUrl: `${extensionOrigin}/settings.html` } };
       }
       const shared = options.sharedLocal;
       const actionResult = await browserAction(shared ? {
@@ -83,7 +90,7 @@ export async function registerBrowserRoutes(server: FastifyInstance, options: {
         connection: (_name, browser) => broker.connection(binding, browser),
         rpc: broker.rpc.bind(broker),
       }, profile, request.body);
-      const result = request.body.action === "status" ? { ...(actionResult as object), available: options.available } : actionResult;
+      const result = request.body.action === "status" ? { ...(actionResult as object), available: options.available, transport } : actionResult;
       if (JSON.stringify(result)?.length > 8 * 1024 * 1024) return reply.code(413).send({ error: "Browser result too large; return a bounded slice" });
       return { result };
     } catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : "Browser command failed" }); }

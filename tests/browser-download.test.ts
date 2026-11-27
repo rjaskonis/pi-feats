@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { pathToFileURL } from "node:url";
 import Fastify from "fastify";
 import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
-import { cloudExtensionArchive } from "../extensions/api-server/browser-extension-archive.ts";
+import { browserApiOrigin, cloudExtensionArchive } from "../extensions/api-server/browser-extension-archive.ts";
 import { registerBrowserDownload } from "../extensions/api-server/browser-download.ts";
 
 test("only the ZIP download is public; metadata requires authorization", async (t) => {
@@ -51,6 +51,27 @@ test("the shipped archive downloads without public URL configuration and support
   assert.deepEqual((await app.inject("/api/browser/download-status")).json(), { available: true, url });
   const cloud = unzipSync(cloudExtensionArchive(response.rawPayload, "https://pi.example.test"));
   assert.match(strFromU8(cloud["manifest.json"]), /wss:\/\/pi\.example\.test/);
+});
+
+test("local Console downloads embed the direct loopback API WebSocket", async (t) => {
+  const app = Fastify();
+  t.after(() => app.close());
+  const loopback = browserApiOrigin("http://localhost:3030", 8767);
+  assert.equal(loopback?.origin, "http://127.0.0.1:8767");
+  assert.equal(browserApiOrigin(undefined, 8767)?.origin, loopback?.origin);
+  assert.equal(browserApiOrigin("http://127.0.0.1:3030", 8767)?.origin, loopback?.origin);
+  assert.equal(browserApiOrigin("http://pi.example.test:3030", 8767), undefined);
+  assert.equal(browserApiOrigin("https://pi.example.test:8443", 8767)?.origin, "https://pi.example.test:8443");
+  registerBrowserDownload(app, () => true, { relayOrigin: loopback });
+  const url = "/api/browser/pi-agent-browse-extension.zip";
+  const response = await app.inject(url);
+  assert.equal(response.statusCode, 200);
+  const files = unzipSync(response.rawPayload);
+  const scripts = Object.entries(files).filter(([name]) => name.endsWith(".js")).map(([, data]) => strFromU8(data)).join("\n");
+  assert.match(scripts, /ws:\/\/127\.0\.0\.1:8767\/api\/browser\/connect/);
+  assert.match(scripts, /Local Console/);
+  assert.match(strFromU8(files["manifest.json"]), /ws:\/\/127\.0\.0\.1:8767/);
+  assert.deepEqual((await app.inject("/api/browser/download-status")).json(), { available: true, url });
 });
 
 test("a configured API download embeds only the public secure relay address", () => {

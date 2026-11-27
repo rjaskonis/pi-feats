@@ -29,20 +29,20 @@ Do not assume the user knows where settings or the pairing form are. If they say
 
 After Chrome connects, verify the connection and continue the user's task. Do not request another pairing when switching local profiles. Recheck status once after a short bounded wait if execution can continue; otherwise check immediately when the user responds. Never end with only "tell me when connected" without verification. Do not poll indefinitely, regenerate codes while waiting, repeat installation instructions, or open an unrelated task. If still disconnected, explain the one next check: exact address from this code generation, correct Local relay mode, or the error shown in the extension. Ask for that error or a screenshot rather than cycling through generic advice. Do not claim there is a **Reconnect** button unless it is actually shown.
 
-### Console / server connection
+### Console connection (same computer or remote)
 
 When `setup.mode` is `console`, local shell commands run on the server, NOT the user's Chrome computer. Never run `pi browser pair` there to supply a supposed local code. If the intended browser is unpaired or the user wants to add another computer, call `pi_browser` with `action: "pair"`. The code belongs only to this session's profile; never pass a profile or ask for an admin credential. If a paired browser is offline, check Chrome and the extension connection first; do not regenerate automatically.
 
 Use the returned values, without guessing:
 
 1. Provide `downloadUrl` as a clickable ZIP download link. Unless already installed, tell the user to extract to a stable folder and open `chrome://extensions` → **Developer mode** → **Load unpacked**, selecting the folder containing `manifest.json`.
-2. Open the returned extension settings URL in that Chrome, or use **Details** → **Extension options**. Under **Connect Chrome**, choose **Remote server**.
+2. Open the returned extension settings URL in that Chrome, or use **Details** → **Extension options**. Under **Connect Chrome**, choose **Local Console** if the pairing result is `mode: loopback` and Chrome runs on the Pi API host. Otherwise use **Remote server** for `mode: remote`. Never give a loopback ZIP or address to Chrome on a different machine.
 3. Give the returned server `address`, one-time `code`, and expiry. Tell the user to paste the code and click **Connect**. If installation takes longer than the expiry, generate a replacement only when needed.
 4. Recheck `status` after the user connects (at most one short bounded check before they reply). Confirm only when connected and then continue the original task.
 
 The administrative Console profile picker is an alternative, not a requirement. If `setup.nextStep` is `check_server_browser_service`, report the service outage; do not generate a local code.
 
-If `setup.nextStep` is `administrator_setup_required`, explain plainly that the server's secure browser connection must be configured by its administrator. The ZIP alone is not sufficient. Do not switch modes, install a local relay, guess a public URL, or attempt remote configuration. The server requires a public HTTPS origin and WSS routing.
+If `setup.nextStep` is `administrator_setup_required`, explain plainly that the server's secure browser connection must be configured by its administrator. The ZIP alone is not sufficient. Do not switch modes, install a local relay, guess a public URL, or attempt remote configuration. Access from another machine requires a public HTTPS origin and WSS routing. Same-machine Console pairing uses loopback directly and does not need either.
 
 Only the ZIP download is public. Pairing management is authenticated. Never put API credentials in the extension or ask the user to paste administrative API tokens. Do not perform remote installation, configuration, restarts or tests without explicit authorization. Do not present a server's loopback endpoint or filesystem paths as the user's local computer.
 
